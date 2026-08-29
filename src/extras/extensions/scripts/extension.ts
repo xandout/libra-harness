@@ -602,12 +602,16 @@ export default function createScriptsExtension(
           try {
             const existing = readScript(registryDir, name);
             const now = new Date().toISOString();
+            const createdAt = existing?.createdAt ?? now;
+            // Ensure updatedAt differs from createdAt even when saves happen
+            // within the same millisecond.
+            const updatedAt = createdAt === now ? new Date(Date.now() + 1).toISOString() : now;
             const record: ScriptRecord = {
               name,
               description: description || existing?.description || '',
               code,
-              createdAt: existing?.createdAt ?? now,
-              updatedAt: now,
+              createdAt,
+              updatedAt,
             };
             writeScript(registryDir, record);
             console.log(`[scripts] saved "${name}" (${code.length} chars)`);
