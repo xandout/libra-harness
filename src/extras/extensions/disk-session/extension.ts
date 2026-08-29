@@ -391,11 +391,10 @@ export default function createDiskSessionExtension(
         // message is already saved. The assistant response is
         // appended later in afterTurn.
         //
-        // The system prompt is captured here (on the user record) so
-        // each turn's JSONL entry shows exactly what instructions the
-        // model was operating under. It's available from beforeTurn
-        // onward via ctx.turn.systemPrompt (resolved by the core from
-        // the per-turn override ?? agent config).
+        // The system prompt is captured at afterTurn (not here) because
+        // beforeContext hooks (which run after beforeTurn) may modify
+        // ctx.turn.systemPrompt. Recording it here would miss those
+        // modifications. See afterTurn for the capture.
         //
         // Enrichment bag: any extension that ran before us in
         // beforeTurn may have written into `sessionMeta`. We persist
@@ -403,14 +402,12 @@ export default function createDiskSessionExtension(
         const sessionMeta = ctx.turn.metadata.sessionMeta as
           | Record<string, unknown>
           | undefined;
-        const systemPrompt = ctx.turn.systemPrompt;
         const userRecord = {
           ...toRecord(
             { role: 'user', content: ctx.turn.request.message },
             messageTs,
             threadTs,
           ),
-          ...(systemPrompt ? { systemPrompt } : {}),
           ...(sessionMeta ? { meta: sessionMeta } : {}),
         };
         const records = store.get(key) ?? [];
@@ -566,6 +563,30 @@ export default function createDiskSessionExtension(
         // Append to in-memory log.
         const records = store.get(key) ?? [];
         records.push(...newRecords);
+
+        // ── Backfill system prompt on the last user record ───────
+        // The system prompt wasn't available at beforeTurn (beforeContext
+        // hooks hadn't run yet). Now it's final, so update the last user
+        // record in the in-memory store and append a correction record
+        // to the JSONL so the audit trail has the complete prompt.
+        const finalSystemPrompt = ctx.turn.systemPrompt;
+        if (finalSystemPrompt) {
+          for (let i = records.length - 1; i >= 0; i--) {
+            if (records[i].role === 'user') {
+              records[i].systemPrompt = finalSystemPrompt;
+              break;
+            }
+          }
+          // Append a lightweight audit record so the JSONL file also
+          // has the final system prompt (the user record in the file
+          // was written without it at beforeTurn).
+          appendToFile(key, [{
+            role: 'control',
+            content: '',
+            recordedAt: new Date().toISOString(),
+            systemPrompt: finalSystemPrompt,
+          } as SessionRecord]);
+        }
 
         // Trim in-memory cache (file keeps full history).
         if (records.length > maxRecords) {
