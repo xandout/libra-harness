@@ -1,6 +1,6 @@
 {
   "name": "libra-harness",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "A small, composable, hookable agent harness. Library-first.",
   "type": "module",
   "main": "./dist/index.js",
