@@ -11,6 +11,8 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # Skip commits made by the bot (version bumps) to avoid release loops.
+    if: github.event.head_commit.author.name != 'github-actions[bot]'
     steps:
       - uses: actions/checkout@v4
         with:
