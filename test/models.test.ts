@@ -4,7 +4,7 @@ import {
   messageContentToText,
   type Message,
   type MessageContent,
-} from 'libra-harness';
+} from '@xandout/libra-harness';
 import {
   configuredProviders,
   createRoutingModel,
@@ -16,8 +16,8 @@ import {
   type Model,
   type ModelRequest,
   type ModelResponse,
-} from 'libra-harness/extras/models';
-import { AISdkModel } from 'libra-harness';
+} from '@xandout/libra-harness/extras/models';
+import { AISdkModel } from '@xandout/libra-harness';
 
 // ── Helpers ─────────────────────────────────────────────────────────
 

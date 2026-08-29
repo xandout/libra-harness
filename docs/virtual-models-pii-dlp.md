@@ -323,7 +323,7 @@ The PII swap extension can log every redaction and restoration event. You have a
 ## Extension sketch
 
 ```typescript
-import type { Extension } from 'libra-harness';
+import type { Extension } from '@xandout/libra-harness';
 
 interface PiiSwapConfig {
   // Detect PII in text, return list of (value, type, placeholder) tuples

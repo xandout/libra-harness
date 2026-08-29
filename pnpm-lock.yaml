@@ -63,7 +63,7 @@ importers:
       '@modelcontextprotocol/client':
         specifier: ^2.0.0
         version: 2.0.0
-      libra-harness:
+      '@xandout/libra-harness':
         specifier: link:../..
         version: link:../..
 
@@ -72,7 +72,7 @@ importers:
       '@modelcontextprotocol/client':
         specifier: ^2.0.0
         version: 2.0.0
-      libra-harness:
+      '@xandout/libra-harness':
         specifier: link:../..
         version: link:../..
 
@@ -87,7 +87,7 @@ importers:
 
   examples/openai-compatible-provider:
     dependencies:
-      libra-harness:
+      '@xandout/libra-harness':
         specifier: link:../..
         version: link:../..
     devDependencies:
@@ -103,7 +103,7 @@ importers:
 
   examples/pii-dlp-provider:
     dependencies:
-      libra-harness:
+      '@xandout/libra-harness':
         specifier: workspace:*
         version: link:../..
     devDependencies:
@@ -137,12 +137,12 @@ importers:
       '@slack/web-api':
         specifier: ^8.0.0
         version: 8.0.0
+      '@xandout/libra-harness':
+        specifier: link:../..
+        version: link:../..
       ai:
         specifier: ^7.0.0
         version: 7.0.58(zod@4.4.3)
-      libra-harness:
-        specifier: link:../..
-        version: link:../..
       quickjs-emscripten:
         specifier: ^0.32.0
         version: 0.32.0
@@ -159,25 +159,25 @@ importers:
 
   examples/streaming:
     dependencies:
-      libra-harness:
+      '@xandout/libra-harness':
         specifier: link:../..
         version: link:../..
 
   examples/structured-output:
     dependencies:
-      libra-harness:
+      '@xandout/libra-harness':
         specifier: link:../..
         version: link:../..
 
   examples/subagents:
     dependencies:
-      libra-harness:
+      '@xandout/libra-harness':
         specifier: link:../..
         version: link:../..
 
   examples/subagents-concurrent:
     dependencies:
-      libra-harness:
+      '@xandout/libra-harness':
         specifier: link:../..
         version: link:../..
 

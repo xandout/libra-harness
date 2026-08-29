@@ -1,24 +1,24 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { Agent } from 'libra-harness';
-import type { Extension } from 'libra-harness';
-import { resolveModel } from 'libra-harness/extras/models';
+import { Agent } from '@xandout/libra-harness';
+import type { Extension } from '@xandout/libra-harness';
+import { resolveModel } from '@xandout/libra-harness/extras/models';
 import { App, LogLevel } from '@slack/bolt';
 import { WebClient } from '@slack/web-api';
-import { createLoggerExtension } from 'libra-harness/extras/logger';
-import { createStreamingExtension } from 'libra-harness/extras/streaming';
-import { createMcpExtension } from 'libra-harness/extras/mcp';
-import { createSkillExtension } from 'libra-harness/extras/skills';
-import { createAutoSteerExtension } from 'libra-harness/extras/auto-steer';
+import { createLoggerExtension } from '@xandout/libra-harness/extras/logger';
+import { createStreamingExtension } from '@xandout/libra-harness/extras/streaming';
+import { createMcpExtension } from '@xandout/libra-harness/extras/mcp';
+import { createSkillExtension } from '@xandout/libra-harness/extras/skills';
+import { createAutoSteerExtension } from '@xandout/libra-harness/extras/auto-steer';
 import { createSlackExtension, extractTextFromBlocks, swapReaction, removeReaction, postMessage, addReaction, postAgentReply } from './slack/index.ts';
-import { createDiskSessionExtension } from 'libra-harness/extras/disk-session';
-import type { SessionIdentity, SessionRecord } from 'libra-harness/extras/disk-session';
-import { createKeywordExtractorExtension, getQueryAnalyzer } from 'libra-harness/extras/keyword-extractor';
-import { createFilesystemExtension } from 'libra-harness/extras/filesystem';
-import { createScriptsExtension } from 'libra-harness/extras/scripts';
-import { createOtelExtension, JsonlSpanExporter } from 'libra-harness/extras/otel';
-import { createToolBufferExtension } from 'libra-harness/extras/tool-buffer';
-import { createTokenStatsExtension } from 'libra-harness/extras/token-stats';
+import { createDiskSessionExtension } from '@xandout/libra-harness/extras/disk-session';
+import type { SessionIdentity, SessionRecord } from '@xandout/libra-harness/extras/disk-session';
+import { createKeywordExtractorExtension, getQueryAnalyzer } from '@xandout/libra-harness/extras/keyword-extractor';
+import { createFilesystemExtension } from '@xandout/libra-harness/extras/filesystem';
+import { createScriptsExtension } from '@xandout/libra-harness/extras/scripts';
+import { createOtelExtension, JsonlSpanExporter } from '@xandout/libra-harness/extras/otel';
+import { createToolBufferExtension } from '@xandout/libra-harness/extras/tool-buffer';
+import { createTokenStatsExtension } from '@xandout/libra-harness/extras/token-stats';
 
 // ── Slack metadata type ─────────────────────────────────────────────
 // Bot-specific: used by the slack-context beforeContext hook to inject

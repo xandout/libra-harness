@@ -1,4 +1,4 @@
-import type { Extension } from 'libra-harness';
+import type { Extension } from '@xandout/libra-harness';
 
 /**
  * A detected PII entity — a real value and its type.

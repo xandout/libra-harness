@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, unlinkSync, rmdirSync } from 'node:fs';
 import { join, resolve, relative, dirname, extname } from 'node:path';
-import type { Extension } from 'libra-harness';
+import type { Extension } from '@xandout/libra-harness';
 
 /** A named sandboxed directory. */
 export interface SandboxDir {

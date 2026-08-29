@@ -6,6 +6,6 @@
     "start": "node index.ts"
   },
   "dependencies": {
-    "libra-harness": "link:../.."
+    "@xandout/libra-harness": "link:../.."
   }
 }

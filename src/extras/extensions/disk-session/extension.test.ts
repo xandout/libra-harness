@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { Agent, messageContentToText, type Message } from 'libra-harness';
+import { Agent, messageContentToText, type Message } from '@xandout/libra-harness';
 import { createDiskSessionExtension, type SessionRecord, type SessionIdentity } from './index.js';
 
 // ── Mock model ─────────────────────────────────────────────────────

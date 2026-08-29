@@ -1,4 +1,4 @@
-import type { Extension } from 'libra-harness';
+import type { Extension } from '@xandout/libra-harness';
 
 /**
  * search-replace extension — registers a `search_replace` tool that

@@ -1,5 +1,5 @@
 {
-  "name": "libra-harness",
+  "name": "@xandout/libra-harness",
   "version": "0.1.5",
   "description": "A small, composable, hookable agent harness. Library-first.",
   "type": "module",
@@ -107,6 +107,9 @@
     "dist",
     "README.md"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc && for d in src/extras/extensions/*/; do name=$(basename \"$d\") && cp \"$d\"extension.json dist/extras/extensions/\"$name\"/; done",
     "typecheck": "tsc --noEmit",

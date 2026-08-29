@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "libra-harness": "workspace:*"
+    "@xandout/libra-harness": "workspace:*"
   },
   "devDependencies": {
     "tsx": "^4.19.0",

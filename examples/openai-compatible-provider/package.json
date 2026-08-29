@@ -8,7 +8,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "libra-harness": "link:../.."
+    "@xandout/libra-harness": "link:../.."
   },
   "devDependencies": {
     "tsx": "^4.23.12",

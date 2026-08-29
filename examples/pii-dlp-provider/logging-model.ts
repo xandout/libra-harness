@@ -1,4 +1,4 @@
-import type { Model, ModelRequest, ModelResponse, ToolCall } from 'libra-harness';
+import type { Model, ModelRequest, ModelResponse, ToolCall } from '@xandout/libra-harness';
 
 /**
  * A model that logs exactly what it receives and simulates a tool call

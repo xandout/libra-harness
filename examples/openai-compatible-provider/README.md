@@ -8,8 +8,8 @@ This example exposes independent Libra agents through an OpenAI-compatible HTTP 
 The server itself is a library export — `createOpenAICompatibleServer` from `libra/extras/openai-provider`. This example just wires up agents, model resolution, and environment configuration. You can use the same export in your own application without copying this example:
 
 ```typescript
-import { Agent } from 'libra-harness';
-import { createOpenAICompatibleServer } from 'libra-harness/extras/openai-provider';
+import { Agent } from '@xandout/libra-harness';
+import { createOpenAICompatibleServer } from '@xandout/libra-harness/extras/openai-provider';
 
 const server = createOpenAICompatibleServer({
   agents: {

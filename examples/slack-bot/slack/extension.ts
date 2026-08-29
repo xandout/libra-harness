@@ -1,5 +1,5 @@
 import type { WebClient } from '@slack/web-api';
-import type { Extension } from 'libra-harness';
+import type { Extension } from '@xandout/libra-harness';
 import { addReaction } from './reactions.ts';
 import { postMessageWithBlocks } from './messages.ts';
 

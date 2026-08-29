@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { Agent } from 'libra-harness';
-import type { Extension } from 'libra-harness';
+import { Agent } from '@xandout/libra-harness';
+import type { Extension } from '@xandout/libra-harness';
 import { createWinkQueryAnalyzer } from './index.js';
 import { createKeywordExtractorExtension, type KeywordExtractionEntry } from './index.js';
 

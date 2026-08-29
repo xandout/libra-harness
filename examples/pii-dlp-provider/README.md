@@ -103,7 +103,7 @@ Run `pnpm test` to verify:
 This example uses a mock model (`LoggingMockModel`) so it works without API keys. To use a real upstream LLM, replace the model in `index.ts`:
 
 ```typescript
-import { resolveModel } from 'libra-harness/extras/models';
+import { resolveModel } from '@xandout/libra-harness/extras/models';
 
 const model = await resolveModel('deepseek/deepseek-v4-flash');
 // or: openai/gpt-4.1-mini, anthropic/claude-3.5-sonnet, etc.

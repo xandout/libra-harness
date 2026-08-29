@@ -14,7 +14,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
  * mcp, skills) alongside your own local extensions in a single call:
  *
  * ```typescript
- * import { loadExtensions, sharedExtensionsDir } from 'libra-harness/extras';
+ * import { loadExtensions, sharedExtensionsDir } from '@xandout/libra-harness/extras';
  *
  * const loaded = await loadExtensions(
  *   [sharedExtensionsDir, './extensions'],
@@ -23,7 +23,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
  * ```
  *
  * For simpler cases, you can also import individual extensions directly:
- * `import { createLoggerExtension } from 'libra-harness/extras/logger'`.
+ * `import { createLoggerExtension } from '@xandout/libra-harness/extras/logger'`.
  */
 export const sharedExtensionsDir = fileURLToPath(
   new URL('./extensions', import.meta.url),
@@ -276,8 +276,8 @@ export type ExtensionInput = string | ExtensionFactory | Extension;
  *
  * @example
  * // Mix built-in factories with local directory discovery.
- * import { createLoggerExtension } from 'libra-harness/extras/logger';
- * import { createMcpExtension } from 'libra-harness/extras/mcp';
+ * import { createLoggerExtension } from '@xandout/libra-harness/extras/logger';
+ * import { createMcpExtension } from '@xandout/libra-harness/extras/mcp';
  *
  * const loaded = await loadExtensions(
  *   [createLoggerExtension, createMcpExtension, './extensions'],

@@ -35,7 +35,7 @@ import type { SpanExporter, ReadableSpan } from '@opentelemetry/sdk-trace-base';
  * ## Usage
  *
  * ```typescript
- * import { JsonlSpanExporter } from 'libra-harness/extras/otel';
+ * import { JsonlSpanExporter } from '@xandout/libra-harness/extras/otel';
  * import { NodeSDK } from '@opentelemetry/sdk-node';
  *
  * const sdk = new NodeSDK({
