@@ -1,0 +1,7 @@
+{
+  "name": "skills",
+  "description": "Skill loader following the Agent Skills spec. Scans skill directories for SKILL.md files and registers list_skills, use_skill, read_skill_file, and run_skill_script tools.",
+  "enabled": true,
+  "priority": 50,
+  "configKeys": ["skillsDirs"]
+}

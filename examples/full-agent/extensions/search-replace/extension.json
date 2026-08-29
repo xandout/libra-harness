@@ -1,0 +1,7 @@
+{
+  "name": "search-replace",
+  "description": "Registers a search_replace tool for string search/replace on text. Demonstrates a local extension loaded via the extension loader.",
+  "enabled": true,
+  "priority": 50,
+  "configKeys": ["allowRegex"]
+}

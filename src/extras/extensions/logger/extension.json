@@ -1,0 +1,7 @@
+{
+  "name": "logging",
+  "description": "Logs each lifecycle stage. High priority so before-hooks see raw state before other extensions mutate it.",
+  "enabled": true,
+  "priority": 100,
+  "configKeys": ["logFunction", "errorFunction", "logPrefix", "level"]
+}

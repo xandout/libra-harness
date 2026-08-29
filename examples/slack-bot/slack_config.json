@@ -1,0 +1,144 @@
+{
+    "display_information": {
+        "name": "Agent",
+        "description": "User's Helper",
+        "background_color": "#d32600"
+    },
+    "features": {
+        "bot_user": {
+            "display_name": "Agent",
+            "always_online": true
+        },
+        "slash_commands": [
+            {
+                "command": "/halt",
+                "description": "Halt Agent's active chain of thought",
+                "should_escape": false
+            },
+            {
+                "command": "/compact",
+                "description": "Compact the session",
+                "usage_hint": "[compaction goal]",
+                "should_escape": false
+            },
+            {
+                "command": "/model",
+                "description": "set model",
+                "usage_hint": "google/gemini-3.6-flash",
+                "should_escape": false
+            },
+            {
+                "command": "/models",
+                "description": "Lists the models available",
+                "should_escape": false
+            },
+            {
+                "command": "/reset",
+                "description": "new session for when things are broken",
+                "should_escape": false
+            }
+        ]
+    },
+    "oauth_config": {
+        "scopes": {
+            "user": [
+                "search:read",
+                "canvases:read",
+                "canvases:write",
+                "channels:history",
+                "channels:read",
+                "channels:write",
+                "chat:write",
+                "emoji:read",
+                "files:read",
+                "files:write",
+                "groups:history",
+                "groups:read",
+                "groups:write",
+                "im:history",
+                "im:write",
+                "lists:read",
+                "lists:write",
+                "mpim:history",
+                "mpim:read",
+                "mpim:write",
+                "reactions:read",
+                "reactions:write",
+                "search:read.files",
+                "search:read.im",
+                "search:read.mpim",
+                "search:read.private",
+                "search:read.public",
+                "search:read.users",
+                "users:read",
+                "users:read.email",
+                "im:read"
+            ],
+            "user_optional": [
+                "canvases:read",
+                "canvases:write",
+                "chat:write",
+                "files:read",
+                "files:write",
+                "groups:history",
+                "im:history",
+                "lists:read",
+                "lists:write",
+                "mpim:history",
+                "search:read.files",
+                "search:read.im",
+                "search:read.mpim",
+                "search:read.private"
+            ],
+            "bot": [
+                "emoji:read",
+                "channels:history",
+                "channels:read",
+                "chat:write",
+                "chat:write.customize",
+                "commands",
+                "files:read",
+                "files:write",
+                "groups:history",
+                "groups:read",
+                "im:history",
+                "im:read",
+                "im:write",
+                "incoming-webhook",
+                "mpim:history",
+                "mpim:read",
+                "mpim:write",
+                "reactions:read",
+                "reactions:write",
+                "search:read.files",
+                "search:read.im",
+                "search:read.mpim",
+                "search:read.private",
+                "search:read.public",
+                "search:read.users",
+                "users.profile:read",
+                "users:read"
+            ]
+        },
+        "pkce_enabled": false
+    },
+    "settings": {
+        "event_subscriptions": {
+            "bot_events": [
+                "message.channels",
+                "message.groups",
+                "message.im",
+                "message.mpim",
+                "reaction_added",
+                "reaction_removed"
+            ]
+        },
+        "interactivity": {
+            "is_enabled": true
+        },
+        "org_deploy_enabled": false,
+        "socket_mode_enabled": true,
+        "token_rotation_enabled": false,
+        "is_mcp_enabled": true
+    }
+}

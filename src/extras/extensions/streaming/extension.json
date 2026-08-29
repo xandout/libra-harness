@@ -1,0 +1,6 @@
+{
+  "name": "streaming",
+  "description": "Sets onDelta on modelRequest via beforeLLM hook to enable streaming. Caller passes callbacks via metadata.streamCallbacks.",
+  "enabled": true,
+  "priority": 100
+}

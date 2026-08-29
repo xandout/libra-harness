@@ -1,0 +1,6 @@
+{
+  "name": "filesystem",
+  "description": "Controlled filesystem access scoped to one or more sandboxed directories. Exposes read, write, list, delete, and info tools. Paths are prefixed with the sandbox name.",
+  "enabled": true,
+  "priority": 50
+}

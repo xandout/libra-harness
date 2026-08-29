@@ -1,0 +1,11 @@
+{
+  "name": "libra-example-structured-output",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node index.ts"
+  },
+  "dependencies": {
+    "libra": "link:../.."
+  }
+}

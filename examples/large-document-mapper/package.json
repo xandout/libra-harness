@@ -1,0 +1,12 @@
+{
+  "name": "libra-example-large-document-mapper",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node index.ts"
+  },
+  "dependencies": {
+    "wink-nlp": "^2.4.0",
+    "wink-eng-lite-web-model": "^1.8.1"
+  }
+}

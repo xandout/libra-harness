@@ -1,0 +1,11 @@
+{
+  "name": "libra-example-subagents",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node index.ts"
+  },
+  "dependencies": {
+    "libra": "link:../.."
+  }
+}

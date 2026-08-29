@@ -1,0 +1,7 @@
+{
+  "name": "memory",
+  "description": "Session-scoped memory extension. Automatically retrieves relevant memories in beforeContext and extracts new memories in afterTurn. Requires a MemoryStore and MemoryExtractor (provided via config). Non-fatal: memory failures never crash a turn.",
+  "enabled": false,
+  "priority": -95,
+  "configKeys": ["store", "extractor", "retriever", "maxRecall", "scopeKey"]
+}

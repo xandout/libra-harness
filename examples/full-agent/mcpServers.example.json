@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    },
+    "playground": {
+      "type": "http",
+      "url": "https://mcpplaygroundonline.com/mcp-complex-server"
+    }
+  }
+}

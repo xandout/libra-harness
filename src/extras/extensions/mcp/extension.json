@@ -1,0 +1,7 @@
+{
+  "name": "mcp",
+  "description": "Connects to MCP servers (stdio/http/sse) and registers their tools. Reads MCP server config from JSON files.",
+  "enabled": true,
+  "priority": 50,
+  "configKeys": ["mcpConfigPaths", "excludeTools"]
+}

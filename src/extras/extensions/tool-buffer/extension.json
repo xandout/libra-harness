@@ -1,0 +1,7 @@
+{
+  "name": "tool-buffer",
+  "description": "Redirects large tool outputs to files and returns a pointer to the LLM. Keeps context small when tools return large datasets. Pair with a grep tool for searching buffered content.",
+  "enabled": true,
+  "priority": -50,
+  "configKeys": ["bufferDir", "threshold", "tools", "excludeTools", "previewLength", "filePrefix"]
+}

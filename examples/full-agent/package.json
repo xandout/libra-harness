@@ -1,0 +1,12 @@
+{
+  "name": "libra-example-basic-agent",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node index.ts"
+  },
+  "dependencies": {
+    "libra": "link:../..",
+    "@modelcontextprotocol/client": "^2.0.0"
+  }
+}

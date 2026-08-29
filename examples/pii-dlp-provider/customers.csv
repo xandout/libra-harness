@@ -1,0 +1,5 @@
+name,email,phone,account_id,balance,ssn
+John Smith,john.smith@acme.com,+1-555-0100,ACC-12345678,5250.00,123-45-6789
+Sarah Johnson,sarah.j@globex.io,+1-555-0200,ACC-87654321,12750.50,987-65-4321
+Robert Chen,bob.chen@initech.com,+1-555-0300,ACC-11223344,3400.00,456-78-9012
+Emily Davis,emily.d@umbrella.org,+1-555-0400,ACC-99887766,89000.00,321-54-9876

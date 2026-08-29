@@ -1,0 +1,6 @@
+{
+  "name": "keyword-extractor",
+  "description": "Extracts winkNLP keywords from each user message and publishes them into sessionMeta for persistence. Also logs them for observability. Must run before disk-session (priority 50 > -100).",
+  "enabled": true,
+  "priority": 50
+}

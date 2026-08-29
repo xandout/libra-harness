@@ -1,0 +1,7 @@
+{
+  "name": "token-stats",
+  "description": "Appends token usage and context window stats to the agent's final response message. Accumulates usage across all LLM calls in a turn.",
+  "enabled": true,
+  "priority": -100,
+  "configKeys": ["contextWindow", "slackItalics", "label"]
+}

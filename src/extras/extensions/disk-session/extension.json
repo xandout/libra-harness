@@ -1,0 +1,6 @@
+{
+  "name": "disk-session",
+  "description": "Disk-backed session extension for Agents. Stores conversation history, metadata, and tool call records per session as JSON files. Loads sessions from disk on startup.",
+  "enabled": true,
+  "priority": -100
+}

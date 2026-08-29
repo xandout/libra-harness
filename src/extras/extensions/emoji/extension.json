@@ -1,0 +1,7 @@
+{
+  "name": "emoji",
+  "description": "Decorates the final response with a leading emoji. Low priority so it sees the final response after other extensions modify it.",
+  "enabled": true,
+  "priority": 0,
+  "configKeys": ["emojiPrefix"]
+}

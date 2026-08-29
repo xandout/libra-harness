@@ -1,0 +1,7 @@
+{
+  "name": "auto-steer",
+  "description": "Steers the agent to wrap up when approaching max iterations, preventing empty max_iterations responses.",
+  "enabled": true,
+  "priority": 90,
+  "configKeys": ["maxIterations", "threshold", "steerMessage"]
+}

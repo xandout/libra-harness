@@ -1,0 +1,7 @@
+{
+  "name": "otel",
+  "description": "OpenTelemetry observability — creates spans across the agent turn lifecycle (agent.turn → llm.request → tool.<name>). Uses @opentelemetry/api; host must register a tracer provider.",
+  "enabled": true,
+  "priority": 200,
+  "configKeys": ["tracer", "tracerName", "serviceName", "recordToolArgs", "maxResultLength"]
+}

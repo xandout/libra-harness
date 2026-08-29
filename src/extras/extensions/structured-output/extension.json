@@ -1,0 +1,7 @@
+{
+  "name": "structured-output",
+  "description": "Validates LLM output against a JSON schema via beforeResponse hook. Accepts a schema, optional metadataKey, and stripCodeFences via config.",
+  "enabled": true,
+  "priority": 50,
+  "configKeys": ["schema", "metadataKey", "stripCodeFences"]
+}

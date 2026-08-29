@@ -1,0 +1,6 @@
+{
+  "name": "mem-session",
+  "description": "In-memory session extension. Stores conversation history per session ID. Low priority so afterTurn saves the final response after mutators have decorated it.",
+  "enabled": true,
+  "priority": -100
+}

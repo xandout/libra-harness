@@ -1,0 +1,6 @@
+{
+  "name": "timestamp",
+  "description": "Records start/finish ISO timestamps in turn metadata for observability.",
+  "enabled": true,
+  "priority": 0
+}

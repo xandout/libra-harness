@@ -1,0 +1,171 @@
+{
+  "name": "libra",
+  "version": "0.1.0",
+  "description": "A small, composable, hookable agent harness. Library-first.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./extras": {
+      "types": "./dist/extras/extension-loader.d.ts",
+      "import": "./dist/extras/extension-loader.js"
+    },
+    "./extras/extension-loader": {
+      "types": "./dist/extras/extension-loader.d.ts",
+      "import": "./dist/extras/extension-loader.js"
+    },
+    "./extras/models": {
+      "types": "./dist/extras/models/index.d.ts",
+      "import": "./dist/extras/models/index.js"
+    },
+    "./extras/models/ai-sdk-resolver": {
+      "types": "./dist/extras/models/ai-sdk-resolver.d.ts",
+      "import": "./dist/extras/models/ai-sdk-resolver.js"
+    },
+    "./extras/models/routing-model": {
+      "types": "./dist/extras/models/routing-model.d.ts",
+      "import": "./dist/extras/models/routing-model.js"
+    },
+    "./extras/openai-provider": {
+      "types": "./dist/extras/openai-provider/index.d.ts",
+      "import": "./dist/extras/openai-provider/index.js"
+    },
+    "./extras/logger": {
+      "types": "./dist/extras/extensions/logger/index.d.ts",
+      "import": "./dist/extras/extensions/logger/index.js"
+    },
+    "./extras/disk-session": {
+      "types": "./dist/extras/extensions/disk-session/index.d.ts",
+      "import": "./dist/extras/extensions/disk-session/index.js"
+    },
+    "./extras/mem-session": {
+      "types": "./dist/extras/extensions/mem-session/index.d.ts",
+      "import": "./dist/extras/extensions/mem-session/index.js"
+    },
+    "./extras/timestamp": {
+      "types": "./dist/extras/extensions/timestamp/index.d.ts",
+      "import": "./dist/extras/extensions/timestamp/index.js"
+    },
+    "./extras/emoji": {
+      "types": "./dist/extras/extensions/emoji/index.d.ts",
+      "import": "./dist/extras/extensions/emoji/index.js"
+    },
+    "./extras/weather-tool": {
+      "types": "./dist/extras/extensions/weather-tool/index.d.ts",
+      "import": "./dist/extras/extensions/weather-tool/index.js"
+    },
+    "./extras/streaming": {
+      "types": "./dist/extras/extensions/streaming/index.d.ts",
+      "import": "./dist/extras/extensions/streaming/index.js"
+    },
+    "./extras/structured-output": {
+      "types": "./dist/extras/extensions/structured-output/index.d.ts",
+      "import": "./dist/extras/extensions/structured-output/index.js"
+    },
+    "./extras/mcp": {
+      "types": "./dist/extras/extensions/mcp/index.d.ts",
+      "import": "./dist/extras/extensions/mcp/index.js"
+    },
+    "./extras/skills": {
+      "types": "./dist/extras/extensions/skills/index.d.ts",
+      "import": "./dist/extras/extensions/skills/index.js"
+    },
+    "./extras/auto-steer": {
+      "types": "./dist/extras/extensions/auto-steer/index.d.ts",
+      "import": "./dist/extras/extensions/auto-steer/index.js"
+    },
+    "./extras/filesystem": {
+      "types": "./dist/extras/extensions/filesystem/index.d.ts",
+      "import": "./dist/extras/extensions/filesystem/index.js"
+    },
+    "./extras/keyword-extractor": {
+      "types": "./dist/extras/extensions/keyword-extractor/index.d.ts",
+      "import": "./dist/extras/extensions/keyword-extractor/index.js"
+    },
+    "./extras/otel": {
+      "types": "./dist/extras/extensions/otel/index.d.ts",
+      "import": "./dist/extras/extensions/otel/index.js"
+    },
+    "./extras/tool-buffer": {
+      "types": "./dist/extras/extensions/tool-buffer/index.d.ts",
+      "import": "./dist/extras/extensions/tool-buffer/index.js"
+    },
+    "./extras/token-stats": {
+      "types": "./dist/extras/extensions/token-stats/index.d.ts",
+      "import": "./dist/extras/extensions/token-stats/index.js"
+    },
+    "./extras/scripts": {
+      "types": "./dist/extras/extensions/scripts/index.d.ts",
+      "import": "./dist/extras/extensions/scripts/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc && for d in src/extras/extensions/*/; do name=$(basename \"$d\") && cp \"$d\"extension.json dist/extras/extensions/\"$name\"/; done",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "check:outdated": "pnpm outdated --format list",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "agent",
+    "llm",
+    "hooks",
+    "library",
+    "ai"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@opentelemetry/sdk-trace-base": "^2.10.0",
+    "@types/node": "^26.2.0",
+    "@vitest/coverage-v8": "^4.1.10",
+    "quickjs-emscripten": "^0.32.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "peerDependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/sdk-trace-base": "^2.0.0",
+    "ai": "^7.0.0",
+    "quickjs-emscripten": "^0.32.0"
+  },
+  "peerDependenciesMeta": {
+    "ai": {
+      "optional": true
+    },
+    "@modelcontextprotocol/client": {
+      "optional": true
+    },
+    "@opentelemetry/api": {
+      "optional": true
+    },
+    "@opentelemetry/sdk-trace-base": {
+      "optional": true
+    },
+    "quickjs-emscripten": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.36",
+    "@ai-sdk/deepseek": "^3.0.36",
+    "@ai-sdk/google": "^4.0.39",
+    "@ai-sdk/openai": "^4.0.36",
+    "@ai-sdk/provider": "^4.0.7",
+    "wink-eng-lite-web-model": "^1.8.1",
+    "wink-nlp": "^2.4.0"
+  }
+}

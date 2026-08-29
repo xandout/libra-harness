@@ -1,0 +1,7 @@
+{
+  "name": "scripts",
+  "description": "Durable on-disk script registry and a focused tool interface for agents to write and run their own sandboxed (QuickJS) data-processing scripts. Input can be passed inline or via allowed disk paths. Reuses the filesystem extension's sandboxes when configured.",
+  "enabled": true,
+  "priority": 50,
+  "configKeys": ["registryDir", "fs", "allowedFsDirs", "allowedDirs", "maxInputBytes", "maxOutputChars", "memoryLimitBytes", "interruptMs", "toolPrefix"]
+}

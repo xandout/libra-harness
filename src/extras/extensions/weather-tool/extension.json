@@ -1,0 +1,7 @@
+{
+  "name": "weather-tool",
+  "description": "Registers a get_weather tool that returns weather data for a city.",
+  "enabled": true,
+  "priority": 50,
+  "configKeys": ["fetchWeather"]
+}
