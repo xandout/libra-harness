@@ -3,7 +3,7 @@ packages:
   - 'examples/*'
 allowBuilds:
   esbuild: true
-  protobufjs: set this to true or false
+  protobufjs: true
 minimumReleaseAgeExclude:
   - '@ai-sdk/deepseek@3.0.36'
   - '@ai-sdk/gateway@4.0.68'
