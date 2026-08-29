@@ -341,7 +341,7 @@ export class Agent {
       const modelRequest: ModelRequest = {
         messages: turn.messages,
         tools: turn.tools.length > 0 ? turn.tools.map(toToolDefinition) : undefined,
-        systemPrompt: turn.request.systemPrompt ?? this.config.systemPrompt,
+        systemPrompt: turn.systemPrompt,
         temperature: this.config.temperature,
         maxTokens: this.config.maxTokens,
         reasoningEffort: this.config.reasoningEffort,
