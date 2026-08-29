@@ -2,6 +2,10 @@
   "name": "@xandout/libra-harness",
   "version": "0.1.7",
   "description": "A small, composable, hookable agent harness. Library-first.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xandout/libra-harness"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
