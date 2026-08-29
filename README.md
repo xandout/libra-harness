@@ -13,10 +13,11 @@ pnpm add libra
 ## Quick Start
 
 ```typescript
-import { Agent, AISdkModel } from 'libra'
-import { openai } from '@ai-sdk/openai'
+import { Agent } from 'libra'
+import { resolveModel } from 'libra/extras/models'
 
-const model = new AISdkModel(openai('gpt-4o'))
+// Resolve a model from environment variables (DEEPSEEK_API_KEY, OPENAI_API_KEY, etc.)
+const model = await resolveModel('deepseek/deepseek-v4-flash')
 
 const agent = new Agent({
   model,
@@ -56,6 +57,65 @@ const result = await agent.run({ message: 'search for cats' })
 
 The harness automatically continues the turn after tool calls — tool results are fed back to the model until it produces a final response.
 
+### External tools
+
+Set `external: true` on a tool to return its call to the caller instead of executing it internally. This enables the standard OpenAI tool-calling round-trip: the agent returns `finishReason: 'tool_calls'` with `pendingToolCalls`, the caller executes the tool and sends the result back as a `tool` message in a follow-up request.
+
+```typescript
+const agent = new Agent({
+  model,
+  tools: [
+    {
+      name: 'get_weather',
+      description: 'Get weather for a city',
+      parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] },
+      external: true,
+      async execute() { return { toolCallId: '', content: '' } }, // never called
+    },
+  ],
+})
+
+const result = await agent.run({ message: 'Weather in SF?' })
+// result.finishReason === 'tool_calls'
+// result.pendingToolCalls === [{ id: '...', name: 'get_weather', arguments: '{"city":"SF"}' }]
+
+// Caller executes the tool, then resumes:
+const result2 = await agent.run({
+  message: 'Weather in SF?',
+  metadata: {
+    myMessages: [
+      { role: 'user', content: 'Weather in SF?' },
+      { role: 'assistant', content: '', toolCalls: result.pendingToolCalls },
+      { role: 'tool', content: 'Sunny, 72F', toolCallId: '...', name: 'get_weather' },
+    ],
+  },
+})
+// result2.finishReason === 'stop'
+```
+
+## Multimodal Messages
+
+Libra supports text, images, documents, audio, and video in message content:
+
+```typescript
+const result = await agent.run({
+  message: [
+    { type: 'text', text: 'Describe this image' },
+    { type: 'file', mediaType: 'image/png', data: { type: 'url', url: 'https://example.com/photo.png' } },
+  ],
+})
+```
+
+File content can be a URL, base64 data, or text:
+
+```typescript
+// URL
+{ type: 'file', mediaType: 'image/png', data: { type: 'url', url: 'https://...' } }
+
+// Base64
+{ type: 'file', mediaType: 'image/jpeg', data: { type: 'data', data: '/9j/4AAQ...' } }
+```
+
 ## Extensions
 
 Extensions add behavior without requiring the core to understand it.
@@ -81,25 +141,34 @@ Libra ships with a set of optional extensions under `libra/extras`. Each is impo
 
 ```typescript
 import { createLoggerExtension } from 'libra/extras/logger'
-import { createSessionExtension } from 'libra/extras/session'
+import { createDiskSessionExtension } from 'libra/extras/disk-session'
 
 agent.use(createLoggerExtension())
-agent.use(createSessionExtension())
+agent.use(createDiskSessionExtension({ dir: './sessions' }))
 ```
 
-| Extension | Import | Priority | Description |
-|-----------|--------|----------|-------------|
-| logger | `libra/extras/logger` | 100 | Logs each lifecycle stage |
-| streaming | `libra/extras/streaming` | 100 | Streams text/reasoning/tool-input deltas |
-| weather-tool | `libra/extras/weather-tool` | 50 | Registers a `get_weather` tool |
-| structured-output | `libra/extras/structured-output` | 50 | Validates LLM output against a JSON schema |
-| mcp | `libra/extras/mcp` | 50 | Connects to MCP servers, registers tools |
-| skills | `libra/extras/skills` | 50 | Loads Agent Skills from directories |
-| emoji | `libra/extras/emoji` | 0 | Decorates responses with an emoji prefix |
-| timestamp | `libra/extras/timestamp` | 0 | Records start/finish timestamps in metadata |
-| session | `libra/extras/session` | -100 | In-memory session history per session ID |
+| Extension | Import | Description |
+|-----------|--------|-------------|
+| logger | `libra/extras/logger` | Logs each lifecycle stage |
+| streaming | `libra/extras/streaming` | Streams text/reasoning/tool-input deltas |
+| otel | `libra/extras/otel` | OpenTelemetry tracing (JSONL or OTLP export) |
+| weather-tool | `libra/extras/weather-tool` | Registers a `get_weather` tool |
+| structured-output | `libra/extras/structured-output` | Validates LLM output against a JSON schema |
+| mcp | `libra/extras/mcp` | Connects to MCP servers, registers tools |
+| skills | `libra/extras/skills` | Loads Agent Skills from directories |
+| filesystem | `libra/extras/filesystem` | File read/write/list tools |
+| scripts | `libra/extras/scripts` | Runs shell scripts in pipeline stages |
+| keyword-extractor | `libra/extras/keyword-extractor` | Extracts keywords from messages (local NLP) |
+| token-stats | `libra/extras/token-stats` | Tracks token usage per turn |
+| tool-buffer | `libra/extras/tool-buffer` | Buffers and replays tool results |
+| auto-steer | `libra/extras/auto-steer` | Auto-injects steering messages based on conditions |
+| emoji | `libra/extras/emoji` | Decorates responses with an emoji prefix |
+| timestamp | `libra/extras/timestamp` | Records start/finish timestamps in metadata |
+| disk-session | `libra/extras/disk-session` | Disk-backed session history per session ID |
+| mem-session | `libra/extras/mem-session` | In-memory session history per session ID |
+| memory | `libra/extras/memory` | Long-term memory with LLM-based extraction |
 
-**Priority** controls hook execution order within each lifecycle stage (higher = runs first, ties keep registration order). This applies to `agent.use()` directly — not just the loader — so explicit `use()` calls also respect `Extension.priority`.
+**Priority** controls hook execution order within each lifecycle stage (higher = runs first, ties keep registration order). Set `priority` on any extension whose hooks must run before or after another extension's hooks.
 
 See [`src/extras/README.md`](src/extras/README.md) for full API docs.
 
@@ -128,17 +197,119 @@ installExtensions(loaded, agent)
 await closeExtensions(loaded)     // calls close() on extensions that have one (e.g. MCP)
 ```
 
-### Examples
+## Model Providers
 
-The `examples/` directory includes reference implementations:
+### Native resolver
 
-- **`full-agent/`** — all built-in extensions via the loader, plus a local search-replace extension demonstrating directory-loaded extensions. Multi-turn session memory, MCP tools, skill loader, weather tool, streaming, and Gemini single-turn.
-- **`basic-agent-concurrent/`** — single agent handling many concurrent users with rapid messages, session isolation, and per-turn halt
-- **`subagents/`** — orchestrator agent delegating to specialized research, code, and critic subagents via `createAgentTool`, with signal chaining and halt propagation
-- **`subagents-concurrent/`** — orchestrator fanning out to multiple subagents in parallel via `Promise.all`, with shared signal and halt propagation across all concurrent subagents
-- **`structured-output/`** — `beforeResponse` hook that validates LLM output against a JSON schema, strips code fences, catches type errors, and supports retry patterns
-- **`streaming/`** — `beforeLLM` hook that sets `onDelta` on the model request, streaming text/reasoning/tool-input deltas to callbacks in real time
-- **`openai-compatible-provider/`** — exposes multiple independent Libra agents as authenticated OpenAI-compatible models for use by external frameworks
+The easiest way to get a model is `resolveModel` from `libra/extras/models`. It reads API keys from environment variables and loads the appropriate AI SDK provider package dynamically:
+
+```typescript
+import { resolveModel } from 'libra/extras/models'
+
+// Reads DEEPSEEK_API_KEY from env, loads @ai-sdk/deepseek
+const model = await resolveModel('deepseek/deepseek-v4-flash')
+
+// Reads OPENAI_API_KEY from env, loads @ai-sdk/openai
+const model = await resolveModel('openai/gpt-4.1-mini')
+
+// Reads ANTHROPIC_API_KEY from env, loads @ai-sdk/anthropic
+const model = await resolveModel('anthropic/claude-sonnet-4-20250514')
+
+// Reads GOOGLE_GENERATIVE_AI_API_KEY from env, loads @ai-sdk/google
+const model = await resolveModel('google/gemini-2.0-flash')
+```
+
+Model IDs use the format `provider/model`. Supported providers:
+
+| Provider | Environment variable | Package |
+|----------|---------------------|---------|
+| `openai` | `OPENAI_API_KEY` | `@ai-sdk/openai` |
+| `anthropic` | `ANTHROPIC_API_KEY` | `@ai-sdk/anthropic` |
+| `google` | `GOOGLE_GENERATIVE_AI_API_KEY` | `@ai-sdk/google` |
+| `deepseek` | `DEEPSEEK_API_KEY` | `@ai-sdk/deepseek` |
+
+### Direct AISdkModel
+
+You can also wrap any AI SDK `LanguageModelV4` directly:
+
+```typescript
+import { AISdkModel } from 'libra'
+import { openai } from '@ai-sdk/openai'
+
+const model = new AISdkModel(openai('gpt-4.1-mini'))
+```
+
+### Routing model
+
+Route requests to different models based on input content — e.g. send images to a vision model:
+
+```typescript
+import { createRoutingModel, hasImageInput } from 'libra/extras/models'
+
+const model = createRoutingModel({
+  default: await resolveModel('deepseek/deepseek-v4-flash'),
+  routes: [
+    { when: hasImageInput, model: await resolveModel('deepseek/deepseek-v4-flash-vision-exp') },
+  ],
+})
+```
+
+### Custom Model interface
+
+Implement the `Model` interface directly for custom providers:
+
+```typescript
+import type { Model, ModelRequest, ModelResponse } from 'libra'
+
+class MyModel implements Model {
+  async generate(request: ModelRequest): Promise<ModelResponse> {
+    // translate to your API, call it, translate back
+  }
+}
+```
+
+## Virtual Models (OpenAI-compatible provider)
+
+Expose Libra agents as OpenAI-compatible models. Any framework that supports a custom OpenAI base URL can use your agents as models — with their own context, tools, extensions, and policy controls.
+
+```typescript
+import { Agent } from 'libra'
+import { resolveModel } from 'libra/extras/models'
+import { createOpenAICompatibleServer } from 'libra/extras/openai-provider'
+
+const model = await resolveModel('deepseek/deepseek-v4-flash')
+
+const server = createOpenAICompatibleServer({
+  agents: {
+    'research-agent': new Agent({ model, systemPrompt: 'You are a research assistant.' }),
+    'coding-agent': new Agent({ model, systemPrompt: 'You are a coding assistant.' }),
+  },
+  apiKeys: ['your-provider-key'],
+})
+
+server.listen(8787, '127.0.0.1')
+```
+
+Now any OpenAI-compatible client can call these agents as models:
+
+```python
+client = OpenAI(base_url="http://127.0.0.1:8787/v1", api_key="your-provider-key")
+response = client.chat.completions.create(
+    model="research-agent",
+    messages=[{"role": "user", "content": "Research quantum computing"}],
+)
+```
+
+Features:
+- `GET /v1/models` and `POST /v1/chat/completions`
+- Bearer and `x-api-key` authentication
+- Text, image, system, developer, assistant, and tool messages
+- JSON and SSE streaming responses
+- Client-defined tools (external tool calling with round-trip)
+- Agent's own tools run internally (invisible to the caller)
+- Per-agent hooks for moderation, context injection, output filtering
+
+See [`docs/virtual-models.md`](docs/virtual-models.md) and [`docs/virtual-models-pii-dlp.md`](docs/virtual-models-pii-dlp.md) for concepts and the PII/DLP pattern.
 
 ## Hook Lifecycle
 
@@ -203,6 +374,14 @@ const fallbackExtension: Extension = {
 }
 ```
 
+The `errorPolicy` config controls what happens when no `onError` hook recovers:
+
+| Policy | Behavior |
+|--------|----------|
+| `'fallback'` (default) | Returns a graceful response with `finishReason: 'error'` |
+| `'throw'` | Rethrows the error |
+| `function` | Custom recovery — return an `AgentResponse` or `undefined` to rethrow |
+
 ## Multiple Agents
 
 ```typescript
@@ -236,53 +415,6 @@ const outerAgent = new Agent({
 const result = await outerAgent.run({ message: 'Research this topic' })
 ```
 
-You can also wrap an agent manually if you need custom logic:
-
-```typescript
-const tool = {
-  name: 'research',
-  description: 'Delegate a research question',
-  parameters: { type: 'object', properties: { query: { type: 'string' } } },
-  async execute(args, ctx) {
-    const res = await researchAgent.run({
-      message: String(args.query),
-      signal: ctx.signal,      // chain abort
-      metadata: ctx.metadata,  // share metadata
-    })
-    return { toolCallId: '', content: res.message }
-  },
-}
-```
-
-## Model Providers
-
-Libra uses the Vercel AI SDK for model access. The built-in `AISdkModel` wraps any AI SDK provider:
-
-```typescript
-import { AISdkModel } from 'libra'
-import { openai } from '@ai-sdk/openai'
-import { google } from '@ai-sdk/google'
-import { anthropic } from '@ai-sdk/anthropic'
-import { deepseek } from '@ai-sdk/deepseek'
-
-// Any provider works
-const model = new AISdkModel(openai('gpt-4o'))
-const model = new AISdkModel(google('gemini-2.0-flash'))
-const model = new AISdkModel(anthropic('claude-sonnet-4-20250514'))
-```
-
-You can also implement the `Model` interface directly for custom providers:
-
-```typescript
-import type { Model, ModelRequest, ModelResponse } from 'libra'
-
-class MyModel implements Model {
-  async generate(request: ModelRequest): Promise<ModelResponse> {
-    // translate to your API, call it, translate back
-  }
-}
-```
-
 ## Streaming & Thinking Deltas
 
 Libra supports streaming model output via an optional `onDelta` callback on `ModelRequest`. When set, `AISdkModel` uses its streaming path and emits text, reasoning, and tool-input deltas in real time. The final assembled `ModelResponse` is still returned.
@@ -313,20 +445,37 @@ agent.use(streamingExtension)
 
 When `onDelta` is not set, `AISdkModel` uses `doGenerate` (no streaming overhead). The core never interprets deltas — it simply passes the callback through.
 
+## Examples
+
+The `examples/` directory includes reference implementations:
+
+- **`full-agent/`** — all built-in extensions via the loader, plus a local search-replace extension. Multi-turn session memory, MCP tools, skill loader, weather tool, streaming.
+- **`basic-agent-concurrent/`** — single agent handling many concurrent users with session isolation and per-turn halt.
+- **`subagents/`** — orchestrator agent delegating to specialized subagents via `createAgentTool`, with signal chaining and halt propagation.
+- **`subagents-concurrent/`** — orchestrator fanning out to multiple subagents in parallel via `Promise.all`.
+- **`structured-output/`** — `beforeResponse` hook that validates LLM output against a JSON schema.
+- **`streaming/`** — `beforeLLM` hook that streams text/reasoning/tool-input deltas.
+- **`openai-compatible-provider/`** — exposes multiple independent Libra agents as authenticated OpenAI-compatible models. Supports text, images, SSE streaming, and client-defined external tools.
+- **`pii-dlp-provider/`** — proves the virtual model PII/DLP pattern: the LLM never sees real PII, the consumer never sees placeholders. Uses a CSV datasource with tool calling and full lifecycle logging.
+- **`slack-bot/`** — full Slack bot with Socket Mode, block kit rendering, session persistence, MCP, skills, and OpenTelemetry tracing.
+- **`large-document-mapper/`** — processes large documents in chunks with mapping and reduction.
+
 ## Architecture
 
 - **Library-first** — no server, daemon, database, or queue required
 - **Hookable** — 9 lifecycle hooks with observation and mutation
 - **Extensible** — extensions register hooks/tools without core conditional logic
 - **Composable** — multiple independent agents, agent-as-tool, all in-process
-- **Provider-independent** — `Model` interface with `AISdkModel` for Vercel AI SDK
+- **Provider-independent** — `Model` interface with AI SDK v4 integration and native resolver
+- **Multimodal** — text, images, documents, audio, and video in message content
 - **Steerable & haltable** — per-turn controls via `RunHandle` or `ctx.turn`
 - **Streamable** — text, reasoning, and tool-input deltas via `onDelta` callback
-- **Testable** — 80 tests with mock model, 95% line coverage
+- **Virtual models** — expose agents as OpenAI-compatible models with full provider-side control
+- **Testable** — 354 tests with mock model
 
 ### What the core owns
 
-Agent configuration, model interaction, messages, tools, turn execution, hooks, errors.
+Agent configuration, model interaction, messages, tools, turn execution, hooks, errors, streaming delta forwarding.
 
 ### What the core does NOT own
 
