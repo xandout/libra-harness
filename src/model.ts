@@ -35,6 +35,33 @@ export interface ModelRequest {
   maxTokens?: number;
   signal?: AbortSignal;
   /**
+   * Reasoning effort level for models that support thinking/reasoning mode.
+   *
+   * - `'low'` — minimal reasoning, faster responses
+   * - `'high'` — standard reasoning (default for most models)
+   * - `'max'` — maximum reasoning effort, slower but more thorough
+   *
+   * When set, the AI SDK adapter maps this to the provider's native
+   * reasoning effort parameter (e.g. DeepSeek's `reasoning_effort`).
+   * Models that don't support reasoning will ignore this.
+   */
+  reasoningEffort?: 'low' | 'high' | 'max';
+  /**
+   * Provider-specific options passed through to the model adapter.
+   *
+   * This is an escape hatch for provider-specific features that don't
+   * have a first-class field on `ModelRequest`. The AI SDK adapter
+   * passes these through as `providerOptions` on the call options.
+   *
+   * Example — DeepSeek thinking mode toggle:
+   * ```typescript
+   * providerOptions: {
+   *   deepseek: { thinking: { type: 'disabled' } }
+   * }
+   * ```
+   */
+  providerOptions?: Record<string, Record<string, unknown>>;
+  /**
    * Optional callback for streaming deltas.
    *
    * When set, the model provider should use its streaming API and

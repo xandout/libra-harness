@@ -150,6 +150,10 @@ export class AISdkModel implements Model {
       ...(request.temperature !== undefined && { temperature: request.temperature }),
       ...(request.maxTokens !== undefined && { maxOutputTokens: request.maxTokens }),
       ...(request.signal && { abortSignal: request.signal }),
+      ...(request.reasoningEffort && {
+        reasoning: request.reasoningEffort === 'max' ? 'xhigh' : request.reasoningEffort,
+      }),
+      ...(request.providerOptions && { providerOptions: request.providerOptions }),
     };
   }
 

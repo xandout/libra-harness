@@ -243,6 +243,74 @@ describe('AISdkModel prompt conversion', () => {
     expect(captured.temperature).toBe(0.5);
     expect(captured.maxOutputTokens).toBe(100);
   });
+
+  it('passes reasoningEffort through to doGenerate', async () => {
+    let captured: any;
+    const model = new AISdkModel(fakeModel({
+      doGenerate: async (opts: any) => {
+        captured = opts;
+        return {
+          content: [{ type: 'text', text: 'ok' }],
+          finishReason: { unified: 'stop', provider: 'stop' },
+          usage: { inputTokens: { total: 0 }, outputTokens: { total: 0 } },
+        };
+      },
+    }));
+
+    await model.generate({
+      messages: [user('think hard')],
+      reasoningEffort: 'high',
+    });
+
+    expect(captured.reasoning).toBe('high');
+  });
+
+  it('maps reasoningEffort max to xhigh for AI SDK compatibility', async () => {
+    let captured: any;
+    const model = new AISdkModel(fakeModel({
+      doGenerate: async (opts: any) => {
+        captured = opts;
+        return {
+          content: [{ type: 'text', text: 'ok' }],
+          finishReason: { unified: 'stop', provider: 'stop' },
+          usage: { inputTokens: { total: 0 }, outputTokens: { total: 0 } },
+        };
+      },
+    }));
+
+    await model.generate({
+      messages: [user('think really hard')],
+      reasoningEffort: 'max',
+    });
+
+    // AI SDK uses 'xhigh'; DeepSeek's 'max' maps to 'xhigh' in the standard reasoning field.
+    expect(captured.reasoning).toBe('xhigh');
+  });
+
+  it('passes providerOptions through to doGenerate', async () => {
+    let captured: any;
+    const model = new AISdkModel(fakeModel({
+      doGenerate: async (opts: any) => {
+        captured = opts;
+        return {
+          content: [{ type: 'text', text: 'ok' }],
+          finishReason: { unified: 'stop', provider: 'stop' },
+          usage: { inputTokens: { total: 0 }, outputTokens: { total: 0 } },
+        };
+      },
+    }));
+
+    await model.generate({
+      messages: [user('hi')],
+      providerOptions: {
+        deepseek: { thinking: { type: 'disabled' } },
+      },
+    });
+
+    expect(captured.providerOptions).toEqual({
+      deepseek: { thinking: { type: 'disabled' } },
+    });
+  });
 });
 
 // ── Streaming ───────────────────────────────────────────────────────

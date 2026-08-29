@@ -55,6 +55,17 @@ export interface AgentConfig {
   /** Default max tokens. */
   maxTokens?: number;
   /**
+   * Default reasoning effort for models that support thinking/reasoning mode.
+   * Set to `'low'` for faster responses, `'high'` for standard reasoning,
+   * or `'max'` for maximum reasoning effort.
+   */
+  reasoningEffort?: 'low' | 'high' | 'max';
+  /**
+   * Default provider-specific options passed through to the model adapter.
+   * Use this for provider-specific features like DeepSeek's thinking mode toggle.
+   */
+  providerOptions?: Record<string, Record<string, unknown>>;
+  /**
    * How to handle errors that no `onError` hook recovered from.
    *
    * Default: `'fallback'` — returns a graceful response instead of
@@ -333,6 +344,8 @@ export class Agent {
         systemPrompt: turn.request.systemPrompt ?? this.config.systemPrompt,
         temperature: this.config.temperature,
         maxTokens: this.config.maxTokens,
+        reasoningEffort: this.config.reasoningEffort,
+        providerOptions: this.config.providerOptions,
         signal: turn.signal,
       };
 
