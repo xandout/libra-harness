@@ -1,6 +1,6 @@
 {
   "name": "@xandout/libra-harness",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "A small, composable, hookable agent harness. Library-first.",
   "type": "module",
   "main": "./dist/index.js",
