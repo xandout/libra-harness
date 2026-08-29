@@ -1,5 +1,5 @@
 {
-  "name": "libra",
+  "name": "libra-harness",
   "version": "0.1.2",
   "description": "A small, composable, hookable agent harness. Library-first.",
   "type": "module",

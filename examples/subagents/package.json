@@ -6,6 +6,6 @@
     "start": "node index.ts"
   },
   "dependencies": {
-    "libra": "link:../.."
+    "libra-harness": "link:../.."
   }
 }

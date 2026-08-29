@@ -7,14 +7,14 @@ The core agent system is responsible for the actual LLM interaction. Everything 
 ## Install
 
 ```bash
-pnpm add libra
+pnpm add libra-harness
 ```
 
 ## Quick Start
 
 ```typescript
-import { Agent } from 'libra'
-import { resolveModel } from 'libra/extras/models'
+import { Agent } from 'libra-harness'
+import { resolveModel } from 'libra-harness/extras/models'
 
 // Resolve a model from environment variables (DEEPSEEK_API_KEY, OPENAI_API_KEY, etc.)
 const model = await resolveModel('deepseek/deepseek-v4-flash')
@@ -121,7 +121,7 @@ File content can be a URL, base64 data, or text:
 Extensions add behavior without requiring the core to understand it.
 
 ```typescript
-import type { Extension } from 'libra'
+import type { Extension } from 'libra-harness'
 
 const loggingExtension: Extension = {
   name: 'logging',
@@ -140,8 +140,8 @@ agent.use(loggingExtension)
 Libra ships with a set of optional extensions under `libra/extras`. Each is importable via its own subpath — import only what you need:
 
 ```typescript
-import { createLoggerExtension } from 'libra/extras/logger'
-import { createDiskSessionExtension } from 'libra/extras/disk-session'
+import { createLoggerExtension } from 'libra-harness/extras/logger'
+import { createDiskSessionExtension } from 'libra-harness/extras/disk-session'
 
 agent.use(createLoggerExtension())
 agent.use(createDiskSessionExtension({ dir: './sessions' }))
@@ -177,9 +177,9 @@ See [`src/extras/README.md`](src/extras/README.md) for full API docs.
 For larger setups, `loadExtensions` accepts a mix of factory functions, `Extension` objects, and directory paths. It passes a shared config object to each factory, sorts by priority, and handles cleanup:
 
 ```typescript
-import { loadExtensions, installExtensions, closeExtensions } from 'libra/extras'
-import { createLoggerExtension } from 'libra/extras/logger'
-import { createMcpExtension } from 'libra/extras/mcp'
+import { loadExtensions, installExtensions, closeExtensions } from 'libra-harness/extras'
+import { createLoggerExtension } from 'libra-harness/extras/logger'
+import { createMcpExtension } from 'libra-harness/extras/mcp'
 
 const loaded = await loadExtensions(
   [
@@ -204,7 +204,7 @@ await closeExtensions(loaded)     // calls close() on extensions that have one (
 The easiest way to get a model is `resolveModel` from `libra/extras/models`. It reads API keys from environment variables and loads the appropriate AI SDK provider package dynamically:
 
 ```typescript
-import { resolveModel } from 'libra/extras/models'
+import { resolveModel } from 'libra-harness/extras/models'
 
 // Reads DEEPSEEK_API_KEY from env, loads @ai-sdk/deepseek
 const model = await resolveModel('deepseek/deepseek-v4-flash')
@@ -233,7 +233,7 @@ Model IDs use the format `provider/model`. Supported providers:
 You can also wrap any AI SDK `LanguageModelV4` directly:
 
 ```typescript
-import { AISdkModel } from 'libra'
+import { AISdkModel } from 'libra-harness'
 import { openai } from '@ai-sdk/openai'
 
 const model = new AISdkModel(openai('gpt-4.1-mini'))
@@ -244,7 +244,7 @@ const model = new AISdkModel(openai('gpt-4.1-mini'))
 Route requests to different models based on input content — e.g. send images to a vision model:
 
 ```typescript
-import { createRoutingModel, hasImageInput } from 'libra/extras/models'
+import { createRoutingModel, hasImageInput } from 'libra-harness/extras/models'
 
 const model = createRoutingModel({
   default: await resolveModel('deepseek/deepseek-v4-flash'),
@@ -259,7 +259,7 @@ const model = createRoutingModel({
 Implement the `Model` interface directly for custom providers:
 
 ```typescript
-import type { Model, ModelRequest, ModelResponse } from 'libra'
+import type { Model, ModelRequest, ModelResponse } from 'libra-harness'
 
 class MyModel implements Model {
   async generate(request: ModelRequest): Promise<ModelResponse> {
@@ -273,9 +273,9 @@ class MyModel implements Model {
 Expose Libra agents as OpenAI-compatible models. Any framework that supports a custom OpenAI base URL can use your agents as models — with their own context, tools, extensions, and policy controls.
 
 ```typescript
-import { Agent } from 'libra'
-import { resolveModel } from 'libra/extras/models'
-import { createOpenAICompatibleServer } from 'libra/extras/openai-provider'
+import { Agent } from 'libra-harness'
+import { resolveModel } from 'libra-harness/extras/models'
+import { createOpenAICompatibleServer } from 'libra-harness/extras/openai-provider'
 
 const model = await resolveModel('deepseek/deepseek-v4-flash')
 
@@ -398,7 +398,7 @@ await codingAgent.run({ message: 'Write a function' })
 Use `createAgentTool` to wrap an agent as a tool for an outer agent. Signal and metadata are automatically chained — if the outer turn is halted, the inner agent is also halted.
 
 ```typescript
-import { Agent, createAgentTool } from 'libra'
+import { Agent, createAgentTool } from 'libra-harness'
 
 const researchAgent = new Agent({ model, systemPrompt: 'You are a research agent.' })
 
@@ -422,7 +422,7 @@ Libra supports streaming model output via an optional `onDelta` callback on `Mod
 Extensions enable streaming by setting `onDelta` on `ctx.modelRequest` in a `beforeLLM` hook:
 
 ```typescript
-import type { Extension, ModelDelta } from 'libra'
+import type { Extension, ModelDelta } from 'libra-harness'
 
 const streamingExtension: Extension = {
   name: 'streaming',

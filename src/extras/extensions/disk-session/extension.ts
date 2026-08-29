@@ -1,7 +1,7 @@
 import { readFileSync, appendFileSync, mkdirSync, readdirSync, writeFileSync, existsSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Extension } from 'libra';
-import type { Message, MessageContent, Role, ToolCall } from 'libra';
+import type { Extension } from 'libra-harness';
+import type { Message, MessageContent, Role, ToolCall } from 'libra-harness';
 
 /**
  * A single record in a session's JSONL log.

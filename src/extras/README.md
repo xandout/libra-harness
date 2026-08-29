@@ -15,8 +15,8 @@ These extensions are bundled with `libra` — no separate install. They're publi
 Each extension is a factory function exported from its own subpath:
 
 ```typescript
-import { createLoggerExtension } from 'libra/extras/logger';
-import { createSessionExtension } from 'libra/extras/session';
+import { createLoggerExtension } from 'libra-harness/extras/logger';
+import { createSessionExtension } from 'libra-harness/extras/session';
 
 const logger = createLoggerExtension();
 const session = createSessionExtension();
@@ -44,10 +44,10 @@ For larger setups, `loadExtensions` accepts a mix of factory functions, ready-ma
 > **Priority** controls both the order the loader calls `installExtensions` *and* the order hooks execute within each lifecycle stage (higher = runs first, ties keep registration order). This applies to `agent.use()` directly — not just the loader — so explicit `use()` calls also respect `Extension.priority`.
 
 ```typescript
-import { loadExtensions, installExtensions, closeExtensions } from 'libra/extras';
-import { createLoggerExtension } from 'libra/extras/logger';
-import { createMcpExtension } from 'libra/extras/mcp';
-import { createSkillExtension } from 'libra/extras/skills';
+import { loadExtensions, installExtensions, closeExtensions } from 'libra-harness/extras';
+import { createLoggerExtension } from 'libra-harness/extras/logger';
+import { createMcpExtension } from 'libra-harness/extras/mcp';
+import { createSkillExtension } from 'libra-harness/extras/skills';
 
 const loaded = await loadExtensions(
   [
@@ -76,7 +76,7 @@ await closeExtensions(loaded); // calls close() on extensions that have one (e.g
 You can also load all built-in extensions from the shared directory without importing each factory:
 
 ```typescript
-import { loadExtensions, sharedExtensionsDir } from 'libra/extras';
+import { loadExtensions, sharedExtensionsDir } from 'libra-harness/extras';
 
 const loaded = await loadExtensions(
   [sharedExtensionsDir, './extensions'],

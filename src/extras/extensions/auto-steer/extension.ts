@@ -35,7 +35,7 @@ export interface AutoSteerConfig {
  *
  * @example
  * ```typescript
- * import { createAutoSteerExtension } from 'libra/extras/auto-steer';
+ * import { createAutoSteerExtension } from 'libra-harness/extras/auto-steer';
  *
  * const autoSteer = createAutoSteerExtension({
  *   maxIterations: 15,

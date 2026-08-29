@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
-import { Agent } from 'libra';
-import { resolveModel } from 'libra/extras/models';
-import { createStreamingExtension } from 'libra/extras/streaming';
+import { Agent } from 'libra-harness';
+import { resolveModel } from 'libra-harness/extras/models';
+import { createStreamingExtension } from 'libra-harness/extras/streaming';
 
 // Load .env if present.
 try {

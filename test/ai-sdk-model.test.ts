@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AISdkModel, type Message, type MessageContent, type ToolDefinition } from 'libra';
+import { AISdkModel, type Message, type MessageContent, type ToolDefinition } from 'libra-harness';
 
 // ── Fake V4 LanguageModel ───────────────────────────────────────────
 

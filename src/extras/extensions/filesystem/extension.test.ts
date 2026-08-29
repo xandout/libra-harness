@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { Agent } from 'libra';
+import { Agent } from 'libra-harness';
 import createFilesystemExtension from './extension.js';
 
 // Minimal model that never actually calls the LLM — we just need the

@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { Agent } from 'libra';
-import type { Extension } from 'libra';
+import { Agent } from 'libra-harness';
+import type { Extension } from 'libra-harness';
 import createScriptsExtension, { type FsHelper } from './extension.js';
 
 // Minimal model that never calls the LLM — we only need tools registered.

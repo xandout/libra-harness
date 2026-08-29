@@ -1,8 +1,8 @@
 import { readFileSync } from 'node:fs';
-import { Agent, type AgentResponse } from 'libra';
-import { resolveModel } from 'libra/extras/models';
-import { createStructuredOutputExtension } from 'libra/extras/structured-output';
-import { createLoggerExtension } from 'libra/extras/logger';
+import { Agent, type AgentResponse } from 'libra-harness';
+import { resolveModel } from 'libra-harness/extras/models';
+import { createStructuredOutputExtension } from 'libra-harness/extras/structured-output';
+import { createLoggerExtension } from 'libra-harness/extras/logger';
 
 // Load .env if present.
 try {

@@ -1,17 +1,17 @@
 import 'node:process';
 import { readFileSync } from 'node:fs';
-import { Agent, messageContentToText } from 'libra';
-import { resolveModel } from 'libra/extras/models';
-import { loadExtensions, installExtensions, closeExtensions } from 'libra/extras';
-import { createLoggerExtension } from 'libra/extras/logger';
-import { createMemSessionExtension } from 'libra/extras/mem-session';
-import { createWeatherToolExtension } from 'libra/extras/weather-tool';
-import { createEmojiExtension } from 'libra/extras/emoji';
-import { timestampExtension } from 'libra/extras/timestamp';
-import { createStreamingExtension } from 'libra/extras/streaming';
-import { createStructuredOutputExtension } from 'libra/extras/structured-output';
-import { createSkillExtension } from 'libra/extras/skills';
-import { createMcpExtension } from 'libra/extras/mcp';
+import { Agent, messageContentToText } from 'libra-harness';
+import { resolveModel } from 'libra-harness/extras/models';
+import { loadExtensions, installExtensions, closeExtensions } from 'libra-harness/extras';
+import { createLoggerExtension } from 'libra-harness/extras/logger';
+import { createMemSessionExtension } from 'libra-harness/extras/mem-session';
+import { createWeatherToolExtension } from 'libra-harness/extras/weather-tool';
+import { createEmojiExtension } from 'libra-harness/extras/emoji';
+import { timestampExtension } from 'libra-harness/extras/timestamp';
+import { createStreamingExtension } from 'libra-harness/extras/streaming';
+import { createStructuredOutputExtension } from 'libra-harness/extras/structured-output';
+import { createSkillExtension } from 'libra-harness/extras/skills';
+import { createMcpExtension } from 'libra-harness/extras/mcp';
 
 // Load .env if present (no dependency needed).
 try {

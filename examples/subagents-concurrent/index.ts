@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
-import { Agent, createAgentTool, type Tool } from 'libra';
-import { resolveModel } from 'libra/extras/models';
-import { createLoggerExtension } from 'libra/extras/logger';
+import { Agent, createAgentTool, type Tool } from 'libra-harness';
+import { resolveModel } from 'libra-harness/extras/models';
+import { createLoggerExtension } from 'libra-harness/extras/logger';
 
 // Load .env if present.
 try {

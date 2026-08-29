@@ -355,8 +355,8 @@ async function handleRequest(
  *
  * @example
  * ```typescript
- * import { Agent } from 'libra';
- * import { createOpenAICompatibleServer } from 'libra/extras/openai-provider';
+ * import { Agent } from 'libra-harness';
+ * import { createOpenAICompatibleServer } from 'libra-harness/extras/openai-provider';
  *
  * const server = createOpenAICompatibleServer({
  *   agents: {
