@@ -153,7 +153,9 @@ export class AISdkModel implements Model {
       ...(request.reasoningEffort && {
         reasoning: request.reasoningEffort === 'max' ? 'xhigh' : request.reasoningEffort,
       }),
-      ...(request.providerOptions && { providerOptions: request.providerOptions }),
+      ...(request.providerOptions && {
+        providerOptions: request.providerOptions as Record<string, import('@ai-sdk/provider').JSONObject>,
+      }),
     };
   }
 
