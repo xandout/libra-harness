@@ -60,9 +60,11 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish libra-harness to GitHub Packages
-        run: npm publish --access public --registry https://npm.pkg.github.com
+        run: |
+          echo "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}" >> ~/.npmrc
+          npm publish --access public --registry https://npm.pkg.github.com
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and publish libra-code to npm
         run: |
@@ -87,9 +89,10 @@ jobs:
       - name: Publish libra-code to GitHub Packages
         run: |
           cd extras/libra-code
+          echo "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}" >> ~/.npmrc
           npm publish --access public --registry https://npm.pkg.github.com
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
