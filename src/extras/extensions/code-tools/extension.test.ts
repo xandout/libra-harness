@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Agent } from '@xandout/libra-harness';
@@ -40,7 +40,7 @@ describe('code-tools extension', () => {
       // Access the tool directly via the agent's tool registry.
       const tools = (agent as any).tools as Map<string, any>;
       expect(tools).toBeDefined();
-      expect(tools.size).toBe(1);
+      expect(tools.size).toBe(3); // read, write, edit
 
       const readTool = tools.get('read');
       expect(readTool).toBeDefined();
@@ -174,6 +174,234 @@ describe('code-tools extension', () => {
     });
   });
 
+  // ── write tool ─────────────────────────────────────────────────────
+  describe('write tool', () => {
+    it('creates a new file', async () => {
+      const filePath = join(tmpDir, 'new.txt');
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const writeTool = tools.get('write');
+
+      const result = await writeTool.execute(
+        { file_path: filePath, content: 'hello world' },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('Wrote 11 chars');
+      expect(readFileSync(filePath, 'utf-8')).toBe('hello world');
+    });
+
+    it('creates parent directories', async () => {
+      const filePath = join(tmpDir, 'sub', 'dir', 'file.txt');
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const writeTool = tools.get('write');
+
+      const result = await writeTool.execute(
+        { file_path: filePath, content: 'nested' },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('Wrote');
+      expect(readFileSync(filePath, 'utf-8')).toBe('nested');
+    });
+
+    it('overwrites an existing file after reading it', async () => {
+      const filePath = join(tmpDir, 'existing.txt');
+      writeFileSync(filePath, 'old content');
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const readTool = tools.get('read');
+      const writeTool = tools.get('write');
+
+      const metadata: Record<string, unknown> = {};
+      // Read first
+      await readTool.execute(
+        { file_path: filePath },
+        { signal: new AbortController().signal, metadata },
+      );
+      // Now overwrite
+      const result = await writeTool.execute(
+        { file_path: filePath, content: 'new content' },
+        { signal: new AbortController().signal, metadata },
+      );
+
+      expect(result.content).toContain('Wrote');
+      expect(readFileSync(filePath, 'utf-8')).toBe('new content');
+    });
+
+    it('refuses to overwrite without reading first', async () => {
+      const filePath = join(tmpDir, 'protected.txt');
+      writeFileSync(filePath, 'original');
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const writeTool = tools.get('write');
+
+      const result = await writeTool.execute(
+        { file_path: filePath, content: 'hacked' },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain('must read');
+      expect(readFileSync(filePath, 'utf-8')).toBe('original');
+    });
+  });
+
+  // ── edit tool ──────────────────────────────────────────────────────
+  describe('edit tool', () => {
+    it('replaces a unique string', async () => {
+      const filePath = join(tmpDir, 'edit.txt');
+      writeFileSync(filePath, 'const x = 1;\nconst y = 2;\n');
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const readTool = tools.get('read');
+      const editTool = tools.get('edit');
+
+      const metadata: Record<string, unknown> = {};
+      await readTool.execute(
+        { file_path: filePath },
+        { signal: new AbortController().signal, metadata },
+      );
+
+      const result = await editTool.execute(
+        { file_path: filePath, old_string: 'const x = 1;', new_string: 'const x = 42;' },
+        { signal: new AbortController().signal, metadata },
+      );
+
+      expect(result.content).toContain('Replaced 1 occurrence');
+      expect(readFileSync(filePath, 'utf-8')).toBe('const x = 42;\nconst y = 2;\n');
+    });
+
+    it('fails if old_string not found', async () => {
+      const filePath = join(tmpDir, 'no-match.txt');
+      writeFileSync(filePath, 'hello world');
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const readTool = tools.get('read');
+      const editTool = tools.get('edit');
+
+      const metadata: Record<string, unknown> = {};
+      await readTool.execute(
+        { file_path: filePath },
+        { signal: new AbortController().signal, metadata },
+      );
+
+      const result = await editTool.execute(
+        { file_path: filePath, old_string: 'nonexistent', new_string: 'replacement' },
+        { signal: new AbortController().signal, metadata },
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain('not found');
+    });
+
+    it('fails on non-unique match without replace_all', async () => {
+      const filePath = join(tmpDir, 'dup.txt');
+      writeFileSync(filePath, 'const x = 1;\nconst x = 1;\n');
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const readTool = tools.get('read');
+      const editTool = tools.get('edit');
+
+      const metadata: Record<string, unknown> = {};
+      await readTool.execute(
+        { file_path: filePath },
+        { signal: new AbortController().signal, metadata },
+      );
+
+      const result = await editTool.execute(
+        { file_path: filePath, old_string: 'const x = 1;', new_string: 'const x = 2;' },
+        { signal: new AbortController().signal, metadata },
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain('2 times');
+    });
+
+    it('replaces all occurrences with replace_all', async () => {
+      const filePath = join(tmpDir, 'all.txt');
+      writeFileSync(filePath, 'foo bar foo bar foo');
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const readTool = tools.get('read');
+      const editTool = tools.get('edit');
+
+      const metadata: Record<string, unknown> = {};
+      await readTool.execute(
+        { file_path: filePath },
+        { signal: new AbortController().signal, metadata },
+      );
+
+      const result = await editTool.execute(
+        { file_path: filePath, old_string: 'foo', new_string: 'baz', replace_all: true },
+        { signal: new AbortController().signal, metadata },
+      );
+
+      expect(result.content).toContain('Replaced 3 occurrences');
+      expect(readFileSync(filePath, 'utf-8')).toBe('baz bar baz bar baz');
+    });
+
+    it('refuses to edit without reading first', async () => {
+      const filePath = join(tmpDir, 'unread.txt');
+      writeFileSync(filePath, 'original');
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const editTool = tools.get('edit');
+
+      const result = await editTool.execute(
+        { file_path: filePath, old_string: 'original', new_string: 'changed' },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain('must read');
+    });
+
+    it('rejects identical old_string and new_string', async () => {
+      const filePath = join(tmpDir, 'same.txt');
+      writeFileSync(filePath, 'hello');
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const readTool = tools.get('read');
+      const editTool = tools.get('edit');
+
+      const metadata: Record<string, unknown> = {};
+      await readTool.execute(
+        { file_path: filePath },
+        { signal: new AbortController().signal, metadata },
+      );
+
+      const result = await editTool.execute(
+        { file_path: filePath, old_string: 'hello', new_string: 'hello' },
+        { signal: new AbortController().signal, metadata },
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain('must differ');
+    });
+  });
+
   // ── Extension config ───────────────────────────────────────────────
   describe('configuration', () => {
     it('supports tool prefix', async () => {
@@ -182,6 +410,8 @@ describe('code-tools extension', () => {
 
       const tools = (agent as any).tools as Map<string, any>;
       expect(tools.get('code_read')).toBeDefined();
+      expect(tools.get('code_write')).toBeDefined();
+      expect(tools.get('code_edit')).toBeDefined();
     });
 
     it('respects maxReadSize', async () => {
