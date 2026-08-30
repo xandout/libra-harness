@@ -57,9 +57,9 @@ interface TuiProps {
   stats: SessionStats;
   streamingText: string;
   isRunning: boolean;
-  inputText: string;
-  onInput: (text: string) => void;
   onSubmit: (text: string) => void;
+  onSteer: (text: string) => void;
+  onHalt: () => void;
   onExit: () => void;
 }
 
@@ -116,7 +116,7 @@ function DiffLines({ changes }: { changes: FileChange[] }): React.ReactNode[] {
       <Text bold color={change.isNew ? 'green' : 'yellow'}>
         {change.isNew ? '[new] ' : '[edit] '}
       </Text>
-      <Text bold>{shortPath(change.path, 60)}</Text>
+      <Text bold wrap="wrap">{change.path}</Text>
       <Text dimColor> ({change.tool})</Text>
     </Box>,
   );
@@ -314,113 +314,171 @@ function StatsLines({ stats }: { stats: SessionStats }): React.ReactNode[] {
   return nodes;
 }
 
-// ── Status bar ───────────────────────────────────────────────────────
-function StatusBar({
+// ── Tool activity lines (for sidebar) ────────────────────────────────
+function ToolActivityLines({
   toolActivity,
-  todos,
   isRunning,
-  activePanel,
 }: {
   toolActivity: ToolActivity[];
-  todos: TodoItem[];
   isRunning: boolean;
-  activePanel: ActivePanel;
-}) {
-  const latestTool = toolActivity[toolActivity.length - 1];
+}): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  const k = (s: string) => `tool-${s}`;
+
+  if (toolActivity.length === 0 && !isRunning) {
+    nodes.push(<Text key={k('empty')} dimColor italic> No tool activity</Text>);
+    return nodes;
+  }
+
   const completedTools = toolActivity.filter((t) => t.status === 'done').length;
   const errorTools = toolActivity.filter((t) => t.status === 'error').length;
   const totalTools = toolActivity.length;
 
+  // Summary line.
+  nodes.push(
+    <Box key={k('summary')} justifyContent="space-between">
+      <Text dimColor>tools</Text>
+      <Text bold>{totalTools}{errorTools > 0 ? <Text color="red"> ({errorTools}✗)</Text> : null}</Text>
+    </Box>,
+  );
+
+  // Show last 8 tool calls — let the panel width handle wrapping.
+  const recent = toolActivity.slice(-8);
+  for (let i = 0; i < recent.length; i++) {
+    const t = recent[i];
+    const icon = t.status === 'done' ? '✓' : t.status === 'error' ? '✗' : '→';
+    const color = t.status === 'error' ? 'red' : t.status === 'done' ? 'green' : 'yellow';
+    nodes.push(
+      <Box key={k(`item-${i}`)} flexDirection="row">
+        <Text color={color as any} bold>{icon} </Text>
+        <Text dimColor wrap="wrap">{t.name} {t.detail}</Text>
+      </Box>,
+    );
+  }
+
+  return nodes;
+}
+
+// ── Status bar ───────────────────────────────────────────────────────
+function StatusBar({
+  todos,
+  isRunning,
+  activePanel,
+}: {
+  todos: TodoItem[];
+  isRunning: boolean;
+  activePanel: ActivePanel;
+}) {
   const todoDone = todos.filter((t) => t.status === 'completed').length;
-  const todoInProgress = todos.find((t) => t.status === 'in_progress');
   const todoSummary = todos.length > 0
-    ? `todos: ${todoDone}/${todos.length}${todoInProgress ? ` | ▶ ${truncate(todoInProgress.content, 30)}` : ''}`
+    ? `todos ${todoDone}/${todos.length}`
     : '';
 
   return (
-    <Box flexDirection="column">
-      {/* Tool activity line */}
-      <Box>
-        <Text color={isRunning ? 'yellow' : 'gray'}>
-          {isRunning ? '●' : '○'}
-        </Text>
-        <Text> </Text>
-        {latestTool ? (
-          <Text>
-            <Text color={latestTool.status === 'error' ? 'red' : latestTool.status === 'done' ? 'green' : 'yellow'}>
-              {latestTool.status === 'done' ? '✓' : latestTool.status === 'error' ? '✗' : '→'}
-            </Text>
-            {' '}
-            <Text bold>{latestTool.name}</Text>
-            <Text dimColor>({truncate(latestTool.detail, 40)})</Text>
-            {' '}
-            <Text dimColor>[{completedTools}✓ {errorTools}✗ /{totalTools}]</Text>
-          </Text>
-        ) : (
-          <Text dimColor italic>No tool activity</Text>
-        )}
-      </Box>
-
-      {/* Todo + status line */}
-      <Box>
-        <Text dimColor>
-          {todoSummary}
-          {todoSummary && isRunning ? ' | ' : ''}
-          {isRunning ? <Text color="yellow">working…</Text> : <Text color="green">idle</Text>}
-          {' | '}
-          <Text color={activePanel === 'chat' ? 'cyan' : 'gray'}>[Chat]</Text>
-          {' '}
-          <Text color={activePanel === 'diff' ? 'cyan' : 'gray'}>[Diff]</Text>
-          {' '}
-          <Text color={activePanel === 'todos' ? 'cyan' : 'gray'}>[Todos]</Text>
-          {' '}
-          <Text dimColor>Tab to switch | ↑↓ scroll | Enter send | Ctrl+C quit</Text>
-        </Text>
-      </Box>
+    <Box>
+      {/* Status badge with solid background */}
+      <Text backgroundColor={isRunning ? 'yellow' : 'green'} color="black" bold>
+        {isRunning ? ' WORKING ' : ' IDLE '}
+      </Text>
+      <Text> </Text>
+      {todoSummary ? <Text dimColor>{todoSummary}  </Text> : null}
+      <Text dimColor>│ </Text>
+      <Text color={activePanel === 'chat' ? 'cyan' : 'gray'}>[Chat] </Text>
+      <Text color={activePanel === 'diff' ? 'cyan' : 'gray'}>[Diff] </Text>
+      <Text color={activePanel === 'todos' ? 'cyan' : 'gray'}>[Todos] </Text>
+      <Text dimColor>Tab switch · Ctrl+E expand · ↑↓ scroll · Ctrl+J jump bottom · Enter send/steer · Ctrl+K halt · Ctrl+C quit</Text>
     </Box>
   );
 }
 
 // ── Input box ────────────────────────────────────────────────────────
+// Self-contained input with local state. This decouples keystroke
+// handling from the parent's throttled render cycle — the useInput
+// callback uses functional setState updates so it always has the
+// latest text regardless of when the parent re-renders.
 function InputBox({
-  inputText,
   isRunning,
-  onInput,
   onSubmit,
+  onSteer,
 }: {
-  inputText: string;
   isRunning: boolean;
-  onInput: (text: string) => void;
   onSubmit: (text: string) => void;
+  onSteer: (text: string) => void;
 }) {
+  const [text, setText] = useState('');
+  // Track isRunning in a ref so the useInput callback (which may be
+  // registered once and not re-registered on re-render) always sees
+  // the current value.
+  const runningRef = useRef(isRunning);
+  runningRef.current = isRunning;
+
   useInput((input, key) => {
+    // Enter — submit or steer (unless shift is held for newline).
     if (key.return) {
-      if (inputText.trim() && !isRunning) {
-        onSubmit(inputText);
+      if (key.shift) {
+        setText((prev) => prev + '\n');
+        return;
+      }
+      if (text.trim()) {
+        if (runningRef.current) {
+          onSteer(text);
+        } else {
+          onSubmit(text);
+        }
+        setText('');
       }
       return;
     }
+
+    // Backspace/delete — remove last char.
     if (key.backspace || key.delete) {
-      if (inputText.length > 0) {
-        onInput(inputText.slice(0, -1));
-      }
+      setText((prev) => prev.slice(0, -1));
       return;
     }
+
+    // Ctrl+U — clear all.
     if (key.ctrl && input === 'u') {
-      onInput('');
+      setText('');
       return;
     }
-    if (input && !key.ctrl && !key.meta && input.length === 1 && input.charCodeAt(0) >= 32) {
-      onInput(inputText + input);
+
+    // Ctrl+W — delete last word.
+    if (key.ctrl && input === 'w') {
+      setText((prev) => prev.replace(/\s*\S+\s*$/, ''));
+      return;
+    }
+
+    // Regular input or paste — accept any printable text (single char
+    // or multi-char paste). Ignore ctrl/meta combos (handled elsewhere).
+    // Standalone tab is handled by the global useInput for panel switching;
+    // only accept tabs that are part of a multi-char paste.
+    if (input && !key.ctrl && !key.meta && !(key.tab && input.length <= 1)) {
+      // Filter out non-printable control chars but allow newlines and tabs from paste.
+      const filtered = input.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
+      if (filtered) {
+        setText((prev) => prev + filtered);
+      }
     }
   });
 
+  // Render: show text with cursor. Support multi-line display.
+  const displayText = text || '';
+  const hasText = displayText.length > 0;
+
   return (
-    <Box borderStyle="round" borderColor={isRunning ? '#444' : '#555'} marginX={1}>
+    <Box borderStyle="round" borderColor={isRunning ? '#444' : '#555'} marginX={1} minHeight={3}>
       <Text dimColor>{isRunning ? '⏳' : '>'} </Text>
-      <Text color={isRunning ? 'gray' : 'white'}>{inputText}</Text>
-      {!isRunning && <Text color="gray">▋</Text>}
-      {isRunning && <Text dimColor italic> (waiting for agent…)</Text>}
+      {hasText ? (
+        <Text color={isRunning ? 'yellow' : 'white'}>{displayText}</Text>
+      ) : (
+        <Text dimColor italic>
+          {isRunning
+            ? ' type to steer, Enter to inject · Ctrl+K to halt'
+            : ' type your message… (Shift+Enter for newline, Ctrl+W del word)'}
+        </Text>
+      )}
+      {hasText && <Text color="gray">▋</Text>}
+      {isRunning && hasText && <Text dimColor> ↵ steer</Text>}
     </Box>
   );
 }
@@ -434,19 +492,21 @@ export function TuiApp({
   stats,
   streamingText,
   isRunning,
-  inputText,
-  onInput,
   onSubmit,
+  onSteer,
+  onHalt,
   onExit,
 }: TuiProps) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const [activePanel, setActivePanel] = useState<ActivePanel>('chat');
+  const [expanded, setExpanded] = useState<ActivePanel | null>(null);
 
   const chatScrollRef = useRef<ScrollViewRef>(null);
   const diffScrollRef = useRef<ScrollViewRef>(null);
   const todosScrollRef = useRef<ScrollViewRef>(null);
   const statsScrollRef = useRef<ScrollViewRef>(null);
+  const activityScrollRef = useRef<ScrollViewRef>(null);
 
   // Track whether we should stick to the bottom of each panel.
   const chatStickToBottom = useRef(true);
@@ -483,21 +543,53 @@ export function TuiApp({
       diffScrollRef.current?.remeasure();
       todosScrollRef.current?.remeasure();
       statsScrollRef.current?.remeasure();
+      activityScrollRef.current?.remeasure();
     };
     stdout?.on('resize', handleResize);
     return () => { stdout?.off('resize', handleResize); };
   }, [stdout]);
 
-  // Global keyboard: Tab to switch panels, scroll with arrows, q to quit.
+  // Global keyboard: Tab to switch panels, scroll with arrows, Ctrl+E to expand.
   useInput((input, key) => {
     if (key.ctrl && input === 'c') {
       exit();
       onExit();
       return;
     }
+    // Ctrl+K halts the running agent.
+    if (key.ctrl && input === 'k') {
+      if (isRunning) {
+        onHalt();
+      }
+      return;
+    }
+    // Ctrl+E toggles between split view and expanded view.
+    if (key.ctrl && input === 'e') {
+      setExpanded((prev) => (prev === activePanel ? null : activePanel));
+      // Remeasure all scroll views after layout change.
+      setTimeout(() => {
+        chatScrollRef.current?.remeasure();
+        diffScrollRef.current?.remeasure();
+        todosScrollRef.current?.remeasure();
+        statsScrollRef.current?.remeasure();
+        activityScrollRef.current?.remeasure();
+      }, 50);
+      return;
+    }
     // Tab cycles between chat, diff, and todos panels.
-    if (key.tab) {
-      setActivePanel((prev) => prev === 'chat' ? 'diff' : prev === 'diff' ? 'todos' : 'chat');
+    // Only treat a standalone Tab as panel switch — if input is longer
+    // than 1 char (paste with tabs), let InputBox handle it as text.
+    if (key.tab && input.length <= 1) {
+      const next = activePanel === 'chat' ? 'diff' : activePanel === 'diff' ? 'todos' : 'chat';
+      setActivePanel(next);
+      setExpanded((prev) => (prev !== null ? next : prev));
+      setTimeout(() => {
+        chatScrollRef.current?.remeasure();
+        diffScrollRef.current?.remeasure();
+        todosScrollRef.current?.remeasure();
+        statsScrollRef.current?.remeasure();
+        activityScrollRef.current?.remeasure();
+      }, 50);
       return;
     }
     // Scroll the active panel.
@@ -547,12 +639,25 @@ export function TuiApp({
       }
       return;
     }
+    // End or Ctrl+J — jump to bottom of active panel.
+    if (key.ctrl && input === 'j') {
+      if (activePanel === 'chat') {
+        chatStickToBottom.current = true;
+        chatScrollRef.current?.scrollToBottom();
+      } else if (activePanel === 'diff') {
+        diffStickToBottom.current = true;
+        diffScrollRef.current?.scrollToBottom();
+      } else {
+        todosScrollRef.current?.scrollToBottom();
+      }
+      return;
+    }
   });
 
   // Compute panel height from terminal size.
-  // Layout: header(1) + panels(N) + statusbar(2) + input(3) = total
+  // Layout: header(1) + panels(N) + statusbar(1) + input(3) = total
   const termHeight = stdout?.rows ?? 24;
-  const panelHeight = Math.max(termHeight - 1 - 2 - 3, 5);
+  const panelHeight = Math.max(termHeight - 1 - 1 - 3, 5);
   // Inside each panel: border(2) + title(1) = 3 lines of chrome.
   const scrollHeight = Math.max(panelHeight - 3, 2);
 
@@ -564,20 +669,22 @@ export function TuiApp({
         <Text dimColor> — libra code agent</Text>
       </Box>
 
-      {/* Three columns: Diff (left), Chat (center), Todos (right) */}
+      {/* Panel row — supports expand/collapse via Ctrl+E */}
       <Box flexDirection="row" height={panelHeight} marginX={1}>
-        {/* Diff viewer (left) */}
+        {/* Diff viewer — hidden when another panel is expanded */}
+        {expanded !== 'chat' && expanded !== 'todos' && (
         <Box
           flexDirection="column"
           borderStyle="round"
           borderColor={activePanel === 'diff' ? '#555' : '#333'}
-          width="40%"
+          width={expanded === 'diff' ? '100%' : '40%'}
           height="100%"
           overflow="hidden"
         >
           <Box paddingX={1}>
             <Text bold dimColor>Changes</Text>
             {activePanel === 'diff' && <Text color="cyan"> ←</Text>}
+            {expanded === 'diff' && <Text color="green" bold> (expanded)</Text>}
           </Box>
           <Box flexDirection="column" flexGrow={1} paddingX={1} overflow="hidden">
             <ScrollView
@@ -593,19 +700,22 @@ export function TuiApp({
             </ScrollView>
           </Box>
         </Box>
+        )}
 
-        {/* Chat panel (center) */}
+        {/* Chat panel — hidden when another panel is expanded */}
+        {expanded !== 'diff' && expanded !== 'todos' && (
         <Box
           flexDirection="column"
           borderStyle="round"
           borderColor={activePanel === 'chat' ? '#555' : '#333'}
-          width="42%"
+          width={expanded === 'chat' ? '100%' : '42%'}
           height="100%"
           overflow="hidden"
         >
           <Box paddingX={1}>
             <Text bold dimColor>Chat</Text>
             {activePanel === 'chat' && <Text color="cyan"> ←</Text>}
+            {expanded === 'chat' && <Text color="green" bold> (expanded)</Text>}
           </Box>
           <Box flexDirection="column" flexGrow={1} paddingX={1} overflow="hidden">
             <ScrollView
@@ -621,34 +731,37 @@ export function TuiApp({
             </ScrollView>
           </Box>
         </Box>
+        )}
 
-        {/* Right column: Todos (top) + Stats (bottom) */}
-        <Box flexDirection="column" width="22%" height="100%">
+        {/* Right column — hidden when chat or diff is expanded */}
+        {expanded !== 'chat' && expanded !== 'diff' && (
+        <Box flexDirection="column" width={expanded === 'todos' ? '100%' : '22%'} height="100%">
           {/* Todos panel (top) */}
           <Box
             flexDirection="column"
             borderStyle="round"
             borderColor={activePanel === 'todos' ? '#555' : '#333'}
-            height="50%"
+            height={expanded === 'todos' ? '40%' : '30%'}
             overflow="hidden"
           >
             <Box paddingX={1}>
               <Text bold dimColor>Todos</Text>
               {activePanel === 'todos' && <Text color="cyan"> ←</Text>}
+              {expanded === 'todos' && <Text color="green" bold> (expanded)</Text>}
             </Box>
             <Box flexDirection="column" flexGrow={1} paddingX={1} overflow="hidden">
-              <ScrollView ref={todosScrollRef} height={Math.max(Math.floor(scrollHeight * 0.5), 2)}>
+              <ScrollView ref={todosScrollRef} height={Math.max(Math.floor(scrollHeight * (expanded === 'todos' ? 0.4 : 0.3)), 2)}>
                 {TodoLines({ todos })}
               </ScrollView>
             </Box>
           </Box>
 
-          {/* Stats panel (bottom) */}
+          {/* Stats panel (middle) */}
           <Box
             flexDirection="column"
             borderStyle="round"
             borderColor="#333"
-            height="50%"
+            height={expanded === 'todos' ? '30%' : '35%'}
             marginTop={0}
             overflow="hidden"
           >
@@ -656,18 +769,38 @@ export function TuiApp({
               <Text bold dimColor>Stats</Text>
             </Box>
             <Box flexDirection="column" flexGrow={1} paddingX={1} overflow="hidden">
-              <ScrollView ref={statsScrollRef} height={Math.max(Math.floor(scrollHeight * 0.5), 2)}>
+              <ScrollView ref={statsScrollRef} height={Math.max(Math.floor(scrollHeight * (expanded === 'todos' ? 0.3 : 0.35)), 2)}>
                 {StatsLines({ stats })}
               </ScrollView>
             </Box>
           </Box>
+
+          {/* Tool activity panel (bottom) */}
+          <Box
+            flexDirection="column"
+            borderStyle="round"
+            borderColor="#333"
+            height={expanded === 'todos' ? '30%' : '35%'}
+            marginTop={0}
+            overflow="hidden"
+          >
+            <Box paddingX={1}>
+              <Text bold dimColor>Activity</Text>
+            </Box>
+            <Box flexDirection="column" flexGrow={1} paddingX={1} overflow="hidden">
+              <ScrollView ref={activityScrollRef} height={Math.max(Math.floor(scrollHeight * (expanded === 'todos' ? 0.3 : 0.35)), 2)}>
+                {ToolActivityLines({ toolActivity, isRunning })}
+              </ScrollView>
+            </Box>
+          </Box>
         </Box>
+        )}
+
       </Box>
 
       {/* Status bar */}
       <Box marginX={1}>
         <StatusBar
-          toolActivity={toolActivity}
           todos={todos}
           isRunning={isRunning}
           activePanel={activePanel}
@@ -676,10 +809,9 @@ export function TuiApp({
 
       {/* Input box */}
       <InputBox
-        inputText={inputText}
         isRunning={isRunning}
-        onInput={onInput}
         onSubmit={onSubmit}
+        onSteer={onSteer}
       />
     </Box>
   );

@@ -802,9 +802,9 @@ describe('15. Steering (mid-turn redirection)', () => {
     const model = new MockModel([
       toolCallResponse([toolCall('tc1', 'work')]),
       (req) => {
-        // Verify the steering message was injected.
+        // Verify the steering message was injected as a user message.
         const steeringMsg = req.messages.find(
-          (m) => m.role === 'user' && m.content === '[STEER] Stop, just say done.',
+          (m) => m.role === 'user' && m.content === '[steering] [STEER] Stop, just say done.',
         );
         if (!steeringMsg) throw new Error('steering message not found in second call');
         return textResponse('done');
@@ -1020,7 +1020,7 @@ describe('19. Concurrent RunHandle steer/halt independence', () => {
     const modelA = new MockModel([
       toolCallResponse([toolCall('tc1', 'work')]),
       (req) => {
-        const steerMsg = req.messages.find((m) => m.role === 'user' && m.content === 'steer-A');
+        const steerMsg = req.messages.find((m) => m.role === 'user' && m.content === '[steering] steer-A');
         if (!steerMsg) throw new Error('steer-A not found');
         return textResponse('A done');
       },
@@ -1028,7 +1028,7 @@ describe('19. Concurrent RunHandle steer/halt independence', () => {
     const modelB = new MockModel([
       toolCallResponse([toolCall('tc1', 'work')]),
       (req) => {
-        const steerMsg = req.messages.find((m) => m.role === 'user' && m.content === 'steer-B');
+        const steerMsg = req.messages.find((m) => m.role === 'user' && m.content === '[steering] steer-B');
         if (!steerMsg) throw new Error('steer-B not found');
         return textResponse('B done');
       },
@@ -1086,7 +1086,7 @@ describe('20. TurnContext-level steer/halt', () => {
       toolCallResponse([toolCall('tc1', 'work')]),
       (req) => {
         const steerMsg = req.messages.find(
-          (m) => m.role === 'user' && m.content === 'turn-level steer',
+          (m) => m.role === 'user' && m.content === '[steering] turn-level steer',
         );
         if (!steerMsg) throw new Error('turn-level steer not found');
         return textResponse('steered');

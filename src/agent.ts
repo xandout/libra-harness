@@ -384,9 +384,15 @@ export class Agent {
         return await this.finishTurn(turn, messageContentToText(modelResponse.message.content), 'halted', iterations, allToolCalls);
       }
 
-      // ── No tool calls → final response ──
+      // ── No tool calls → final response (unless steering pending) ──
       const toolCalls = modelResponse.message.toolCalls;
       if (!toolCalls || toolCalls.length === 0) {
+        // If steering messages arrived during the LLM call, don't end
+        // the turn — drain them and loop so the agent can respond.
+        if (steeringQueue.length > 0) {
+          this.drainSteering(turn, steeringQueue);
+          continue;
+        }
         return await this.finishTurn(turn, messageContentToText(modelResponse.message.content), 'stop', iterations, allToolCalls);
       }
 
@@ -436,6 +442,8 @@ export class Agent {
               name: toolCall.name,
             });
           }
+          // Drain steering after mixed tool results too.
+          this.drainSteering(turn, steeringQueue);
         }
         // Return external tool calls to the caller. The assistant message
         // (with toolCalls) is already in turn.messages from the push above.
@@ -487,6 +495,12 @@ export class Agent {
           name: toolCall.name,
         });
       }
+
+      // ── Drain steering messages right after tool results ──
+      // This ensures the model sees steering directives immediately
+      // alongside tool results, rather than waiting for the next
+      // loop iteration's drain at the top.
+      this.drainSteering(turn, steeringQueue);
 
       // Loop continues — the model will see the tool results.
     }
@@ -664,7 +678,20 @@ export class Agent {
   private drainSteering(turn: TurnContext, steeringQueue: string[]): void {
     while (steeringQueue.length > 0) {
       const msg = steeringQueue.shift()!;
-      turn.messages.push({ role: 'user', content: msg });
+      // Inject a system directive + user message pair. The system
+      // message tells the model to treat the steering as an
+      // interruption; the user message carries the actual content.
+      // Models deprioritize mid-conversation system messages, so we
+      // pair it with a user message (which models can't ignore) and
+      // use the system message to frame it as a hard redirect.
+      turn.messages.push({
+        role: 'system',
+        content: '[steering] The user has sent a new directive. You must address it immediately. Do not continue the previous task — pivot to the user\'s new request now.',
+      });
+      turn.messages.push({
+        role: 'user',
+        content: `[steering] ${msg}`,
+      });
     }
   }
 

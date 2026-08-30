@@ -1,9 +1,11 @@
 import type { Extension } from '../../../extension.js';
+import type { Model } from '../../../model.js';
 import type { ToolFactory, ResolvedConfig } from './tools/shared.js';
 import { readTool } from './tools/read.js';
 import { writeTool, editTool } from './tools/write.js';
 import { findFileByNameTool } from './tools/find.js';
 import { grepTool } from './tools/grep.js';
+import { codeSearchTool } from './tools/code-search.js';
 import { ShellRegistry, execTool, getOutputTool, killShellTool, writeToProcessTool } from './tools/shell.js';
 import type { ShellToolFactory } from './tools/shell.js';
 import { TodoStore, todoWriteTool } from './tools/todo.js';
@@ -45,6 +47,18 @@ export interface CodeToolsConfig {
    * Default: undefined (todos are in-memory only)
    */
   todoFile?: string;
+  /**
+   * Model to use for the `code_search` subagent tool. When provided,
+   * the `code_search` tool is registered — it spawns a read-only
+   * subagent with read, grep, and find_file_by_name tools to explore
+   * the codebase and answer natural language queries.
+   * Default: undefined (code_search tool is not registered)
+   */
+  model?: Model;
+  /**
+   * Max iterations for the code_search subagent. Default: 10.
+   */
+  codeSearchMaxIterations?: number;
 }
 
 /**
@@ -57,6 +71,7 @@ export interface CodeToolsConfig {
  * - `edit` — replace a string in a file (unique match required, or replace_all)
  * - `find_file_by_name` — find files by glob pattern
  * - `grep` — search file contents (regex, glob filter, context lines, output modes)
+ * - `code_search` — spawn a read-only subagent to explore the codebase (requires `model`)
  * - `exec` — run a shell command (with timeout, backgrounding)
  * - `get_output` — read output from a backgrounded shell
  * - `kill_shell` — kill a backgrounded shell
@@ -124,6 +139,15 @@ export default function createCodeToolsExtension(
         agent.tool(factory({ toolPrefix: resolved.toolPrefix, registry }));
       }
       agent.tool(todoWriteTool({ toolPrefix: resolved.toolPrefix, store: todoStore }));
+
+      // code_search subagent tool — only registered when a model is provided.
+      if (config?.model) {
+        agent.tool(codeSearchTool({
+          toolPrefix: resolved.toolPrefix,
+          model: config.model,
+          maxIterations: config.codeSearchMaxIterations,
+        }));
+      }
     },
 
     // Kill all backgrounded shells when the extension is unloaded.

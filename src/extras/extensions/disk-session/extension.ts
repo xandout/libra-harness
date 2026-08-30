@@ -292,6 +292,18 @@ export default function createDiskSessionExtension(
     return true; // user, system, assistant (without tool calls)
   };
 
+  // Drop trailing user messages that don't have a following assistant
+  // response. This happens when a turn was interrupted (crash, halt,
+  // kill -9). Including an unanswered user request from a prior session
+  // confuses the agent — it sees a request it never responded to.
+  function dropIncompleteTrailingTurn(records: SessionRecord[]): SessionRecord[] {
+    const result = [...records];
+    while (result.length > 0 && result[result.length - 1].role === 'user') {
+      result.pop();
+    }
+    return result;
+  }
+
   // ── Build context (the "fork") from a snapshot ────────────────
   // The snapshot is a read-only copy of the session records at the
   // moment the turn started. This function builds the messages array
@@ -309,8 +321,13 @@ export default function createDiskSessionExtension(
     // DM or top-level message: last N messages, but filter out
     // tool-call intermediates that might get split by the slice.
     if (isDirect || !threadTs) {
-      return snapshot
-        .filter(isConversationMessage)
+      const filtered = snapshot.filter(isConversationMessage);
+      // Drop incomplete turns: a user message at the end without a
+      // following assistant response means the turn was interrupted
+      // (crash, halt, etc). Including it would confuse the agent with
+      // an unanswered request from a previous session.
+      const complete = dropIncompleteTrailingTurn(filtered);
+      return complete
         .slice(-maxContextMessages)
         .map(toMessage);
     }
@@ -599,11 +616,22 @@ export default function createDiskSessionExtension(
         const newStart = historyLen + systemMsgCount;
         const newMessages = ctx.turn.messages.slice(newStart);
 
-        // Only persist non-user, non-system messages here.
-        // The user message was already written in beforeTurn.
-        let filteredMessages = newMessages.filter(
-          (m) => m.role !== 'system' && m.role !== 'user',
-        );
+        // Persist non-user, non-system messages here. The initial user
+        // message was already written in beforeTurn. EXCEPTION: steering
+        // messages are injected mid-turn as user messages with a
+        // [steering] prefix — those are new and must be persisted.
+        let filteredMessages = newMessages.filter((m) => {
+          if (m.role === 'system') return false;
+          if (m.role === 'user') {
+            const text = typeof m.content === 'string'
+              ? m.content
+              : Array.isArray(m.content)
+                ? m.content.filter((p: any) => p.type === 'text').map((p: any) => p.text).join('')
+                : '';
+            return text.startsWith('[steering]');
+          }
+          return true;
+        });
 
         // ── Skip records already written incrementally ───────────
         // afterLLM and afterTool hooks append assistant messages and

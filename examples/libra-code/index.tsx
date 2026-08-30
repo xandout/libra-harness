@@ -12,6 +12,8 @@ import { createStreamingExtension } from '@xandout/libra-harness/extras/streamin
 import type { Extension } from '@xandout/libra-harness';
 import { createFileChangeTracker } from './file-change-tracker.js';
 import { createSessionStats, type SessionStats } from './session-stats.js';
+import { createContextCompaction } from './context-compaction.js';
+import { TurnJournal, createTurnEventsExtension, type TurnEvent } from './turn-journal.js';
 import { TuiApp, type ChatMessage, type ToolActivity, type FileChange, type TodoItem } from './tui.js';
 
 // ── Paths ────────────────────────────────────────────────────────────
@@ -19,6 +21,8 @@ const LIBRA_HOME = join(homedir(), '.libra');
 const SESSIONS_DIR = join(LIBRA_HOME, 'sessions');
 const SHELLS_DIR = join(LIBRA_HOME, 'shells');
 const TODOS_DIR = join(LIBRA_HOME, 'todos');
+const TURNS_DIR = join(LIBRA_HOME, 'turns');
+const TURN_META_DIR = join(LIBRA_HOME, 'turn-meta');
 const CONFIG_FILE = join(LIBRA_HOME, 'config.json');
 
 // ── Config ───────────────────────────────────────────────────────────
@@ -46,6 +50,8 @@ function ensureDirs(): void {
   mkdirSync(SESSIONS_DIR, { recursive: true });
   mkdirSync(SHELLS_DIR, { recursive: true });
   mkdirSync(TODOS_DIR, { recursive: true });
+  mkdirSync(TURNS_DIR, { recursive: true });
+  mkdirSync(TURN_META_DIR, { recursive: true });
 }
 
 function sessionKeyForCwd(cwd: string): string {
@@ -198,6 +204,13 @@ async function main() {
     verbose: false,
   }));
 
+  // Context compaction — disabled for now, needs rework.
+  // agent.use(createContextCompaction({
+  //   maxMessages: 40,
+  //   keepRecent: 12,
+  //   maxToolResultChars: 2000,
+  // }));
+
   // Streaming.
   agent.use(createStreamingExtension());
 
@@ -225,7 +238,15 @@ async function main() {
 
   // Code tools.
   const todoFile = join(TODOS_DIR, `${sessionKey}.json`);
-  agent.use(createCodeToolsExtension({ shellsDir: SHELLS_DIR, todoFile }));
+  agent.use(createCodeToolsExtension({
+    shellsDir: SHELLS_DIR,
+    todoFile,
+    model,
+    codeSearchMaxIterations: 10,
+  }));
+
+  // Turn events — writes agent events to the journal.
+  agent.use(createTurnEventsExtension());
 
   // ── Run with or without TUI ──
   if (useTui) {
@@ -245,34 +266,77 @@ async function runWithTui(
   exitOnComplete: boolean,
   sessionStats: SessionStats,
 ) {
-  // ── TUI state (mutable, re-rendered on each change) ──
-  const state = {
-    messages: [] as ChatMessage[],
+  // ── TUI display state (rebuilt from journal events) ──
+  // The journal is the source of truth. The TUI subscribes to it
+  // and renders from events. State is derived, not directly mutated.
+  const displayState = {
+    messages: loadSessionHistory(SESSIONS_DIR, sessionKey) as ChatMessage[],
     toolActivity: [] as ToolActivity[],
     todos: loadTodos(todoFile) as TodoItem[],
     stats: sessionStats,
     streamingText: '',
     isRunning: false,
     fileChanges,
-    inputText: '',
   };
 
-  // Re-render helper.
+  // Replay the latest turn journal to restore tool activity from the
+  // last session. The disk-session already restored chat messages;
+  // the turn journal adds tool activity and any incomplete streaming text.
+  replayLatestTurn(TURNS_DIR, TURN_META_DIR, displayState);
+
+  // Control state — kept separate from display state.
+  let runHandle: { steer: (msg: string) => void; halt: (reason?: string) => void } | null = null;
+  let currentJournal: TurnJournal | null = null;
+
+  // ── Re-render helper — throttled to max ~30fps ──
   let renderFns: { rerender: (node: React.ReactNode) => void; unmount: () => void } | null = null;
+  let renderPending = false;
+  let lastRenderTime = 0;
+  const RENDER_INTERVAL = 33; // ~30fps cap
   const forceUpdate = () => {
+    if (!renderFns) return;
+    if (renderPending) return;
+    const now = Date.now();
+    const elapsed = now - lastRenderTime;
+    if (elapsed < RENDER_INTERVAL) {
+      renderPending = true;
+      setTimeout(() => {
+        renderPending = false;
+        lastRenderTime = Date.now();
+        if (!renderFns) return;
+        doRender();
+      }, RENDER_INTERVAL - elapsed);
+      return;
+    }
+    lastRenderTime = now;
+    doRender();
+  };
+  const doRender = () => {
     if (!renderFns) return;
     renderFns.rerender(
       <TuiApp
-        messages={state.messages}
-        toolActivity={state.toolActivity}
-        fileChanges={state.fileChanges}
-        todos={state.todos}
-        stats={state.stats}
-        streamingText={state.streamingText}
-        isRunning={state.isRunning}
-        inputText={state.inputText}
-        onInput={(text: string) => { state.inputText = text; forceUpdate(); }}
-        onSubmit={(text: string) => { state.inputText = ''; sendPrompt(text); }}
+        messages={displayState.messages}
+        toolActivity={displayState.toolActivity}
+        fileChanges={displayState.fileChanges}
+        todos={displayState.todos}
+        stats={displayState.stats}
+        streamingText={displayState.streamingText}
+        isRunning={displayState.isRunning}
+        onSubmit={(text: string) => { sendPrompt(text); }}
+        onSteer={(text: string) => {
+          if (runHandle) {
+            runHandle.steer(text);
+            // Journal records the steer event for display.
+            currentJournal?.append('steer', { text });
+          }
+        }}
+        onHalt={() => {
+          if (runHandle) {
+            runHandle.halt('user halted');
+            // Journal records the halt event for display.
+            currentJournal?.append('halt', { reason: 'user halted' });
+          }
+        }}
         onExit={() => {
           renderFns?.unmount();
           process.exit(0);
@@ -281,85 +345,135 @@ async function runWithTui(
     );
   };
 
-  // ── Progress extension for TUI ──
-  const tuiProgressExtension: Extension = {
-    name: 'tui-progress',
-    priority: 90,
-    install(agent) {
-      agent.hook('beforeTool', 'tui-progress', async (ctx) => {
-        const toolCall = ctx.toolCall;
-        if (!toolCall) return;
-        const parsed = (() => { try { return JSON.parse(toolCall.arguments); } catch { return {}; } })();
-        let detail = '';
-        if (parsed.file_path) detail = String(parsed.file_path);
-        else if (parsed.pattern) detail = parsed.path ? `${parsed.pattern} in ${parsed.path}` : String(parsed.pattern);
-        else if (parsed.command) detail = String(parsed.command);
-        else if (parsed.shell_id) detail = String(parsed.shell_id);
-        else if (parsed.todos) detail = `${parsed.todos.length} items`;
-        else detail = toolCall.arguments.slice(0, 80);
+  // ── Journal event handler — updates display state from events ──
+  // This is the key decoupling: the agent writes events to the journal,
+  // and this handler translates events into TUI display state. The agent
+  // never touches displayState directly.
+  function handleJournalEvent(ev: TurnEvent): void {
+    switch (ev.type) {
+      case 'status':
+        // Status messages are transient — we don't display them in the
+        // chat panel, but they could be shown in a status line.
+        break;
 
-        state.toolActivity.push({
-          name: toolCall.name,
-          detail,
-          status: 'running',
-          timestamp: Date.now(),
+      case 'text':
+        // Accumulate streamed text deltas.
+        displayState.streamingText += ev.delta ?? '';
+        forceUpdate();
+        break;
+
+      case 'tool':
+        if (ev.phase === 'start') {
+          displayState.toolActivity.push({
+            name: ev.name ?? '?',
+            detail: ev.file ?? '',
+            status: 'running',
+            timestamp: ev.ts,
+          });
+        } else {
+          // Mark the last matching tool as done.
+          for (let i = displayState.toolActivity.length - 1; i >= 0; i--) {
+            if (displayState.toolActivity[i].name === ev.name && displayState.toolActivity[i].status === 'running') {
+              displayState.toolActivity[i].status = 'done';
+              break;
+            }
+          }
+          // Reload todos if a todo_write tool finished.
+          if (ev.name === 'todo_write') {
+            displayState.todos = loadTodos(todoFile);
+          }
+        }
+        forceUpdate();
+        break;
+
+      case 'steer':
+        displayState.messages.push({
+          role: 'user',
+          content: `⟦steer⟧ ${ev.text}`,
+          timestamp: ev.ts,
         });
         forceUpdate();
-      });
+        break;
 
-      agent.hook('afterTool', 'tui-progress', async (ctx) => {
-        const toolResult = ctx.toolResult;
-        if (!toolResult) return;
-        const entry = state.toolActivity[state.toolActivity.length - 1];
-        if (entry) {
-          entry.status = toolResult.isError ? 'error' : 'done';
-          entry.result = toolResult.content.split('\n')[0].slice(0, 100);
-        }
-        if (ctx.toolCall?.name === 'todo_write') {
-          state.todos = loadTodos(todoFile);
-        }
+      case 'halt':
+        displayState.messages.push({
+          role: 'assistant',
+          content: '⟦halted⟧',
+          timestamp: ev.ts,
+        });
+        displayState.streamingText = '';
         forceUpdate();
-      });
+        break;
 
-      // Re-render after each LLM call so stats panel updates live.
-      agent.hook('afterLLM', 'tui-progress', async () => {
+      case 'done':
+        // Finalize the assistant message.
+        if (displayState.streamingText) {
+          displayState.messages.push({
+            role: 'assistant',
+            content: displayState.streamingText,
+            timestamp: ev.ts,
+          });
+          displayState.streamingText = '';
+        } else if (ev.reply) {
+          displayState.messages.push({
+            role: 'assistant',
+            content: ev.reply,
+            timestamp: ev.ts,
+          });
+        }
+        displayState.isRunning = false;
+        displayState.todos = loadTodos(todoFile);
         forceUpdate();
-      });
-    },
-  };
-  agent.use(tuiProgressExtension);
+        break;
+    }
+  }
 
   // ── Send a prompt to the agent ──
   async function sendPrompt(text: string) {
-    if (state.isRunning) return;
-    state.isRunning = true;
-    state.streamingText = '';
-    state.messages.push({ role: 'user', content: text, timestamp: Date.now() });
+    if (displayState.isRunning) return;
+
+    // Create a journal for this turn.
+    const turnId = TurnJournal.newTurnId();
+    const journal = new TurnJournal(TURNS_DIR, TURN_META_DIR, turnId, text);
+    currentJournal = journal;
+
+    displayState.isRunning = true;
+    displayState.streamingText = '';
+    displayState.messages.push({ role: 'user', content: text, timestamp: Date.now() });
     forceUpdate();
 
+    // Subscribe to journal events — this is how the TUI sees agent progress.
+    journal.subscribe(0, handleJournalEvent);
+
     try {
-      const result = await agent.run({
+      const handle = agent.run({
         message: text,
         metadata: {
           sessionId: sessionKey,
+          __journal: journal,
           streamCallbacks: {
             onText: (delta: string) => {
-              state.streamingText += delta;
-              forceUpdate();
+              // Stream text directly to the journal (faster than going
+              // through hooks for every token).
+              journal.append('text', { delta });
             },
           },
         },
       });
+      runHandle = handle;
+      const result = await handle;
 
-      state.isRunning = false;
-      if (state.streamingText) {
-        state.messages.push({ role: 'assistant', content: state.streamingText, timestamp: Date.now() });
-        state.streamingText = '';
-      } else if (result.message) {
-        state.messages.push({ role: 'assistant', content: result.message, timestamp: Date.now() });
+      runHandle = null;
+
+      // Record the final result in the journal.
+      if (result.finishReason === 'halted') {
+        journal.markHalted();
+        journal.append('halt', { reason: 'halted' });
+      } else {
+        const reply = displayState.streamingText || result.message || '';
+        journal.markDone(reply);
+        journal.append('done', { reply, finishReason: result.finishReason });
       }
-      state.todos = loadTodos(todoFile);
-      forceUpdate();
 
       // Auto-exit if flagged and this was the initial prompt.
       if (exitOnComplete) {
@@ -367,13 +481,10 @@ async function runWithTui(
         process.exit(0);
       }
     } catch (err) {
-      state.isRunning = false;
-      state.messages.push({
-        role: 'assistant',
-        content: `Error: ${err instanceof Error ? err.message : String(err)}`,
-        timestamp: Date.now(),
-      });
-      forceUpdate();
+      runHandle = null;
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      journal.markError(errorMsg);
+      journal.append('done', { reply: `Error: ${errorMsg}`, finishReason: 'error' });
 
       if (exitOnComplete) {
         renderFns?.unmount();
@@ -385,22 +496,32 @@ async function runWithTui(
   // ── Render the TUI ──
   const { rerender, unmount } = render(
     <TuiApp
-      messages={state.messages}
-      toolActivity={state.toolActivity}
-      fileChanges={state.fileChanges}
-      todos={state.todos}
-      stats={state.stats}
-      streamingText={state.streamingText}
-      isRunning={state.isRunning}
-      inputText={state.inputText}
-      onInput={(text: string) => { state.inputText = text; forceUpdate(); }}
-      onSubmit={(text: string) => { state.inputText = ''; sendPrompt(text); }}
+      messages={displayState.messages}
+      toolActivity={displayState.toolActivity}
+      fileChanges={displayState.fileChanges}
+      todos={displayState.todos}
+      stats={displayState.stats}
+      streamingText={displayState.streamingText}
+      isRunning={displayState.isRunning}
+      onSubmit={(text: string) => { sendPrompt(text); }}
+      onSteer={(text: string) => {
+        if (runHandle) {
+          runHandle.steer(text);
+          currentJournal?.append('steer', { text });
+        }
+      }}
+      onHalt={() => {
+        if (runHandle) {
+          runHandle.halt('user halted');
+          currentJournal?.append('halt', { reason: 'user halted' });
+        }
+      }}
       onExit={() => {
         unmount();
         process.exit(0);
       }}
     />,
-    { exitOnCtrlC: true },
+    { exitOnCtrlC: false },
   );
   renderFns = { rerender, unmount };
 
@@ -446,7 +567,7 @@ async function runWithoutTui(
   agent.use(progressExtension);
 
   let firstText = true;
-  const result = await agent.run({
+  const handle = agent.run({
     message: prompt,
     metadata: {
       sessionId: sessionKey,
@@ -462,7 +583,27 @@ async function runWithoutTui(
     },
   });
 
-  if (firstText) {
+  // Ctrl+C halts the running agent instead of killing the process.
+  // First Ctrl+C: halt the agent gracefully. Second Ctrl+C: force exit.
+  let ctrlCCount = 0;
+  const onSigInt = () => {
+    ctrlCCount++;
+    if (ctrlCCount === 1) {
+      process.stderr.write('\n  ⏹ Halting agent… (Ctrl+C again to force quit)\n');
+      handle.halt('user interrupted');
+    } else {
+      process.stderr.write('\n  Force quit.\n');
+      process.exit(130);
+    }
+  };
+  process.on('SIGINT', onSigInt);
+
+  const result = await handle;
+  process.off('SIGINT', onSigInt);
+
+  if (result.finishReason === 'halted') {
+    process.stderr.write('\n  Halted.\n');
+  } else if (firstText) {
     console.log(result.message || '(no response)');
   } else {
     process.stdout.write('\n');
@@ -483,6 +624,83 @@ function loadTodos(todoFile: string): TodoItem[] {
     }
   } catch {}
   return [];
+}
+
+// Load recent session history into TUI messages so the chat panel
+// shows prior conversation on restart. Reads the JSONL session file
+// and extracts user + assistant (text-only) messages.
+function loadSessionHistory(sessionsDir: string, sessionKey: string): ChatMessage[] {
+  const sessionFile = join(sessionsDir, `${sessionKey}.jsonl`);
+  if (!existsSync(sessionFile)) return [];
+
+  try {
+    const raw = readFileSync(sessionFile, 'utf-8');
+    const lines = raw.split('\n').filter(Boolean);
+    const messages: ChatMessage[] = [];
+
+    for (const line of lines) {
+      try {
+        const record = JSON.parse(line);
+        if (record.role === 'control') continue;
+        if (record.role === 'tool') continue;
+        if (record.role === 'system') continue;
+
+        const text = typeof record.content === 'string'
+          ? record.content
+          : Array.isArray(record.content)
+            ? record.content.filter((p: any) => p.type === 'text').map((p: any) => p.text).join('')
+            : '';
+        if (!text) continue;
+
+        messages.push({
+          role: record.role === 'assistant' ? 'assistant' : 'user',
+          content: text,
+          timestamp: record.recordedAt ? new Date(record.recordedAt).getTime() : Date.now(),
+        });
+      } catch {}
+    }
+
+    return messages.slice(-50);
+  } catch {}
+  return [];
+}
+
+// Replay the latest turn journal to restore tool activity from the
+// previous session. Chat messages are already loaded from the disk-
+// session JSONL; this adds tool activity and any incomplete streaming text.
+function replayLatestTurn(
+  turnsDir: string,
+  metaDir: string,
+  displayState: { toolActivity: ToolActivity[]; streamingText: string },
+): void {
+  const latestId = TurnJournal.latestTurnId(metaDir);
+  if (!latestId) return;
+
+  const journal = TurnJournal.loadFromDisk(turnsDir, metaDir, latestId);
+  if (!journal) return;
+
+  const meta = journal.getMeta();
+  // Only replay if the turn was recent (within last hour).
+  if (Date.now() - meta.createdAt > 60 * 60 * 1000) return;
+
+  // Rebuild tool activity from tool events.
+  for (const ev of journal.getAll()) {
+    if (ev.type === 'tool' && ev.phase === 'start') {
+      displayState.toolActivity.push({
+        name: ev.name ?? '?',
+        detail: ev.file ?? '',
+        status: 'running',
+        timestamp: ev.ts,
+      });
+    } else if (ev.type === 'tool' && ev.phase === 'end') {
+      for (let i = displayState.toolActivity.length - 1; i >= 0; i--) {
+        if (displayState.toolActivity[i].name === ev.name && displayState.toolActivity[i].status === 'running') {
+          displayState.toolActivity[i].status = 'done';
+          break;
+        }
+      }
+    }
+  }
 }
 
 // ── Entry ────────────────────────────────────────────────────────────
