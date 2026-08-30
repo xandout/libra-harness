@@ -62,6 +62,10 @@
       "types": "./dist/extras/extensions/weather-tool/index.d.ts",
       "import": "./dist/extras/extensions/weather-tool/index.js"
     },
+    "./extras/code-tools": {
+      "types": "./dist/extras/extensions/code-tools/index.d.ts",
+      "import": "./dist/extras/extensions/code-tools/index.js"
+    },
     "./extras/streaming": {
       "types": "./dist/extras/extensions/streaming/index.d.ts",
       "import": "./dist/extras/extensions/streaming/index.js"

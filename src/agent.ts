@@ -407,23 +407,28 @@ export class Agent {
         // are still returned — the caller will see them and the internal results.
         if (internalCalls.length > 0) {
           allToolCalls.push(...internalCalls);
-          for (const toolCall of internalCalls) {
-            if (turn.signal.aborted) {
-              return await this.finishTurn(turn, '', 'halted', iterations, allToolCalls);
-            }
-            const beforeToolCtx: HookContext = { turn, toolCall };
-            const beforeToolResult = await this.runHooks('beforeTool', beforeToolCtx);
-            let toolResult: ToolResult;
-            if (beforeToolResult.skipped && beforeToolResult.value) {
-              toolResult = beforeToolResult.value as ToolResult;
-            } else {
-              toolResult = await this.executeToolCall(toolCall, turn);
-            }
-            const afterToolCtx: HookContext = { turn, toolCall, toolResult };
-            const afterToolResult = await this.runHooks('afterTool', afterToolCtx);
-            if (afterToolResult.value) {
-              toolResult = afterToolResult.value as ToolResult;
-            }
+          if (turn.signal.aborted) {
+            return await this.finishTurn(turn, '', 'halted', iterations, allToolCalls);
+          }
+          const mixedResults = await Promise.all(
+            internalCalls.map(async (toolCall) => {
+              const beforeToolCtx: HookContext = { turn, toolCall };
+              const beforeToolResult = await this.runHooks('beforeTool', beforeToolCtx);
+              let toolResult: ToolResult;
+              if (beforeToolResult.skipped && beforeToolResult.value) {
+                toolResult = beforeToolResult.value as ToolResult;
+              } else {
+                toolResult = await this.executeToolCall(toolCall, turn);
+              }
+              const afterToolCtx: HookContext = { turn, toolCall, toolResult };
+              const afterToolResult = await this.runHooks('afterTool', afterToolCtx);
+              if (afterToolResult.value) {
+                toolResult = afterToolResult.value as ToolResult;
+              }
+              return { toolCall, toolResult };
+            }),
+          );
+          for (const { toolCall, toolResult } of mixedResults) {
             turn.messages.push({
               role: 'tool',
               content: toolResult.content,
@@ -440,30 +445,41 @@ export class Agent {
       // ── Execute internal tool calls ──
       allToolCalls.push(...internalCalls);
 
-      for (const toolCall of internalCalls) {
-        // Check halt between tool calls in a batch.
-        if (turn.signal.aborted) {
-          return await this.finishTurn(turn, '', 'halted', iterations, allToolCalls);
-        }
+      // Check halt before starting the batch.
+      if (turn.signal.aborted) {
+        return await this.finishTurn(turn, '', 'halted', iterations, allToolCalls);
+      }
 
-        // beforeTool — can short-circuit with a synthetic result.
-        const beforeToolCtx: HookContext = { turn, toolCall };
-        const beforeToolResult = await this.runHooks('beforeTool', beforeToolCtx);
+      // Execute all internal tool calls in the batch concurrently.
+      // Each tool call runs its beforeTool → execute → afterTool pipeline
+      // independently. Results are collected in order and appended to
+      // turn.messages after all complete, preserving the model's ordering.
+      const results = await Promise.all(
+        internalCalls.map(async (toolCall) => {
+          // beforeTool — can short-circuit with a synthetic result.
+          const beforeToolCtx: HookContext = { turn, toolCall };
+          const beforeToolResult = await this.runHooks('beforeTool', beforeToolCtx);
 
-        let toolResult: ToolResult;
-        if (beforeToolResult.skipped && beforeToolResult.value) {
-          toolResult = beforeToolResult.value as ToolResult;
-        } else {
-          toolResult = await this.executeToolCall(toolCall, turn);
-        }
+          let toolResult: ToolResult;
+          if (beforeToolResult.skipped && beforeToolResult.value) {
+            toolResult = beforeToolResult.value as ToolResult;
+          } else {
+            toolResult = await this.executeToolCall(toolCall, turn);
+          }
 
-        // afterTool — can modify the result.
-        const afterToolCtx: HookContext = { turn, toolCall, toolResult };
-        const afterToolResult = await this.runHooks('afterTool', afterToolCtx);
-        if (afterToolResult.value) {
-          toolResult = afterToolResult.value as ToolResult;
-        }
+          // afterTool — can modify the result.
+          const afterToolCtx: HookContext = { turn, toolCall, toolResult };
+          const afterToolResult = await this.runHooks('afterTool', afterToolCtx);
+          if (afterToolResult.value) {
+            toolResult = afterToolResult.value as ToolResult;
+          }
 
+          return { toolCall, toolResult };
+        }),
+      );
+
+      // Append results to messages in the original order.
+      for (const { toolCall, toolResult } of results) {
         turn.messages.push({
           role: 'tool',
           content: toolResult.content,

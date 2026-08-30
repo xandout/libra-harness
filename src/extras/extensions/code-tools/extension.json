@@ -1,0 +1,7 @@
+{
+  "name": "code-tools",
+  "description": "File reading, writing, editing, searching, shell execution, and task management tools for coding agents. Provides read, write, edit, find_file_by_name, grep, exec, get_output, kill_shell, write_to_process, and todo_write tools.",
+  "enabled": true,
+  "priority": 50,
+  "configKeys": ["toolPrefix", "maxReadSize", "maxReadLines", "maxLineLength"]
+}
