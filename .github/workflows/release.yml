@@ -61,7 +61,7 @@ jobs:
 
       - name: Publish libra-harness to GitHub Packages
         run: |
-          echo "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}" >> ~/.npmrc
+          npm config set //npm.pkg.github.com/:_authToken "$GITHUB_TOKEN"
           npm publish --access public --registry https://npm.pkg.github.com
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -89,7 +89,7 @@ jobs:
       - name: Publish libra-code to GitHub Packages
         run: |
           cd extras/libra-code
-          echo "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}" >> ~/.npmrc
+          npm config set //npm.pkg.github.com/:_authToken "$GITHUB_TOKEN"
           npm publish --access public --registry https://npm.pkg.github.com
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
