@@ -45,10 +45,16 @@ jobs:
           VERSION=$(node -p "require('./package.json').version")
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
-      - name: Bump lc version (match root)
+      - name: Set lc version to match root
         run: |
           cd extras/libra-code
-          npm version patch -m "chore: lc release v%s"
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
+            pkg.version = process.env.VERSION;
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          git add package.json
         env:
           VERSION: ${{ env.VERSION }}
 
