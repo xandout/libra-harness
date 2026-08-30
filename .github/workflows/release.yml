@@ -45,23 +45,23 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           # Bump root version manually (npm version crashes on workspace
           # link: dependencies — see npm/cli#8322).
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
-            const [major, minor, patch] = pkg.version.split('.').map(Number);
-            pkg.version = `${major}.${minor}.${patch + 1}`;
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
+          node <<'EOF'
+          const fs = require('fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
+          const [major, minor, patch] = pkg.version.split('.').map(Number);
+          pkg.version = `${major}.${minor}.${patch + 1}`;
+          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          EOF
           VERSION=$(node -p "require('./package.json').version")
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           # Set lc version to match.
           cd extras/libra-code
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
-            pkg.version = process.env.VERSION;
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
+          VERSION="$VERSION" node <<'EOF'
+          const fs = require('fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
+          pkg.version = process.env.VERSION;
+          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          EOF
           cd ../..
           # Commit both version bumps together, then tag.
           git add package.json extras/libra-code/package.json
