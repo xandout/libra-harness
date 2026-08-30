@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { makeToolName, type ToolFactory } from './shared.js';
+import { makeToolName } from './shared.js';
 
 // ── Todo state ───────────────────────────────────────────────────────
 // Todos are tracked at the extension level so they persist across
@@ -111,7 +111,7 @@ export const todoWriteTool: (cfg: { toolPrefix: string; store: TodoStore }) => a
     },
     required: ['todos'],
   },
-  async execute(args) {
+  async execute(args: { todos: unknown }) {
     const input = args.todos;
     if (!Array.isArray(input)) {
       return { toolCallId: '', content: 'Error: todos must be an array' };
