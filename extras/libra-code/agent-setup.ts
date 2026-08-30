@@ -24,7 +24,9 @@ import { createTurnEventsExtension, createCommandPollingExtension } from './turn
 import type { FileChange } from './tui.js';
 
 // ── Paths ────────────────────────────────────────────────────────────
-export const LIBRA_HOME = join(homedir(), '.libra');
+// LIBRA_HOME can be overridden via env var (e.g. for containerized use
+// where state must live on a mounted volume). Defaults to ~/.libra.
+export const LIBRA_HOME = process.env.LIBRA_HOME || join(homedir(), '.libra');
 export const SESSIONS_DIR = join(LIBRA_HOME, 'sessions');
 export const SHELLS_DIR = join(LIBRA_HOME, 'shells');
 export const TODOS_DIR = join(LIBRA_HOME, 'todos');

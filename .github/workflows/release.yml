@@ -39,16 +39,15 @@ jobs:
         env:
           CI: true
 
-      - name: Bump patch version
+      - name: Bump versions and commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          npm version patch -m "chore: release v%s"
+          # Bump root version without committing yet.
+          npm version patch --no-git-tag-version
           VERSION=$(node -p "require('./package.json').version")
           echo "VERSION=$VERSION" >> $GITHUB_ENV
-
-      - name: Set lc version to match root
-        run: |
+          # Set lc version to match.
           cd extras/libra-code
           node -e "
             const fs = require('fs');
@@ -56,9 +55,11 @@ jobs:
             pkg.version = process.env.VERSION;
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
-          git add package.json
-        env:
-          VERSION: ${{ env.VERSION }}
+          cd ../..
+          # Commit both version bumps together, then tag.
+          git add package.json extras/libra-code/package.json
+          git commit -m "chore: release v${VERSION}"
+          git tag "v${VERSION}"
 
       - name: Push version tags
         run: git push --follow-tags
