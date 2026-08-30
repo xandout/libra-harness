@@ -13,7 +13,7 @@
  * The journal lives at ~/.libra/turns/<turnId>.jsonl.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { randomBytes } from 'node:crypto';
@@ -27,7 +27,8 @@ export type TurnEventType =
   | 'file'      // file touched
   | 'done'      // turn finished
   | 'steer'     // steering message injected
-  | 'halt';     // turn halted
+  | 'halt'      // turn halted
+  | 'stats';    // session stats snapshot
 
 export interface TurnEvent {
   seq: number;
@@ -48,6 +49,20 @@ export interface TurnEvent {
   text?: string;
   // halt
   reason?: string;
+  // stats
+  stats?: {
+    promptTokens: number;
+    completionTokens: number;
+    cachedPromptTokens: number;
+    cacheWriteTokens: number;
+    reasoningTokens: number;
+    llmCalls: number;
+    turns: number;
+    toolCalls: number;
+    toolErrors: number;
+    lastPromptTokens: number;
+    lastCompletionTokens: number;
+  };
 }
 
 // ── Turn metadata ───────────────────────────────────────────────────
@@ -260,6 +275,41 @@ export class TurnJournal {
     }
     return latest;
   }
+
+  // ── Command file (TUI → agent) ────────────────────────────────────
+  // The TUI writes steer/halt commands to <turnId>.cmd.jsonl.
+  // The agent polls this file between iterations.
+
+  private cmdPath(): string { return join(this.journalDir, `${this.meta.turnId}.cmd.jsonl`); }
+
+  /** Write a command (called by TUI). */
+  writeCommand(cmd: { type: 'steer'; text: string } | { type: 'halt'; reason: string }): void {
+    try {
+      appendFileSync(this.cmdPath(), JSON.stringify(cmd) + '\n', 'utf-8');
+    } catch (e) {
+      console.error('[journal] writeCommand error:', e);
+    }
+  }
+
+  /** Read and clear pending commands (called by agent). Returns commands. */
+  drainCommands(): Array<{ type: 'steer'; text: string } | { type: 'halt'; reason: string }> {
+    if (!existsSync(this.cmdPath())) return [];
+    try {
+      const raw = readFileSync(this.cmdPath(), 'utf-8');
+      // Clear the file after reading.
+      writeFileSync(this.cmdPath(), '', 'utf-8');
+      const cmds: Array<{ type: 'steer'; text: string } | { type: 'halt'; reason: string }> = [];
+      for (const line of raw.split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          cmds.push(JSON.parse(line));
+        } catch { /* skip */ }
+      }
+      return cmds;
+    } catch {
+      return [];
+    }
+  }
 }
 
 // ── Turn-events extension ───────────────────────────────────────────
@@ -312,5 +362,126 @@ export function createTurnEventsExtension(): Extension {
       });
     },
   };
+}
+
+// ── Command-polling extension ────────────────────────────────────────
+// Polls the journal's command file before each LLM call and after each
+// tool batch. Translates steer/halt commands into RunHandle calls.
+// The journal reference travels in `turn.metadata.__journal`.
+
+export function createCommandPollingExtension(): Extension {
+  return {
+    name: 'command-polling',
+    priority: 999,
+    install(agent) {
+      // Check for commands before each LLM call.
+      agent.hook('beforeLLM', 'command-polling', async (ctx) => {
+        const journal = ctx.turn.metadata.__journal as TurnJournal | undefined;
+        if (!journal) return;
+        const cmds = journal.drainCommands();
+        for (const cmd of cmds) {
+          if (cmd.type === 'steer') {
+            ctx.turn.steer(cmd.text);
+            journal.append('steer', { text: cmd.text });
+          } else if (cmd.type === 'halt') {
+            ctx.turn.halt(cmd.reason);
+          }
+        }
+      });
+
+      // Check for commands after each tool batch (before next LLM call).
+      agent.hook('afterTool', 'command-polling', async (ctx) => {
+        const journal = ctx.turn.metadata.__journal as TurnJournal | undefined;
+        if (!journal) return;
+        const cmds = journal.drainCommands();
+        for (const cmd of cmds) {
+          if (cmd.type === 'steer') {
+            ctx.turn.steer(cmd.text);
+            journal.append('steer', { text: cmd.text });
+          } else if (cmd.type === 'halt') {
+            ctx.turn.halt(cmd.reason);
+          }
+        }
+      });
+    },
+  };
+}
+
+// ── Session lock ─────────────────────────────────────────────────────
+// PID-based lock file to prevent two agent processes on the same session.
+
+export interface SessionLock {
+  pid: number;
+  turnId: string;
+  startedAt: number;
+}
+
+export class SessionLockManager {
+  constructor(private readonly lockDir: string) {
+    if (!existsSync(lockDir)) mkdirSync(lockDir, { recursive: true });
+  }
+
+  private lockPath(sessionKey: string): string { return join(this.lockDir, `${sessionKey}.lock`); }
+
+  /** Try to acquire a lock. Returns true if acquired, false if held by a live process. */
+  acquire(sessionKey: string, turnId: string): boolean {
+    const existing = this.readLock(sessionKey);
+    if (existing && this.isAlive(existing.pid)) {
+      // Lock is held by a live process.
+      return false;
+    }
+    // Lock is free or stale — take it.
+    const lock: SessionLock = { pid: process.pid, turnId, startedAt: Date.now() };
+    writeFileSync(this.lockPath(sessionKey), JSON.stringify(lock, null, 2), 'utf-8');
+    return true;
+  }
+
+  /** Release the lock if we hold it. */
+  release(sessionKey: string): void {
+    const existing = this.readLock(sessionKey);
+    if (existing && existing.pid === process.pid) {
+      try {
+        
+        unlinkSync(this.lockPath(sessionKey));
+      } catch { /* already gone */ }
+    }
+  }
+
+  /** Read the current lock for a session, or null. */
+  readLock(sessionKey: string): SessionLock | null {
+    try {
+      if (!existsSync(this.lockPath(sessionKey))) return null;
+      return JSON.parse(readFileSync(this.lockPath(sessionKey), 'utf-8')) as SessionLock;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Check if a PID is alive. */
+  private isAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Force-kill the process holding the lock (if any). Returns true if killed. */
+  forceBreak(sessionKey: string): boolean {
+    const existing = this.readLock(sessionKey);
+    if (!existing) return true;
+    if (this.isAlive(existing.pid)) {
+      try {
+        process.kill(existing.pid, 'SIGTERM');
+      } catch { /* may have died */ }
+    }
+    // Remove the lock regardless.
+    try {
+      
+      unlinkSync(this.lockPath(sessionKey));
+    } catch { /* already gone */ }
+    return true;
+  }
 }
 

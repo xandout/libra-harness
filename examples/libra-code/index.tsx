@@ -1,81 +1,29 @@
 #!/usr/bin/env node
-import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { render } from 'ink';
 import React from 'react';
 import { Agent } from '@xandout/libra-harness';
-import { resolveModel, configuredProviders } from '@xandout/libra-harness/extras/models';
-import { createDiskSessionExtension } from '@xandout/libra-harness/extras/disk-session';
-import { createCodeToolsExtension } from '@xandout/libra-harness/extras/code-tools';
-import { createStreamingExtension } from '@xandout/libra-harness/extras/streaming';
+import { configuredProviders } from '@xandout/libra-harness/extras/models';
 import type { Extension } from '@xandout/libra-harness';
-import { createFileChangeTracker } from './file-change-tracker.js';
-import { createSessionStats, type SessionStats } from './session-stats.js';
-import { createContextCompaction } from './context-compaction.js';
-import { TurnJournal, createTurnEventsExtension, type TurnEvent } from './turn-journal.js';
+import {
+  LIBRA_HOME, SESSIONS_DIR, TODOS_DIR, TURNS_DIR, TURN_META_DIR, LOCKS_DIR, CONFIG_FILE,
+  loadConfig, saveConfig, ensureDirs, sessionKeyForCwd, buildAgent,
+} from './agent-setup.js';
+import { TurnJournal, SessionLockManager, type TurnEvent } from './turn-journal.js';
 import { TuiApp, type ChatMessage, type ToolActivity, type FileChange, type TodoItem } from './tui.js';
-
-// ── Paths ────────────────────────────────────────────────────────────
-const LIBRA_HOME = join(homedir(), '.libra');
-const SESSIONS_DIR = join(LIBRA_HOME, 'sessions');
-const SHELLS_DIR = join(LIBRA_HOME, 'shells');
-const TODOS_DIR = join(LIBRA_HOME, 'todos');
-const TURNS_DIR = join(LIBRA_HOME, 'turns');
-const TURN_META_DIR = join(LIBRA_HOME, 'turn-meta');
-const CONFIG_FILE = join(LIBRA_HOME, 'config.json');
-
-// ── Config ───────────────────────────────────────────────────────────
-interface LibraCodeConfig {
-  model?: string;
-  maxIterations?: number;
-}
-
-function loadConfig(): LibraCodeConfig {
-  try {
-    if (existsSync(CONFIG_FILE)) {
-      return JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'));
-    }
-  } catch {}
-  return {};
-}
-
-function saveConfig(config: LibraCodeConfig): void {
-  mkdirSync(LIBRA_HOME, { recursive: true });
-  writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2) + '\n', 'utf-8');
-}
-
-function ensureDirs(): void {
-  mkdirSync(LIBRA_HOME, { recursive: true });
-  mkdirSync(SESSIONS_DIR, { recursive: true });
-  mkdirSync(SHELLS_DIR, { recursive: true });
-  mkdirSync(TODOS_DIR, { recursive: true });
-  mkdirSync(TURNS_DIR, { recursive: true });
-  mkdirSync(TURN_META_DIR, { recursive: true });
-}
-
-function sessionKeyForCwd(cwd: string): string {
-  return 'cwd_' + cwd.replace(/[^a-zA-Z0-9]/g, '_');
-}
-
-// ── System prompt ────────────────────────────────────────────────────
-const SYSTEM_PROMPT = `You are a code agent. You help with software engineering tasks.
-
-You have tools for reading, writing, and editing files, finding files by name, searching file contents, running shell commands, and tracking tasks. Use them to explore and modify code.
-
-Rules:
-- Read files before editing them.
-- Explore the codebase before making changes.
-- Use absolute paths for all file operations.
-- Be concise in your responses.
-- When making changes, explain what you did and why.
-- Do not push to git unless explicitly asked.
-- Never commit secrets or credentials.
-- Use todo_write to track multi-step tasks.`;
+import type { SessionStats } from './session-stats.js';
 
 // ── CLI ──────────────────────────────────────────────────────────────
 async function main() {
   const args = process.argv.slice(2);
+
+  // ── --worker mode (silent background agent, spawned by TUI) ──
+  if (args[0] === '--worker') {
+    await runWorker(args.slice(1));
+    return;
+  }
 
   // ── Subcommands ──
   if (args[0] === 'config') {
@@ -161,138 +109,136 @@ async function main() {
 
   ensureDirs();
 
-  const config = loadConfig();
-  const modelId = config.model ?? process.env.LIBRA_MODEL ?? process.env.MODEL;
-  if (!modelId) {
-    console.error('No model configured. Set one with:');
-    console.error('  lc config set model <provider/model>');
-    console.error('');
-    console.error('Or set the MODEL environment variable.');
-    console.error('');
-    const providers = configuredProviders();
-    if (providers.length > 0) {
-      console.error('Configured providers:', providers.join(', '));
-    } else {
-      console.error('No providers configured. Set an API key:');
-      console.error('  OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_GENERATIVE_AI_API_KEY, DEEPSEEK_API_KEY');
-    }
-    process.exit(1);
-  }
-
-  let model;
-  try {
-    model = await resolveModel(modelId);
-  } catch (err) {
-    console.error(`Failed to resolve model "${modelId}": ${err instanceof Error ? err.message : err}`);
-    process.exit(1);
-  }
-
   const cwd = process.cwd();
   const sessionKey = sessionKeyForCwd(cwd);
 
-  // ── Build the agent ──
-  const agent = new Agent({
-    model,
-    systemPrompt: SYSTEM_PROMPT,
-    maxIterations: config.maxIterations ?? 50,
-  });
-
-  // Disk session.
-  agent.use(createDiskSessionExtension({
-    sessionDir: SESSIONS_DIR,
-    maxContextMessages: 100,
-    verbose: false,
-  }));
-
-  // Context compaction — disabled for now, needs rework.
-  // agent.use(createContextCompaction({
-  //   maxMessages: 40,
-  //   keepRecent: 12,
-  //   maxToolResultChars: 2000,
-  // }));
-
-  // Streaming.
-  agent.use(createStreamingExtension());
-
-  // File change tracker — must be installed before code-tools so
-  // its beforeTool hook captures file contents before writes.
-  const fileChanges: FileChange[] = [];
-  const changeTracker = createFileChangeTracker(fileChanges);
-  agent.use(changeTracker);
-
-  // Session stats — tracks token usage from provider responses.
-  const sessionStats: SessionStats = {
-    promptTokens: 0,
-    completionTokens: 0,
-    cachedPromptTokens: 0,
-    cacheWriteTokens: 0,
-    reasoningTokens: 0,
-    llmCalls: 0,
-    turns: 0,
-    toolCalls: 0,
-    toolErrors: 0,
-    lastPromptTokens: 0,
-    lastCompletionTokens: 0,
-  };
-  agent.use(createSessionStats(sessionStats));
-
-  // Code tools.
-  const todoFile = join(TODOS_DIR, `${sessionKey}.json`);
-  agent.use(createCodeToolsExtension({
-    shellsDir: SHELLS_DIR,
-    todoFile,
-    model,
-    codeSearchMaxIterations: 10,
-  }));
-
-  // Turn events — writes agent events to the journal.
-  agent.use(createTurnEventsExtension());
-
-  // ── Run with or without TUI ──
   if (useTui) {
-    await runWithTui(agent, prompt, sessionKey, fileChanges, todoFile, exitOnComplete, sessionStats);
+    await runWithTui(prompt, sessionKey, exitOnComplete);
   } else {
+    const { agent, todoFile } = await buildAgent();
     await runWithoutTui(agent, prompt, sessionKey, todoFile);
   }
 }
 
+// ── --worker mode (silent background agent) ──────────────────────────
+// Spawned by the TUI. Runs a single turn, writes events to the journal,
+// polls the command file for steer/halt, exits silently when done.
+async function runWorker(args: string[]) {
+  // Parse: --turn <id> --session <key> --prompt <text>
+  let turnId = '';
+  let sessionKey = '';
+  let prompt = '';
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--turn' && args[i + 1]) { turnId = args[++i]; continue; }
+    if (args[i] === '--session' && args[i + 1]) { sessionKey = args[++i]; continue; }
+    if (args[i] === '--prompt' && args[i + 1]) { prompt = args[++i]; continue; }
+  }
+
+  if (!turnId || !sessionKey || !prompt) {
+    process.exit(1);
+  }
+
+  ensureDirs();
+
+  // Acquire session lock.
+  const lockManager = new SessionLockManager(LOCKS_DIR);
+  if (!lockManager.acquire(sessionKey, turnId)) {
+    const journal = new TurnJournal(TURNS_DIR, TURN_META_DIR, turnId, prompt);
+    journal.markError('Another agent is already running on this session.');
+    journal.append('done', { reply: 'Error: Another agent is already running on this session.', finishReason: 'error' });
+    process.exit(1);
+  }
+
+  // Build agent with journal extensions.
+  let built;
+  try {
+    built = await buildAgent({ journalMode: true });
+  } catch (err) {
+    const journal = new TurnJournal(TURNS_DIR, TURN_META_DIR, turnId, prompt);
+    const msg = err instanceof Error ? err.message : String(err);
+    journal.markError(msg);
+    journal.append('done', { reply: `Error: ${msg}`, finishReason: 'error' });
+    lockManager.release(sessionKey);
+    process.exit(1);
+  }
+
+  const { agent } = built;
+  const journal = new TurnJournal(TURNS_DIR, TURN_META_DIR, turnId, prompt);
+
+  try {
+    const handle = agent.run({
+      message: prompt,
+      metadata: {
+        sessionId: sessionKey,
+        __journal: journal,
+        streamCallbacks: {
+          onText: (delta: string) => {
+            journal.append('text', { delta });
+          },
+        },
+      },
+    });
+
+    const result = await handle;
+
+    if (result.finishReason === 'halted') {
+      journal.markHalted();
+      journal.append('halt', { reason: 'halted' });
+      journal.append('done', { reply: '', finishReason: 'halted' });
+    } else {
+      const reply = result.message || '';
+      journal.markDone(reply);
+      journal.append('done', { reply, finishReason: result.finishReason });
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    journal.markError(msg);
+    journal.append('done', { reply: `Error: ${msg}`, finishReason: 'error' });
+  } finally {
+    lockManager.release(sessionKey);
+    process.exit(0);
+  }
+}
+
 // ── TUI mode (interactive, long-running) ─────────────────────────────
+// The TUI is a pure viewer. It spawns `lc --worker` as a detached child
+// process and watches the journal file for events. The agent runs
+// independently — if the TUI exits, the agent keeps going.
 async function runWithTui(
-  agent: Agent,
   initialPrompt: string,
   sessionKey: string,
-  fileChanges: FileChange[],
-  todoFile: string,
   exitOnComplete: boolean,
-  sessionStats: SessionStats,
 ) {
+  const todoFile = join(TODOS_DIR, `${sessionKey}.json`);
+
   // ── TUI display state (rebuilt from journal events) ──
-  // The journal is the source of truth. The TUI subscribes to it
-  // and renders from events. State is derived, not directly mutated.
   const displayState = {
     messages: loadSessionHistory(SESSIONS_DIR, sessionKey) as ChatMessage[],
     toolActivity: [] as ToolActivity[],
     todos: loadTodos(todoFile) as TodoItem[],
-    stats: sessionStats,
+    stats: {
+      promptTokens: 0, completionTokens: 0, cachedPromptTokens: 0,
+      cacheWriteTokens: 0, reasoningTokens: 0, llmCalls: 0, turns: 0,
+      toolCalls: 0, toolErrors: 0, lastPromptTokens: 0, lastCompletionTokens: 0,
+    } as SessionStats,
     streamingText: '',
     isRunning: false,
-    fileChanges,
+    fileChanges: [] as FileChange[],
   };
 
-  // Replay the latest turn journal to restore tool activity from the
-  // last session. The disk-session already restored chat messages;
-  // the turn journal adds tool activity and any incomplete streaming text.
-  replayLatestTurn(TURNS_DIR, TURN_META_DIR, displayState);
-
-  // Control state — kept separate from display state.
-  let runHandle: { steer: (msg: string) => void; halt: (reason?: string) => void } | null = null;
+  // ── Control state ──
   let currentJournal: TurnJournal | null = null;
+  let agentProcess: ChildProcess | null = null;
+  let haltPressed = false;
+  const lockManager = new SessionLockManager(LOCKS_DIR);
+  let reattaching = false;
 
   // ── Re-render helper — throttled to max ~30fps ──
   let renderFns: { rerender: (node: React.ReactNode) => void; unmount: () => void } | null = null;
   let renderPending = false;
   let lastRenderTime = 0;
-  const RENDER_INTERVAL = 33; // ~30fps cap
+  const RENDER_INTERVAL = 33;
   const forceUpdate = () => {
     if (!renderFns) return;
     if (renderPending) return;
@@ -324,17 +270,19 @@ async function runWithTui(
         isRunning={displayState.isRunning}
         onSubmit={(text: string) => { sendPrompt(text); }}
         onSteer={(text: string) => {
-          if (runHandle) {
-            runHandle.steer(text);
-            // Journal records the steer event for display.
-            currentJournal?.append('steer', { text });
+          if (currentJournal) {
+            currentJournal.writeCommand({ type: 'steer', text });
           }
         }}
         onHalt={() => {
-          if (runHandle) {
-            runHandle.halt('user halted');
-            // Journal records the halt event for display.
-            currentJournal?.append('halt', { reason: 'user halted' });
+          if (currentJournal && !haltPressed) {
+            haltPressed = true;
+            currentJournal.writeCommand({ type: 'halt', reason: 'user halted' });
+            setTimeout(() => { haltPressed = false; }, 3000);
+          } else if (agentProcess && haltPressed) {
+            try { agentProcess.kill('SIGTERM'); } catch {}
+            lockManager.forceBreak(sessionKey);
+            haltPressed = false;
           }
         }}
         onExit={() => {
@@ -346,18 +294,12 @@ async function runWithTui(
   };
 
   // ── Journal event handler — updates display state from events ──
-  // This is the key decoupling: the agent writes events to the journal,
-  // and this handler translates events into TUI display state. The agent
-  // never touches displayState directly.
   function handleJournalEvent(ev: TurnEvent): void {
     switch (ev.type) {
       case 'status':
-        // Status messages are transient — we don't display them in the
-        // chat panel, but they could be shown in a status line.
         break;
 
       case 'text':
-        // Accumulate streamed text deltas.
         displayState.streamingText += ev.delta ?? '';
         forceUpdate();
         break;
@@ -371,14 +313,12 @@ async function runWithTui(
             timestamp: ev.ts,
           });
         } else {
-          // Mark the last matching tool as done.
           for (let i = displayState.toolActivity.length - 1; i >= 0; i--) {
             if (displayState.toolActivity[i].name === ev.name && displayState.toolActivity[i].status === 'running') {
               displayState.toolActivity[i].status = 'done';
               break;
             }
           }
-          // Reload todos if a todo_write tool finished.
           if (ev.name === 'todo_write') {
             displayState.todos = loadTodos(todoFile);
           }
@@ -406,7 +346,6 @@ async function runWithTui(
         break;
 
       case 'done':
-        // Finalize the assistant message.
         if (displayState.streamingText) {
           displayState.messages.push({
             role: 'assistant',
@@ -423,14 +362,68 @@ async function runWithTui(
         }
         displayState.isRunning = false;
         displayState.todos = loadTodos(todoFile);
+        agentProcess = null;
+        currentJournal = null;
         forceUpdate();
+
+        if (exitOnComplete) {
+          renderFns?.unmount();
+          process.exit(0);
+        }
+        break;
+
+      case 'stats':
+        if (ev.stats) {
+          Object.assign(displayState.stats, ev.stats);
+          forceUpdate();
+        }
         break;
     }
   }
 
-  // ── Send a prompt to the agent ──
-  async function sendPrompt(text: string) {
+  // ── Journal file watcher (polling — macOS-safe) ──
+  let watchOffset = 0;
+  let watchTimer: ReturnType<typeof setInterval> | null = null;
+
+  function startWatching(journalPath: string, initialOffset = 0) {
+    watchOffset = initialOffset;
+    if (watchTimer) clearInterval(watchTimer);
+    watchTimer = setInterval(() => {
+      try {
+        if (!existsSync(journalPath)) return;
+        const stat = statSync(journalPath);
+        if (stat.size <= watchOffset) return;
+        const content = readFileSync(journalPath, 'utf-8');
+        const newContent = content.slice(watchOffset);
+        watchOffset = content.length;
+        for (const line of newContent.split('\n')) {
+          if (!line.trim()) continue;
+          try {
+            handleJournalEvent(JSON.parse(line) as TurnEvent);
+          } catch { /* partial line */ }
+        }
+      } catch { /* file may be mid-write */ }
+    }, 100);
+  }
+
+  function stopWatching() {
+    if (watchTimer) {
+      clearInterval(watchTimer);
+      watchTimer = null;
+    }
+  }
+
+  // ── Send a prompt — spawns `lc --worker` ──
+  function sendPrompt(text: string) {
     if (displayState.isRunning) return;
+
+    // Check/break stale session lock.
+    const lock = lockManager.readLock(sessionKey);
+    if (lock) {
+      try { process.kill(lock.pid, 0); } catch {
+        lockManager.forceBreak(sessionKey);
+      }
+    }
 
     // Create a journal for this turn.
     const turnId = TurnJournal.newTurnId();
@@ -442,55 +435,43 @@ async function runWithTui(
     displayState.messages.push({ role: 'user', content: text, timestamp: Date.now() });
     forceUpdate();
 
-    // Subscribe to journal events — this is how the TUI sees agent progress.
-    journal.subscribe(0, handleJournalEvent);
+    // Start watching the journal file for events.
+    const journalPath = join(TURNS_DIR, `${turnId}.jsonl`);
+    startWatching(journalPath);
 
-    try {
-      const handle = agent.run({
-        message: text,
-        metadata: {
-          sessionId: sessionKey,
-          __journal: journal,
-          streamCallbacks: {
-            onText: (delta: string) => {
-              // Stream text directly to the journal (faster than going
-              // through hooks for every token).
-              journal.append('text', { delta });
-            },
-          },
-        },
-      });
-      runHandle = handle;
-      const result = await handle;
+    // Spawn `lc --worker` — silent, detached.
+    agentProcess = spawn(process.execPath, [
+      process.argv[1],
+      '--worker',
+      '--turn', turnId,
+      '--session', sessionKey,
+      '--prompt', text,
+    ], {
+      detached: true,
+      stdio: 'ignore',
+    });
 
-      runHandle = null;
+    agentProcess.unref();
 
-      // Record the final result in the journal.
-      if (result.finishReason === 'halted') {
-        journal.markHalted();
-        journal.append('halt', { reason: 'halted' });
-      } else {
-        const reply = displayState.streamingText || result.message || '';
-        journal.markDone(reply);
-        journal.append('done', { reply, finishReason: result.finishReason });
-      }
-
-      // Auto-exit if flagged and this was the initial prompt.
-      if (exitOnComplete) {
-        renderFns?.unmount();
-        process.exit(0);
-      }
-    } catch (err) {
-      runHandle = null;
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      journal.markError(errorMsg);
-      journal.append('done', { reply: `Error: ${errorMsg}`, finishReason: 'error' });
-
-      if (exitOnComplete) {
-        renderFns?.unmount();
-        process.exit(1);
-      }
-    }
+    agentProcess.on('exit', () => {
+      setTimeout(() => {
+        if (displayState.isRunning) {
+          // Agent crashed without writing done.
+          displayState.isRunning = false;
+          displayState.messages.push({
+            role: 'assistant',
+            content: '⟦agent process exited unexpectedly⟧',
+            timestamp: Date.now(),
+          });
+          displayState.streamingText = '';
+          agentProcess = null;
+          currentJournal = null;
+          stopWatching();
+          lockManager.forceBreak(sessionKey);
+          forceUpdate();
+        }
+      }, 500);
+    });
   }
 
   // ── Render the TUI ──
@@ -505,18 +486,23 @@ async function runWithTui(
       isRunning={displayState.isRunning}
       onSubmit={(text: string) => { sendPrompt(text); }}
       onSteer={(text: string) => {
-        if (runHandle) {
-          runHandle.steer(text);
-          currentJournal?.append('steer', { text });
+        if (currentJournal) {
+          currentJournal.writeCommand({ type: 'steer', text });
         }
       }}
       onHalt={() => {
-        if (runHandle) {
-          runHandle.halt('user halted');
-          currentJournal?.append('halt', { reason: 'user halted' });
+        if (currentJournal && !haltPressed) {
+          haltPressed = true;
+          currentJournal.writeCommand({ type: 'halt', reason: 'user halted' });
+          setTimeout(() => { haltPressed = false; }, 3000);
+        } else if (agentProcess && haltPressed) {
+          try { agentProcess.kill('SIGTERM'); } catch {}
+          lockManager.forceBreak(sessionKey);
+          haltPressed = false;
         }
       }}
       onExit={() => {
+        stopWatching();
         unmount();
         process.exit(0);
       }}
@@ -525,9 +511,64 @@ async function runWithTui(
   );
   renderFns = { rerender, unmount };
 
-  // ── If an initial prompt was provided, send it immediately ──
-  if (initialPrompt) {
-    await sendPrompt(initialPrompt);
+  // ── Reattach to a running agent (if one exists for this session) ──
+  // When the TUI restarts, check if an agent process is still running
+  // from a previous TUI session. If so, replay its journal and start
+  // watching for new events.
+  const existingLock = lockManager.readLock(sessionKey);
+  if (existingLock) {
+    let alive = false;
+    try { process.kill(existingLock.pid, 0); alive = true; } catch {}
+    if (alive && existingLock.turnId) {
+      // Agent is still running — reattach.
+      reattaching = true;
+      const turnId = existingLock.turnId;
+      const journalPath = join(TURNS_DIR, `${turnId}.jsonl`);
+
+      // Load the journal to get the prompt and replay events.
+      const journal = TurnJournal.loadFromDisk(TURNS_DIR, TURN_META_DIR, turnId);
+      if (journal) {
+        currentJournal = journal;
+        displayState.isRunning = true;
+
+        // Replay all events so far (tool activity, streamed text, etc).
+        // Chat messages already came from loadSessionHistory, but we
+        // need to restore in-progress tool activity and streaming text.
+        for (const ev of journal.getAll()) {
+          handleJournalEvent(ev);
+        }
+
+        // Start watching for NEW events only. Set the offset to the
+        // current file size so we don't re-process events we just
+        // replayed above.
+        let initialOffset = 0;
+        try {
+          const stat = statSync(journalPath);
+          initialOffset = stat.size;
+        } catch {}
+        startWatching(journalPath, initialOffset);
+
+        // Track the agent process so halt/force-kill works.
+        agentProcess = { pid: existingLock.pid, kill: (sig: string) => {
+          try { process.kill(existingLock.pid, sig as any); return true; } catch { return false; }
+        } } as any as ChildProcess;
+
+        forceUpdate();
+      }
+    } else {
+      // Stale lock — clean it up.
+      lockManager.forceBreak(sessionKey);
+    }
+  }
+
+  // Only replay the latest turn if we're NOT reattaching (otherwise
+  // we'd double-process events from the running turn).
+  if (!reattaching) {
+    replayLatestTurn(TURNS_DIR, TURN_META_DIR, displayState);
+  }
+
+  if (initialPrompt && !displayState.isRunning) {
+    sendPrompt(initialPrompt);
   }
 }
 
@@ -584,7 +625,6 @@ async function runWithoutTui(
   });
 
   // Ctrl+C halts the running agent instead of killing the process.
-  // First Ctrl+C: halt the agent gracefully. Second Ctrl+C: force exit.
   let ctrlCCount = 0;
   const onSigInt = () => {
     ctrlCCount++;
@@ -626,9 +666,6 @@ function loadTodos(todoFile: string): TodoItem[] {
   return [];
 }
 
-// Load recent session history into TUI messages so the chat panel
-// shows prior conversation on restart. Reads the JSONL session file
-// and extracts user + assistant (text-only) messages.
 function loadSessionHistory(sessionsDir: string, sessionKey: string): ChatMessage[] {
   const sessionFile = join(sessionsDir, `${sessionKey}.jsonl`);
   if (!existsSync(sessionFile)) return [];
@@ -665,9 +702,6 @@ function loadSessionHistory(sessionsDir: string, sessionKey: string): ChatMessag
   return [];
 }
 
-// Replay the latest turn journal to restore tool activity from the
-// previous session. Chat messages are already loaded from the disk-
-// session JSONL; this adds tool activity and any incomplete streaming text.
 function replayLatestTurn(
   turnsDir: string,
   metaDir: string,
@@ -680,10 +714,8 @@ function replayLatestTurn(
   if (!journal) return;
 
   const meta = journal.getMeta();
-  // Only replay if the turn was recent (within last hour).
   if (Date.now() - meta.createdAt > 60 * 60 * 1000) return;
 
-  // Rebuild tool activity from tool events.
   for (const ev of journal.getAll()) {
     if (ev.type === 'tool' && ev.phase === 'start') {
       displayState.toolActivity.push({

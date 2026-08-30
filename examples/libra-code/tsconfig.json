@@ -12,5 +12,5 @@
     "sourceMap": true,
     "jsx": "react-jsx"
   },
-  "include": ["index.tsx", "tui.tsx", "file-change-tracker.ts", "session-stats.ts", "context-compaction.ts"]
+  "include": ["index.tsx", "tui.tsx", "agent-setup.ts", "turn-journal.ts", "file-change-tracker.ts", "session-stats.ts", "context-compaction.ts"]
 }

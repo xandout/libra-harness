@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, appendFileSync, openSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeToolName } from './shared.js';
@@ -9,6 +9,10 @@ import type { Tool } from '../../../../tool.js';
 // turns within the same agent. When a shell is backgrounded (detached),
 // its metadata is persisted to disk so it can be reconnected by a
 // future agent instance (e.g. a later `lc` invocation).
+//
+// Detached shells use a named pipe (FIFO) for stdin so that a future
+// process can write to them. Output goes to a regular file that can
+// be read incrementally (tail-style).
 
 export interface ShellEntry {
   id: string;
@@ -21,7 +25,9 @@ export interface ShellEntry {
   command: string;
   cwd: string;
   outputFile?: string;      // path to detached output file (if backgrounded)
+  inputFifo?: string;       // path to FIFO for stdin (if backgrounded)
   detached: boolean;        // true if the process was detached from the parent
+  readOffset?: number;      // byte offset for incremental output reads
 }
 
 // ── Persisted shell metadata ─────────────────────────────────────────
@@ -32,6 +38,7 @@ interface ShellMeta {
   cwd: string;
   startedAt: number;
   outputFile: string;
+  inputFifo: string;
 }
 
 export class ShellRegistry {
@@ -57,15 +64,15 @@ export class ShellRegistry {
    * to a file. Metadata is persisted to disk so a future process
    * can reconnect.
    */
-  create(command: string, cwd: string, env: Record<string, string>, background: boolean): ShellEntry {
+  async create(command: string, cwd: string, env: Record<string, string>, background: boolean): Promise<ShellEntry> {
     const id = this.nextId();
     const shellsDir = this.shellsDir;
 
     if (background) {
-      // ── Detached: output to file at OS level, process survives parent exit ──
-      // The child's stdout/stderr are connected directly to a file via
-      // file descriptors, not Node pipes. This means output continues
-      // flowing to the file even after the parent process exits.
+      // ── Detached: output to file, stdin from FIFO, survives parent exit ──
+      // stdout/stderr → output file (regular file, readable by any process).
+      // stdin ← FIFO (named pipe, writable by any future process).
+      // The process is detached (unref'd) so it survives parent exit.
       //
       // A wrapper shell command records the exit code to a file after
       // the command finishes, so a future process can see whether it
@@ -73,28 +80,62 @@ export class ShellRegistry {
       mkdirSync(shellsDir, { recursive: true });
       const outputFile = join(shellsDir, `${id}.output`);
       const exitFile = join(shellsDir, `${id}.exit`);
+      const inputFifo = join(shellsDir, `${id}.in`);
       const metaFile = this.metaPath(id);
 
       // Create the output file so it exists even if the command produces no output.
       writeFileSync(outputFile, '');
 
-      // Wrap the command so the exit code is recorded to a file.
-      // The wrapper runs in the detached shell, not in Node.
-      const wrappedCommand = `${command}; echo $? > "${exitFile}" 2>/dev/null`;
+      // Create the FIFO for stdin reattachment.
+      // mkfifo is POSIX — works on macOS and Linux.
+      // Use execFileSync so it's synchronous — we need the FIFO to
+      // exist before we spawn the command that reads from it.
+      try {
+        if (existsSync(inputFifo)) unlinkSync(inputFifo);
+        execFileSync('mkfifo', [inputFifo], { stdio: 'ignore' });
+      } catch {
+        // If mkfifo fails, fall back to /dev/null for stdin.
+        // The shell will still run, but write_to_process won't work
+        // across sessions.
+      }
 
       // Open file descriptors for stdout/stderr redirection.
       const outFd = openSync(outputFile, 'a');
       const errFd = outFd;
 
-      const child = spawn(wrappedCommand, {
+      // Stdin: if the FIFO exists, use the `exec 3<>"$fifo"` trick.
+      // Opening a FIFO read-write doesn't block (the opener is both
+      // reader and writer), unlike opening read-only which blocks
+      // until a writer is present. The command then reads stdin
+      // from fd 3. This means:
+      // - Commands that don't read stdin (echo, ls) work fine — fd 3
+      //   is open but they never read from it.
+      // - Commands that read stdin (cat, repl) block on read, not
+      //   open — they wait for data on fd 3.
+      // - Any future process can write to the FIFO and the data
+      //   appears on fd 3, reaching the command's stdin.
+      // - In-memory writes (same session) also go through the FIFO
+      //   via write_to_process's FIFO path.
+      const fifoReady = existsSync(inputFifo);
+      const nullFd = openSync('/dev/null', 'r');
+
+      // Build the wrapper command.
+      // If FIFO exists: exec 3<>"$fifo"; command <&3; echo $? > exit
+      // If not:          command < /dev/null; echo $? > exit
+      const fullCommand = fifoReady
+        ? `exec 3<>"${inputFifo}"; ${command} <&3; echo $? > "${exitFile}" 2>/dev/null`
+        : `${command} < /dev/null; echo $? > "${exitFile}" 2>/dev/null`;
+
+      const child = spawn(fullCommand, {
         shell: true,
         cwd,
         env: { ...process.env, ...env },
-        stdio: ['pipe', outFd, errFd],
+        stdio: [nullFd, outFd, errFd],
         detached: true,
       });
 
       closeSync(outFd);
+      try { closeSync(nullFd); } catch {}
 
       const entry: ShellEntry = {
         id,
@@ -107,7 +148,9 @@ export class ShellRegistry {
         command,
         cwd,
         outputFile,
+        inputFifo: existsSync(inputFifo) ? inputFifo : undefined,
         detached: true,
+        readOffset: 0,
       };
 
       // While the parent is alive, track exit for in-memory queries.
@@ -130,6 +173,7 @@ export class ShellRegistry {
         cwd,
         startedAt: entry.startedAt,
         outputFile,
+        inputFifo: inputFifo,
       };
       try { writeFileSync(metaFile, JSON.stringify(meta, null, 2)); } catch {}
 
@@ -232,8 +276,10 @@ export class ShellRegistry {
         command: meta.command,
         cwd: meta.cwd,
         outputFile,
+        inputFifo: meta.inputFifo,
         detached: true,
-        // No process handle — can't write to stdin or use ChildProcess.kill.
+        readOffset: output.length,
+        // No process handle — but we can write to the FIFO and kill by PID.
       };
 
       this.shells.set(id, entry);
@@ -250,7 +296,8 @@ export class ShellRegistry {
     const metaFile = this.metaPath(id);
     const outputFile = join(this.shellsDir, `${id}.output`);
     const exitFile = join(this.shellsDir, `${id}.exit`);
-    for (const f of [metaFile, outputFile, exitFile]) {
+    const inputFifo = join(this.shellsDir, `${id}.in`);
+    for (const f of [metaFile, outputFile, exitFile, inputFifo]) {
       try { unlinkSync(f); } catch {}
     }
 
@@ -289,7 +336,13 @@ export const execTool: ShellToolFactory = (cfg) => ({
     'is still running when the timeout elapses, it is detached and backgrounded with a shell_id ' +
     'so you can retrieve output later with get_output. ' +
     'Set timeout to 0 to background immediately. ' +
-    'Detached shells survive process exit — you can check on them in a later session. ' +
+    'Backgrounded shells are detached from the agent process and survive process exit — ' +
+    'any future agent turn can observe output (get_output), send input (write_to_process), ' +
+    'or kill (kill_shell) by shell_id. All backgrounded shells use a named pipe (FIFO) for ' +
+    'stdin, so write_to_process works across sessions and process restarts. ' +
+    'Prefer backgrounding (timeout=0) for any command that might run long, block on input, ' +
+    'or need to survive across agent turns — this avoids blocking the agent and ensures ' +
+    'the process can be adopted by any future turn. ' +
     'Commands run in the current working directory. Do not use this for file operations — ' +
     'use the dedicated file tools instead.',
   parameters: {
@@ -326,7 +379,7 @@ export const execTool: ShellToolFactory = (cfg) => ({
 
     // Background immediately — detach the process.
     if (timeout === 0) {
-      const entry = cfg.registry.create(command, cwd, extraEnv, true);
+      const entry = await cfg.registry.create(command, cwd, extraEnv, true);
       return {
         toolCallId: '',
         content: `Backgrounded: ${entry.id} (pid ${entry.pid})\nUse get_output with shell_id "${entry.id}" to read output, or kill_shell to terminate.`,
@@ -334,7 +387,7 @@ export const execTool: ShellToolFactory = (cfg) => ({
     }
 
     // Foreground — wait for completion or timeout.
-    const entry = cfg.registry.create(command, cwd, extraEnv, false);
+    const entry = await cfg.registry.create(command, cwd, extraEnv, false);
 
     const elapsed = await new Promise<number>((resolve) => {
       const start = Date.now();
@@ -367,7 +420,7 @@ export const execTool: ShellToolFactory = (cfg) => ({
     cfg.registry.delete(entry.id);
 
     // Re-create as detached, capturing output from the start.
-    const bgEntry = cfg.registry.create(command, cwd, extraEnv, true);
+    const bgEntry = await cfg.registry.create(command, cwd, extraEnv, true);
     return {
       toolCallId: '',
       content: `Timed out after ${elapsed}ms. Detached and backgrounded as ${bgEntry.id} (pid ${bgEntry.pid}).\nUse get_output with shell_id "${bgEntry.id}" to read output, or kill_shell to terminate.`,
@@ -382,7 +435,9 @@ export const getOutputTool: ShellToolFactory = (cfg) => ({
     'Read output from a backgrounded shell process. Returns accumulated stdout and stderr. ' +
     'If the process has exited, includes the exit code and the shell is cleaned up. ' +
     'Works across sessions — if the shell was started in a previous invocation, it is ' +
-    'reconnected from persisted metadata. Use the shell_id returned by exec.',
+    'reconnected from persisted metadata. Use the shell_id returned by exec. ' +
+    'On first call, returns all output so far. On subsequent calls, returns only new output ' +
+    'since the last read (incremental tailing).',
   parameters: {
     type: 'object',
     properties: {
@@ -405,12 +460,38 @@ export const getOutputTool: ShellToolFactory = (cfg) => ({
       return { toolCallId: '', content: `Error: no shell with id "${shellId}"` };
     }
 
-    // For reconnected shells, re-read the output file to get latest.
+    // For detached shells, read from the output file.
+    // Use readOffset for incremental reads — first call returns all
+    // output so far, subsequent calls return only new bytes.
+    // When the process is done, always return all unread output.
     let output = entry.output;
+    let isNew = false;
     if (entry.detached && entry.outputFile && existsSync(entry.outputFile)) {
       try {
-        output = readFileSync(entry.outputFile, 'utf-8');
-        entry.output = output;
+        const fullOutput = readFileSync(entry.outputFile, 'utf-8');
+        const offset = entry.readOffset ?? 0;
+        if (fullOutput.length > offset) {
+          // New output available — return only the new portion.
+          output = fullOutput.slice(offset);
+          entry.readOffset = fullOutput.length;
+          entry.output = fullOutput;
+          isNew = true;
+        } else if (entry.done) {
+          // Process is done but no new output — return empty string
+          // (the exit message will be appended below).
+          output = '';
+          isNew = true;
+        } else if (offset > 0) {
+          // No new output since last read.
+          output = '';
+          isNew = true;
+        } else {
+          // First read — return everything.
+          output = fullOutput;
+          entry.readOffset = fullOutput.length;
+          entry.output = fullOutput;
+          isNew = true;
+        }
       } catch {}
     }
 
@@ -423,6 +504,13 @@ export const getOutputTool: ShellToolFactory = (cfg) => ({
       return {
         toolCallId: '',
         content: `Process exited (code: ${entry.exitCode}).\n${truncated}`,
+      };
+    }
+
+    if (isNew && output === '') {
+      return {
+        toolCallId: '',
+        content: `Still running (pid ${entry.pid}). No new output since last read.`,
       };
     }
 
@@ -495,7 +583,8 @@ export const writeToProcessTool: ShellToolFactory = (cfg) => ({
     'Write input to the stdin of a backgrounded interactive shell process. ' +
     'Use this for shells running TUI programs, REPLs, or commands that wait for input. ' +
     'For a simple Enter keypress, send "\\n". ' +
-    'Only works for shells started in the current session (not reconnected).',
+    'Works across sessions — reconnected shells write to a named pipe (FIFO) ' +
+    'that the detached process reads from.',
   parameters: {
     type: 'object',
     properties: {
@@ -529,35 +618,76 @@ export const writeToProcessTool: ShellToolFactory = (cfg) => ({
       return { toolCallId: '', content: `Error: process ${shellId} has already exited` };
     }
 
-    // write_to_process only works for in-memory shells with a live stdin.
+    // For reconnected shells, check if the PID is still alive.
     if (!entry.process) {
-      return {
-        toolCallId: '',
-        content: `Error: shell ${shellId} was reconnected from a previous session and has no writable stdin. Only shells started in the current session accept input.`,
-        isError: true,
-      };
+      try { process.kill(entry.pid, 0); } catch {
+        entry.done = true;
+        entry.exitCode = -1;
+        return { toolCallId: '', content: `Error: process ${shellId} has already exited` };
+      }
     }
 
-    const stdin = entry.process.stdin;
-    if (!stdin || stdin.destroyed) {
-      return { toolCallId: '', content: `Error: process ${shellId} has no writable stdin` };
-    }
-
-    return new Promise((resolve) => {
-      stdin.write(input, (err) => {
-        if (err) {
+    // Write to the FIFO. Both in-memory and reconnected shells read
+    // stdin from the FIFO (via the `exec 3<>"$fifo"` trick in the
+    // wrapper command). We use a subprocess to write so we don't
+    // block the event loop — opening a FIFO for writing blocks until
+    // a reader is present, and the detached shell is the reader.
+    if (entry.inputFifo && existsSync(entry.inputFifo)) {
+      const { spawn } = await import('node:child_process');
+      return new Promise((resolve) => {
+        // Use a heredoc to safely pass the input to printf, which
+        // writes to the FIFO. This handles special characters.
+        const writer = spawn('sh', ['-c', `printf %s "$1" >> "${entry.inputFifo}"`, 'write_to_process', input], { stdio: 'ignore' });
+        writer.on('exit', (code) => {
+          if (code === 0) {
+            resolve({
+              toolCallId: '',
+              content: `Wrote ${input.length} bytes to ${shellId}`,
+            });
+          } else {
+            resolve({
+              toolCallId: '',
+              content: `Error writing to ${shellId}: exit code ${code}`,
+              isError: true,
+            });
+          }
+        });
+        writer.on('error', (err) => {
           resolve({
             toolCallId: '',
             content: `Error writing to ${shellId}: ${err.message}`,
             isError: true,
           });
-        } else {
-          resolve({
-            toolCallId: '',
-            content: `Wrote ${input.length} bytes to ${shellId}`,
-          });
-        }
+        });
       });
-    });
+    }
+
+    // No FIFO — fall back to in-memory pipe if available (legacy path
+    // for shells backgrounded before FIFO support, or if mkfifo failed).
+    if (entry.process && entry.process.stdin && !entry.process.stdin.destroyed) {
+      const stdin = entry.process.stdin;
+      return new Promise((resolve) => {
+        stdin.write(input, (err) => {
+          if (err) {
+            resolve({
+              toolCallId: '',
+              content: `Error writing to ${shellId}: ${err.message}`,
+              isError: true,
+            });
+          } else {
+            resolve({
+              toolCallId: '',
+              content: `Wrote ${input.length} bytes to ${shellId}`,
+            });
+          }
+        });
+      });
+    }
+
+    return {
+      toolCallId: '',
+      content: `Error: shell ${shellId} has no writable stdin (no FIFO and no process handle)`,
+      isError: true,
+    };
   },
 });

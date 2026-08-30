@@ -26,6 +26,22 @@ export interface SessionStats {
   lastCompletionTokens: number;
 }
 
+function snapshot(stats: SessionStats) {
+  return {
+    promptTokens: stats.promptTokens,
+    completionTokens: stats.completionTokens,
+    cachedPromptTokens: stats.cachedPromptTokens,
+    cacheWriteTokens: stats.cacheWriteTokens,
+    reasoningTokens: stats.reasoningTokens,
+    llmCalls: stats.llmCalls,
+    turns: stats.turns,
+    toolCalls: stats.toolCalls,
+    toolErrors: stats.toolErrors,
+    lastPromptTokens: stats.lastPromptTokens,
+    lastCompletionTokens: stats.lastCompletionTokens,
+  };
+}
+
 export function createSessionStats(
   stats: SessionStats,
 ): Extension {
@@ -34,8 +50,11 @@ export function createSessionStats(
     priority: 95,
     install(agent) {
       // Track turns.
-      agent.hook('beforeTurn', 'session-stats', async () => {
+      agent.hook('beforeTurn', 'session-stats', async (ctx) => {
         stats.turns += 1;
+        // Write stats to journal if available (worker mode).
+        const journal = ctx.turn.metadata['__journal'] as any;
+        journal?.append('stats', { stats: snapshot(stats) });
       });
 
       // Accumulate token usage from each LLM call.
@@ -51,6 +70,10 @@ export function createSessionStats(
         stats.llmCalls += 1;
         stats.lastPromptTokens = usage.promptTokens ?? 0;
         stats.lastCompletionTokens = usage.completionTokens ?? 0;
+
+        // Write stats to journal if available (worker mode).
+        const journal = ctx.turn.metadata['__journal'] as any;
+        journal?.append('stats', { stats: snapshot(stats) });
       });
 
       // Track tool calls.
@@ -59,6 +82,10 @@ export function createSessionStats(
         if (!toolResult) return;
         stats.toolCalls += 1;
         if (toolResult.isError) stats.toolErrors += 1;
+
+        // Write stats to journal if available (worker mode).
+        const journal = ctx.turn.metadata['__journal'] as any;
+        journal?.append('stats', { stats: snapshot(stats) });
       });
     },
   };
