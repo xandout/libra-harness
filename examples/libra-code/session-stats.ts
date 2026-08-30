@@ -1,0 +1,65 @@
+import type { Extension } from '@xandout/libra-harness';
+
+// ── Types ────────────────────────────────────────────────────────────
+export interface SessionStats {
+  /** Total prompt tokens across all LLM calls (cumulative). */
+  promptTokens: number;
+  /** Total completion tokens across all LLM calls (cumulative). */
+  completionTokens: number;
+  /** Cached prompt tokens (cache reads). */
+  cachedPromptTokens: number;
+  /** Cache write tokens. */
+  cacheWriteTokens: number;
+  /** Reasoning/thinking tokens. */
+  reasoningTokens: number;
+  /** Total LLM calls this session. */
+  llmCalls: number;
+  /** Total turns this session. */
+  turns: number;
+  /** Total tool calls this session. */
+  toolCalls: number;
+  /** Tool errors this session. */
+  toolErrors: number;
+  /** Last prompt token count from the most recent LLM call. */
+  lastPromptTokens: number;
+  /** Last completion token count from the most recent LLM call. */
+  lastCompletionTokens: number;
+}
+
+export function createSessionStats(
+  stats: SessionStats,
+): Extension {
+  return {
+    name: 'session-stats',
+    priority: 95,
+    install(agent) {
+      // Track turns.
+      agent.hook('beforeTurn', 'session-stats', async () => {
+        stats.turns += 1;
+      });
+
+      // Accumulate token usage from each LLM call.
+      agent.hook('afterLLM', 'session-stats', async (ctx) => {
+        const usage = ctx.modelResponse?.usage;
+        if (!usage) return;
+
+        stats.promptTokens += usage.promptTokens ?? 0;
+        stats.completionTokens += usage.completionTokens ?? 0;
+        stats.cachedPromptTokens += usage.cachedPromptTokens ?? 0;
+        stats.cacheWriteTokens += usage.cacheWriteTokens ?? 0;
+        stats.reasoningTokens += usage.reasoningTokens ?? 0;
+        stats.llmCalls += 1;
+        stats.lastPromptTokens = usage.promptTokens ?? 0;
+        stats.lastCompletionTokens = usage.completionTokens ?? 0;
+      });
+
+      // Track tool calls.
+      agent.hook('afterTool', 'session-stats', async (ctx) => {
+        const toolResult = ctx.toolResult;
+        if (!toolResult) return;
+        stats.toolCalls += 1;
+        if (toolResult.isError) stats.toolErrors += 1;
+      });
+    },
+  };
+}

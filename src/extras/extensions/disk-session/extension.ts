@@ -114,6 +114,11 @@ export interface DiskSessionConfig {
   /** Load existing JSONL files into memory on startup. Default: true. */
   loadOnStartup?: boolean;
   /**
+   * Print a summary line when sessions are loaded from disk.
+   * Default: true.
+   */
+  verbose?: boolean;
+  /**
    * Resolve a {@link SessionIdentity} from turn metadata. Default:
    * reads `metadata.session` as a `SessionIdentity`, falls back to
    * `metadata.sessionId` as a plain key, then to `'default'`.
@@ -218,7 +223,7 @@ export default function createDiskSessionExtension(
           // Skip corrupt files.
         }
       }
-      if (store.size > 0) {
+      if (store.size > 0 && config?.verbose !== false) {
         console.log(
           `[disk-session] loaded ${store.size} session(s), ${totalRecords} record(s) from ${dir}`,
         );
@@ -430,31 +435,109 @@ export default function createDiskSessionExtension(
         }
       });
 
-      // ── afterLLM: accumulate token usage across iterations ─────
+      // ── afterLLM: accumulate token usage + append assistant msg ──
       // Each LLM call returns usage (prompt/completion tokens). We
       // accumulate them across all iterations in the turn so the final
       // assistant record has the total cost.
+      //
+      // We also append the assistant message (including tool calls) to
+      // the session log immediately, so the JSONL file is updated
+      // iteration by iteration rather than only at afterTurn. Tool
+      // results are appended in the afterTool hook below.
       agent.hook('afterLLM', 'disk-session', async (ctx) => {
+        const identity = identityFromCtx(ctx);
+        if (!identity) return;
+        const { key, messageTs, threadTs } = identity;
+
         const usage = ctx.modelResponse?.usage;
-        if (!usage) return;
-        const prev = (ctx.turn.metadata['_diskSessionUsage'] as {
-          promptTokens: number;
-          completionTokens: number;
-          iterations: number;
-          cachedPromptTokens?: number;
-          reasoningTokens?: number;
-        }) ?? { promptTokens: 0, completionTokens: 0, iterations: 0 };
-        ctx.turn.metadata['_diskSessionUsage'] = {
-          promptTokens: prev.promptTokens + usage.promptTokens,
-          completionTokens: prev.completionTokens + usage.completionTokens,
-          iterations: prev.iterations + 1,
-          ...(usage.cachedPromptTokens && {
-            cachedPromptTokens: (prev.cachedPromptTokens ?? 0) + usage.cachedPromptTokens,
-          }),
-          ...(usage.reasoningTokens && {
-            reasoningTokens: (prev.reasoningTokens ?? 0) + usage.reasoningTokens,
-          }),
+        if (usage) {
+          const prev = (ctx.turn.metadata['_diskSessionUsage'] as {
+            promptTokens: number;
+            completionTokens: number;
+            iterations: number;
+            cachedPromptTokens?: number;
+            reasoningTokens?: number;
+          }) ?? { promptTokens: 0, completionTokens: 0, iterations: 0 };
+          ctx.turn.metadata['_diskSessionUsage'] = {
+            promptTokens: prev.promptTokens + usage.promptTokens,
+            completionTokens: prev.completionTokens + usage.completionTokens,
+            iterations: prev.iterations + 1,
+            ...(usage.cachedPromptTokens && {
+              cachedPromptTokens: (prev.cachedPromptTokens ?? 0) + usage.cachedPromptTokens,
+            }),
+            ...(usage.reasoningTokens && {
+              reasoningTokens: (prev.reasoningTokens ?? 0) + usage.reasoningTokens,
+            }),
+          };
+        }
+
+        // ── Incremental append: write the assistant message now ──
+        // The agent core pushes the assistant message to turn.messages
+        // AFTER afterLLM fires, so we can't read it from there yet.
+        // Instead, we build the record from modelResponse.message.
+        const modelResponse = ctx.modelResponse;
+        if (modelResponse?.message) {
+          const sessionMeta = ctx.turn.metadata.sessionMeta as
+            | Record<string, unknown>
+            | undefined;
+          const record = {
+            ...toRecord(
+              modelResponse.message as Message,
+              messageTs,
+              threadTs,
+            ),
+            ...(sessionMeta ? { meta: sessionMeta } : {}),
+          };
+          const records = store.get(key) ?? [];
+          records.push(record);
+          if (records.length > maxRecords) {
+            records.splice(0, records.length - maxRecords);
+          }
+          store.set(key, records);
+          appendToFile(key, [record]);
+
+          // Track how many records we've already written so afterTurn
+          // doesn't duplicate them.
+          const written = (ctx.turn.metadata['_diskSessionWritten'] as number) ?? 0;
+          ctx.turn.metadata['_diskSessionWritten'] = written + 1;
+        }
+      });
+
+      // ── afterTool: append tool results incrementally ──────────────
+      // Each tool result is written to disk as soon as it completes,
+      // so the JSONL file reflects progress in real time.
+      agent.hook('afterTool', 'disk-session', async (ctx) => {
+        const identity = identityFromCtx(ctx);
+        if (!identity) return;
+        const { key, messageTs, threadTs } = identity;
+
+        const toolResult = ctx.toolResult;
+        const toolCall = ctx.toolCall;
+        if (!toolResult || !toolCall) return;
+
+        const sessionMeta = ctx.turn.metadata.sessionMeta as
+          | Record<string, unknown>
+          | undefined;
+        const record: SessionRecord = {
+          role: 'tool',
+          content: toolResult.content,
+          toolCallId: toolResult.toolCallId,
+          name: toolCall.name,
+          ts: messageTs,
+          ...(threadTs ? { threadTs } : {}),
+          recordedAt: new Date().toISOString(),
+          ...(sessionMeta ? { meta: sessionMeta } : {}),
         };
+        const records = store.get(key) ?? [];
+        records.push(record);
+        if (records.length > maxRecords) {
+          records.splice(0, records.length - maxRecords);
+        }
+        store.set(key, records);
+        appendToFile(key, [record]);
+
+        const written = (ctx.turn.metadata['_diskSessionWritten'] as number) ?? 0;
+        ctx.turn.metadata['_diskSessionWritten'] = written + 1;
       });
 
       // ── afterTurn: append assistant response + tool calls ─────
@@ -518,11 +601,46 @@ export default function createDiskSessionExtension(
 
         // Only persist non-user, non-system messages here.
         // The user message was already written in beforeTurn.
-        const filteredMessages = newMessages.filter(
+        let filteredMessages = newMessages.filter(
           (m) => m.role !== 'system' && m.role !== 'user',
         );
 
-        if (filteredMessages.length === 0) return;
+        // ── Skip records already written incrementally ───────────
+        // afterLLM and afterTool hooks append assistant messages and
+        // tool results as they happen. Skip those here to avoid
+        // duplicates. Only the final assistant response (with no tool
+        // calls) may not have been written yet — it's the one that
+        // ends the turn without triggering afterTool.
+        const alreadyWritten = (ctx.turn.metadata['_diskSessionWritten'] as number) ?? 0;
+        delete ctx.turn.metadata['_diskSessionWritten'];
+        if (alreadyWritten > 0) {
+          filteredMessages = filteredMessages.slice(alreadyWritten);
+        }
+
+        if (filteredMessages.length === 0) {
+          // All records were already written incrementally by afterLLM
+          // and afterTool. Still need to backfill the system prompt on
+          // the user record and clean up usage metadata.
+          delete ctx.turn.metadata['_diskSessionUsage'];
+          // ── Backfill system prompt on the last user record ───────
+          const finalSystemPrompt = ctx.turn.systemPrompt;
+          if (finalSystemPrompt) {
+            const records = store.get(key) ?? [];
+            for (let i = records.length - 1; i >= 0; i--) {
+              if (records[i].role === 'user') {
+                records[i].systemPrompt = finalSystemPrompt;
+                break;
+              }
+            }
+            appendToFile(key, [{
+              role: 'control',
+              content: '',
+              recordedAt: new Date().toISOString(),
+              systemPrompt: finalSystemPrompt,
+            } as SessionRecord]);
+          }
+          return;
+        }
 
         // Pull accumulated usage for this turn (set by afterLLM hook).
         const usage = ctx.turn.metadata['_diskSessionUsage'] as SessionRecord['usage'] | undefined;

@@ -1,5 +1,4 @@
 import { readFileSync, statSync, existsSync } from 'node:fs';
-import type { Tool } from '../../../../tool.js';
 import { makeToolName, getReadSet, isTextFile, isImageFile, imageMime, type ToolFactory } from './shared.js';
 
 export const readTool: ToolFactory = (cfg) => ({

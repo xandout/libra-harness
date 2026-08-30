@@ -1,6 +1,5 @@
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { Tool } from '../../../../tool.js';
 import { makeToolName, getReadSet, type ToolFactory } from './shared.js';
 
 // ── write ────────────────────────────────────────────────────────────

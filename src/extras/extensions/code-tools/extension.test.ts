@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Agent } from '@xandout/libra-harness';
@@ -40,7 +40,7 @@ describe('code-tools extension', () => {
       // Access the tool directly via the agent's tool registry.
       const tools = (agent as any).tools as Map<string, any>;
       expect(tools).toBeDefined();
-      expect(tools.size).toBe(3); // read, write, edit
+      expect(tools.size).toBe(10); // read, write, edit, find_file_by_name, grep, exec, get_output, kill_shell, write_to_process, todo_write
 
       const readTool = tools.get('read');
       expect(readTool).toBeDefined();
@@ -412,6 +412,7 @@ describe('code-tools extension', () => {
       expect(tools.get('code_read')).toBeDefined();
       expect(tools.get('code_write')).toBeDefined();
       expect(tools.get('code_edit')).toBeDefined();
+      expect(tools.get('code_exec')).toBeDefined();
     });
 
     it('respects maxReadSize', async () => {
@@ -430,6 +431,658 @@ describe('code-tools extension', () => {
       );
 
       expect(result.content).toContain('too large');
+    });
+  });
+
+  // ── find_file_by_name tool ─────────────────────────────────────────
+  describe('find_file_by_name tool', () => {
+    it('finds files by glob pattern', async () => {
+      writeFileSync(join(tmpDir, 'a.ts'), '');
+      writeFileSync(join(tmpDir, 'b.ts'), '');
+      writeFileSync(join(tmpDir, 'c.js'), '');
+      mkdirSync(join(tmpDir, 'sub'));
+      writeFileSync(join(tmpDir, 'sub', 'd.ts'), '');
+
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const findTool = tools.get('find_file_by_name');
+
+      const result = await findTool.execute(
+        { pattern: '*.ts', path: tmpDir },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('a.ts');
+      expect(result.content).toContain('b.ts');
+      expect(result.content).not.toContain('c.js');
+      // *.ts should not match in subdirectories
+      expect(result.content).not.toContain('d.ts');
+    });
+
+    it('finds files recursively with **', async () => {
+      writeFileSync(join(tmpDir, 'top.py'), '');
+      mkdirSync(join(tmpDir, 'deep', 'nested'), { recursive: true });
+      writeFileSync(join(tmpDir, 'deep', 'nested', 'bottom.py'), '');
+
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const findTool = tools.get('find_file_by_name');
+
+      const result = await findTool.execute(
+        { pattern: '**/*.py', path: tmpDir },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('top.py');
+      expect(result.content).toContain('bottom.py');
+    });
+
+    it('supports brace expansion', async () => {
+      writeFileSync(join(tmpDir, 'a.ts'), '');
+      writeFileSync(join(tmpDir, 'a.tsx'), '');
+      writeFileSync(join(tmpDir, 'a.js'), '');
+
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const findTool = tools.get('find_file_by_name');
+
+      const result = await findTool.execute(
+        { pattern: '*.{ts,tsx}', path: tmpDir },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('a.ts');
+      expect(result.content).toContain('a.tsx');
+      expect(result.content).not.toContain('a.js');
+    });
+
+    it('returns message when no files match', async () => {
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const findTool = tools.get('find_file_by_name');
+
+      const result = await findTool.execute(
+        { pattern: '*.nonexistent', path: tmpDir },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('No files matching');
+    });
+
+    it('skips node_modules and .git', async () => {
+      mkdirSync(join(tmpDir, 'node_modules'));
+      writeFileSync(join(tmpDir, 'node_modules', 'dep.ts'), '');
+      mkdirSync(join(tmpDir, '.git'));
+      writeFileSync(join(tmpDir, '.git', 'config.ts'), '');
+      writeFileSync(join(tmpDir, 'real.ts'), '');
+
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const findTool = tools.get('find_file_by_name');
+
+      const result = await findTool.execute(
+        { pattern: '**/*.ts', path: tmpDir },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('real.ts');
+      expect(result.content).not.toContain('dep.ts');
+      expect(result.content).not.toContain('config.ts');
+    });
+  });
+
+  // ── grep tool ──────────────────────────────────────────────────────
+  describe('grep tool', () => {
+    it('finds matching lines in content mode', async () => {
+      writeFileSync(join(tmpDir, 'code.ts'), 'const x = 1;\nconst y = 2;\nconst x = 3;');
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const grepTool = tools.get('grep');
+
+      const result = await grepTool.execute(
+        { pattern: 'const x', path: tmpDir },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('code.ts:1:');
+      expect(result.content).toContain('code.ts:3:');
+      expect(result.content).toContain('2 matches');
+    });
+
+    it('supports files_with_matches mode', async () => {
+      writeFileSync(join(tmpDir, 'a.txt'), 'hello world');
+      writeFileSync(join(tmpDir, 'b.txt'), 'hello there');
+      writeFileSync(join(tmpDir, 'c.txt'), 'no match here');
+
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const grepTool = tools.get('grep');
+
+      const result = await grepTool.execute(
+        { pattern: 'hello', path: tmpDir, output_mode: 'files_with_matches' },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('a.txt');
+      expect(result.content).toContain('b.txt');
+      expect(result.content).not.toContain('c.txt');
+    });
+
+    it('supports count mode', async () => {
+      writeFileSync(join(tmpDir, 'a.txt'), 'foo\nfoo\nbar');
+      writeFileSync(join(tmpDir, 'b.txt'), 'foo\nbar');
+
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const grepTool = tools.get('grep');
+
+      const result = await grepTool.execute(
+        { pattern: 'foo', path: tmpDir, output_mode: 'count' },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('a.txt:2');
+      expect(result.content).toContain('b.txt:1');
+      expect(result.content).toContain('Total: 3');
+    });
+
+    it('supports case_insensitive', async () => {
+      writeFileSync(join(tmpDir, 'mix.txt'), 'Hello\nHELLO\nworld');
+
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const grepTool = tools.get('grep');
+
+      const result = await grepTool.execute(
+        { pattern: 'hello', path: tmpDir, case_insensitive: true },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('mix.txt:1:');
+      expect(result.content).toContain('mix.txt:2:');
+    });
+
+    it('supports context_lines', async () => {
+      writeFileSync(join(tmpDir, 'ctx.txt'), 'line1\nline2\nMATCH\nline4\nline5');
+
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const grepTool = tools.get('grep');
+
+      const result = await grepTool.execute(
+        { pattern: 'MATCH', path: tmpDir, context_lines: 1 },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('ctx.txt:2:');
+      expect(result.content).toContain('ctx.txt:3:');
+      expect(result.content).toContain('ctx.txt:4:');
+      expect(result.content).toContain('>'); // marker for matching line
+    });
+
+    it('supports glob_pattern filter', async () => {
+      writeFileSync(join(tmpDir, 'a.ts'), 'target');
+      writeFileSync(join(tmpDir, 'b.js'), 'target');
+
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const grepTool = tools.get('grep');
+
+      const result = await grepTool.execute(
+        { pattern: 'target', path: tmpDir, glob_pattern: '*.ts' },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('a.ts');
+      expect(result.content).not.toContain('b.js');
+    });
+
+    it('returns message when no matches', async () => {
+      writeFileSync(join(tmpDir, 'empty.txt'), 'nothing here');
+
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const grepTool = tools.get('grep');
+
+      const result = await grepTool.execute(
+        { pattern: 'nonexistent', path: tmpDir },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('No matches');
+    });
+
+    it('skips node_modules', async () => {
+      mkdirSync(join(tmpDir, 'node_modules'));
+      writeFileSync(join(tmpDir, 'node_modules', 'dep.ts'), 'secret');
+      writeFileSync(join(tmpDir, 'main.ts'), 'secret');
+
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const grepTool = tools.get('grep');
+
+      const result = await grepTool.execute(
+        { pattern: 'secret', path: tmpDir },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('main.ts');
+      expect(result.content).not.toContain('dep.ts');
+    });
+  });
+
+  // ── exec tool ──────────────────────────────────────────────────────
+  describe('exec tool', () => {
+    it('runs a command and returns output', async () => {
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const execTool = tools.get('exec');
+
+      const result = await execTool.execute(
+        { command: 'echo hello world' },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('Exit code: 0');
+      expect(result.content).toContain('hello world');
+    });
+
+    it('returns exit code for failing commands', async () => {
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const execTool = tools.get('exec');
+
+      const result = await execTool.execute(
+        { command: 'exit 42' },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('Exit code: 42');
+    });
+
+    it('captures stderr', async () => {
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const execTool = tools.get('exec');
+
+      const result = await execTool.execute(
+        { command: 'echo "err msg" >&2' },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('err msg');
+    });
+
+    it('backgrounds on timeout and returns shell_id', async () => {
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const execTool = tools.get('exec');
+
+      const result = await execTool.execute(
+        { command: 'sleep 10', timeout: 200 },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('Detached');
+      expect(result.content).toContain('shell_');
+    });
+
+    it('backgrounds immediately with timeout 0', async () => {
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const execTool = tools.get('exec');
+
+      const result = await execTool.execute(
+        { command: 'echo hi', timeout: 0 },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('Backgrounded');
+      expect(result.content).toContain('shell_');
+    });
+  });
+
+  // ── get_output tool ────────────────────────────────────────────────
+  describe('get_output tool', () => {
+    it('reads output from a backgrounded shell', async () => {
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const execTool = tools.get('exec');
+      const getOutputTool = tools.get('get_output');
+
+      const metadata: Record<string, unknown> = {};
+      const execResult = await execTool.execute(
+        { command: 'echo background output', timeout: 0 },
+        { signal: new AbortController().signal, metadata },
+      );
+
+      const shellId = execResult.content.match(/shell_\d+/)?.[0];
+      expect(shellId).toBeDefined();
+
+      // Wait for output to accumulate.
+      await new Promise((r) => setTimeout(r, 200));
+
+      const result = await getOutputTool.execute(
+        { shell_id: shellId! },
+        { signal: new AbortController().signal, metadata },
+      );
+
+      expect(result.content).toContain('background output');
+    });
+
+    it('reports process exited', async () => {
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const execTool = tools.get('exec');
+      const getOutputTool = tools.get('get_output');
+
+      const metadata: Record<string, unknown> = {};
+      const execResult = await execTool.execute(
+        { command: 'echo done', timeout: 0 },
+        { signal: new AbortController().signal, metadata },
+      );
+
+      const shellId = execResult.content.match(/shell_\d+/)?.[0]!;
+      // Wait for process to finish.
+      await new Promise((r) => setTimeout(r, 300));
+
+      const result = await getOutputTool.execute(
+        { shell_id: shellId },
+        { signal: new AbortController().signal, metadata },
+      );
+
+      expect(result.content).toContain('Process exited');
+      expect(result.content).toContain('code: 0');
+    });
+
+    it('errors for unknown shell_id', async () => {
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const getOutputTool = tools.get('get_output');
+
+      const result = await getOutputTool.execute(
+        { shell_id: 'shell_999' },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('no shell');
+    });
+  });
+
+  // ── kill_shell tool ────────────────────────────────────────────────
+  describe('kill_shell tool', () => {
+    it('kills a backgrounded shell', async () => {
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const execTool = tools.get('exec');
+      const killTool = tools.get('kill_shell');
+
+      const metadata: Record<string, unknown> = {};
+      const execResult = await execTool.execute(
+        { command: 'sleep 30', timeout: 0 },
+        { signal: new AbortController().signal, metadata },
+      );
+
+      const shellId = execResult.content.match(/shell_\d+/)?.[0]!;
+
+      const result = await killTool.execute(
+        { shell_id: shellId },
+        { signal: new AbortController().signal, metadata },
+      );
+
+      expect(result.content).toContain('Killed');
+      // Verify the shell is gone — get_output should report no shell.
+      const getResult = await tools.get('get_output').execute(
+        { shell_id: shellId },
+        { signal: new AbortController().signal, metadata },
+      );
+      expect(getResult.content).toContain('no shell');
+    });
+
+    it('errors for unknown shell_id', async () => {
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const killTool = tools.get('kill_shell');
+
+      const result = await killTool.execute(
+        { shell_id: 'shell_999' },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('no shell');
+    });
+  });
+
+  // ── write_to_process tool ──────────────────────────────────────────
+  describe('write_to_process tool', () => {
+    it('writes to stdin of a backgrounded shell', async () => {
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const execTool = tools.get('exec');
+      const writeTool = tools.get('write_to_process');
+      const getOutputTool = tools.get('get_output');
+
+      const metadata: Record<string, unknown> = {};
+      // Start cat (reads stdin, echoes to stdout)
+      const execResult = await execTool.execute(
+        { command: 'cat', timeout: 0 },
+        { signal: new AbortController().signal, metadata },
+      );
+
+      const shellId = execResult.content.match(/shell_\d+/)?.[0]!;
+
+      const writeResult = await writeTool.execute(
+        { shell_id: shellId, input: 'hello from stdin\n' },
+        { signal: new AbortController().signal, metadata },
+      );
+
+      expect(writeResult.content).toContain('Wrote');
+
+      // Wait for cat to echo.
+      await new Promise((r) => setTimeout(r, 200));
+
+      const outputResult = await getOutputTool.execute(
+        { shell_id: shellId },
+        { signal: new AbortController().signal, metadata },
+      );
+
+      expect(outputResult.content).toContain('hello from stdin');
+    });
+
+    it('errors for unknown shell_id', async () => {
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const writeTool = tools.get('write_to_process');
+
+      const result = await writeTool.execute(
+        { shell_id: 'shell_999', input: 'test' },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('no shell');
+    });
+
+    it('errors for exited process', async () => {
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const execTool = tools.get('exec');
+      const writeTool = tools.get('write_to_process');
+
+      const metadata: Record<string, unknown> = {};
+      const execResult = await execTool.execute(
+        { command: 'echo quick', timeout: 0 },
+        { signal: new AbortController().signal, metadata },
+      );
+
+      const shellId = execResult.content.match(/shell_\d+/)?.[0]!;
+      // Wait for process to exit.
+      await new Promise((r) => setTimeout(r, 300));
+
+      const result = await writeTool.execute(
+        { shell_id: shellId, input: 'test' },
+        { signal: new AbortController().signal, metadata },
+      );
+
+      expect(result.content).toContain('already exited');
+    });
+  });
+
+  // ── todo_write tool ────────────────────────────────────────────────
+  describe('todo_write tool', () => {
+    it('creates a todo list', async () => {
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const todoTool = tools.get('todo_write');
+
+      const result = await todoTool.execute(
+        { todos: [
+          { content: 'Read the file', status: 'completed' },
+          { content: 'Edit the file', status: 'in_progress' },
+          { content: 'Run tests', status: 'pending' },
+        ]},
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('[x] Read the file');
+      expect(result.content).toContain('[~] Edit the file');
+      expect(result.content).toContain('[ ] Run tests');
+    });
+
+    it('replaces the list on each call', async () => {
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const todoTool = tools.get('todo_write');
+
+      await todoTool.execute(
+        { todos: [
+          { content: 'Task A', status: 'pending' },
+          { content: 'Task B', status: 'pending' },
+          { content: 'Task C', status: 'pending' },
+        ]},
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      const result = await todoTool.execute(
+        { todos: [
+          { content: 'Task A', status: 'completed' },
+          { content: 'Task B', status: 'in_progress' },
+        ]},
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('[x] Task A');
+      expect(result.content).toContain('[~] Task B');
+      expect(result.content).not.toContain('Task C');
+    });
+
+    it('rejects multiple in_progress todos', async () => {
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const todoTool = tools.get('todo_write');
+
+      const result = await todoTool.execute(
+        { todos: [
+          { content: 'Task A', status: 'in_progress' },
+          { content: 'Task B', status: 'in_progress' },
+        ]},
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain('only one todo');
+    });
+
+    it('clears the list with an empty array', async () => {
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const todoTool = tools.get('todo_write');
+
+      await todoTool.execute(
+        { todos: [{ content: 'Task', status: 'pending' }] },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      const result = await todoTool.execute(
+        { todos: [] },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('cleared');
+    });
+
+    it('defaults invalid status to pending', async () => {
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const todoTool = tools.get('todo_write');
+
+      const result = await todoTool.execute(
+        { todos: [{ content: 'Task', status: 'bogus' }] },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('[ ] Task');
     });
   });
 });
