@@ -62,15 +62,18 @@ jobs:
       - name: Build and publish libra-code to npm
         run: |
           cd extras/libra-code
-          # Replace link dep with the just-published version
+          # Build from the local workspace (link dep resolves to ../../dist).
+          pnpm build
+          # Replace the link dep with a real version range for the
+          # published package. npm publish doesn't install deps — it
+          # just packs dist + package.json — so we don't need to
+          # re-install from NPM.
           node -e "
             const fs = require('fs');
             const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
-            pkg.dependencies['@xandout/libra-harness'] = process.env.VERSION;
+            pkg.dependencies['@xandout/libra-harness'] = '^' + process.env.VERSION;
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
-          pnpm install --frozen-lockfile=false
-          pnpm build
           npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
