@@ -10,10 +10,12 @@ permissions:
   packages: write
 
 jobs:
-  release:
+  harness:
     runs-on: ubuntu-latest
     # Skip commits made by the bot (version bumps) to avoid release loops.
     if: github.event.head_commit.author.name != 'github-actions[bot]'
+    outputs:
+      version: ${{ env.VERSION }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -76,20 +78,56 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and publish libra-code to npm
-        uses: actions/setup-node@v4
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: v${{ env.VERSION }}
+          generate_release_notes: true
+
+  libra-code:
+    runs-on: ubuntu-latest
+    needs: harness
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-          scope: '@xandout'
-      - run: |
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm build
+
+      - name: Verify harness is published on npm
+        run: |
+          VERSION="${{ needs.harness.outputs.version }}"
+          echo "Waiting for @xandout/libra-harness@${VERSION} to appear on npm..."
+          for i in $(seq 1 30); do
+            if npm view "@xandout/libra-harness@${VERSION}" version 2>/dev/null | grep -q "$VERSION"; then
+              echo "Found @xandout/libra-harness@${VERSION} on npm"
+              exit 0
+            fi
+            echo "  attempt $i — not yet visible, waiting 10s..."
+            sleep 10
+          done
+          echo "ERROR: @xandout/libra-harness@${VERSION} never appeared on npm"
+          exit 1
+
+      - name: Build and publish libra-code to npm
+        run: |
           cd extras/libra-code
-          # Build from the local workspace (link dep resolves to ../../dist).
           pnpm build
-          # Replace the link dep with a real version range for the
-          # published package. npm publish doesn't install deps — it
-          # just packs dist + package.json — so we don't need to
-          # re-install from NPM.
+          # Replace the link dep with the published version range.
           node -e "
             const fs = require('fs');
             const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
@@ -99,7 +137,7 @@ jobs:
           npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          VERSION: ${{ env.VERSION }}
+          VERSION: ${{ needs.harness.outputs.version }}
 
       - name: Publish libra-code to GitHub Packages
         uses: actions/setup-node@v4
@@ -112,10 +150,3 @@ jobs:
           npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ env.VERSION }}
-          name: v${{ env.VERSION }}
-          generate_release_notes: true
