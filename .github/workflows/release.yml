@@ -61,14 +61,22 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish libra-harness to GitHub Packages
-        run: |
-          npm config set //npm.pkg.github.com/:_authToken "$GITHUB_TOKEN"
-          npm publish --access public --registry https://npm.pkg.github.com
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://npm.pkg.github.com
+          scope: '@xandout'
+      - run: npm publish --access public
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and publish libra-code to npm
-        run: |
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          scope: '@xandout'
+      - run: |
           cd extras/libra-code
           # Build from the local workspace (link dep resolves to ../../dist).
           pnpm build
@@ -88,12 +96,16 @@ jobs:
           VERSION: ${{ env.VERSION }}
 
       - name: Publish libra-code to GitHub Packages
-        run: |
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://npm.pkg.github.com
+          scope: '@xandout'
+      - run: |
           cd extras/libra-code
-          npm config set //npm.pkg.github.com/:_authToken "$GITHUB_TOKEN"
-          npm publish --access public --registry https://npm.pkg.github.com
+          npm publish --access public
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2

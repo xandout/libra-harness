@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { Agent } from '@xandout/libra-harness';
 import { resolveModel } from '@xandout/libra-harness/extras/models';
+import type { ResolveModelOptions } from '@xandout/libra-harness/extras/models';
 import { createDiskSessionExtension } from '@xandout/libra-harness/extras/disk-session';
 import { createCodeToolsExtension } from '@xandout/libra-harness/extras/code-tools';
 import { createStreamingExtension } from '@xandout/libra-harness/extras/streaming';
@@ -135,6 +136,69 @@ export interface BuiltAgent {
 }
 
 /**
+ * Build provider definitions that respect `<PROVIDER>_BASE_URL` env vars
+ * and custom headers. This lets `lc` point at an OpenAI-compatible proxy
+ * (e.g. zocode's /model proxy) instead of the real provider API.
+ *
+ * Supported env vars per provider:
+ *   openai:    OPENAI_API_KEY, OPENAI_BASE_URL (read natively by @ai-sdk/openai)
+ *   deepseek:  DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL
+ *   anthropic: ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL
+ *   google:    GOOGLE_GENERATIVE_AI_API_KEY (no base URL override)
+ *
+ * Additionally, any provider supports `<PROVIDER>_EXTRA_HEADERS` as a
+ * JSON object string for custom headers (e.g. x-project-id).
+ */
+function buildProviders(): ResolveModelOptions['providers'] {
+  const env = process.env;
+
+  function extraHeaders(provider: string): Record<string, string> | undefined {
+    const raw = env[`${provider.toUpperCase()}_EXTRA_HEADERS`];
+    if (!raw) return undefined;
+    try { return JSON.parse(raw); } catch { return undefined; }
+  }
+
+  return {
+    openai: {
+      envVar: 'OPENAI_API_KEY',
+      async load() {
+        const { createOpenAI } = await import('@ai-sdk/openai');
+        const provider = createOpenAI({
+          baseURL: env.OPENAI_BASE_URL,
+          headers: extraHeaders('openai'),
+        });
+        return (modelId: string) => provider.chat(modelId);
+      },
+    },
+    deepseek: {
+      envVar: 'DEEPSEEK_API_KEY',
+      async load() {
+        const { createDeepSeek } = await import('@ai-sdk/deepseek');
+        const provider = createDeepSeek({
+          baseURL: env.DEEPSEEK_BASE_URL,
+          headers: extraHeaders('deepseek'),
+        });
+        return (modelId: string) => provider(modelId);
+      },
+    },
+    anthropic: {
+      envVar: 'ANTHROPIC_API_KEY',
+      async load() {
+        const { anthropic } = await import('@ai-sdk/anthropic');
+        return (modelId: string) => anthropic(modelId);
+      },
+    },
+    google: {
+      envVar: 'GOOGLE_GENERATIVE_AI_API_KEY',
+      async load() {
+        const { google } = await import('@ai-sdk/google');
+        return (modelId: string) => google(modelId);
+      },
+    },
+  };
+}
+
+/**
  * Build the agent with all extensions. This is the single construction
  * path used by both CLI mode and --worker mode.
  */
@@ -145,7 +209,7 @@ export async function buildAgent(opts: BuildAgentOptions = {}): Promise<BuiltAge
     throw new Error('No model configured. Set one with: lc config set model <provider/model>');
   }
 
-  const model = await resolveModel(modelId);
+  const model = await resolveModel(modelId, { providers: buildProviders() });
   const cwd = process.cwd();
   const sessionKey = sessionKeyForCwd(cwd);
   const todoFile = join(TODOS_DIR, `${sessionKey}.json`);
