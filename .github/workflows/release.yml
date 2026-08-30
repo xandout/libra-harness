@@ -43,8 +43,15 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Bump root version without committing yet.
-          npm version patch --no-git-tag-version
+          # Bump root version manually (npm version crashes on workspace
+          # link: dependencies — see npm/cli#8322).
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
+            const [major, minor, patch] = pkg.version.split('.').map(Number);
+            pkg.version = `${major}.${minor}.${patch + 1}`;
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
           VERSION=$(node -p "require('./package.json').version")
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           # Set lc version to match.
