@@ -85,49 +85,6 @@ importers:
         specifier: ^2.4.0
         version: 2.4.0
 
-  examples/libra-code:
-    dependencies:
-      '@xandout/libra-harness':
-        specifier: link:../..
-        version: link:../..
-      diff:
-        specifier: ^5.2.2
-        version: 5.2.2
-      ink:
-        specifier: ^5.2.1
-        version: 5.2.1(@types/react@18.3.31)(react@18.3.1)
-      ink-scroll-list:
-        specifier: ^0.4.1
-        version: 0.4.1(ink@5.2.1(@types/react@18.3.31)(react@18.3.1))(react@18.3.1)
-      ink-scroll-view:
-        specifier: ^0.3.7
-        version: 0.3.7(ink@5.2.1(@types/react@18.3.31)(react@18.3.1))(react@18.3.1)
-      marked:
-        specifier: ^18.0.11
-        version: 18.0.11
-      marked-terminal:
-        specifier: ^7.3.0
-        version: 7.3.0(marked@18.0.11)
-      react:
-        specifier: ^18.3.1
-        version: 18.3.1
-    devDependencies:
-      '@types/diff':
-        specifier: ^5.2.3
-        version: 5.2.3
-      '@types/marked':
-        specifier: ^6.0.0
-        version: 6.0.0
-      '@types/react':
-        specifier: ^18.3.31
-        version: 18.3.31
-      tsx:
-        specifier: ^4.19.0
-        version: 4.23.12
-      typescript:
-        specifier: ^5.5.0
-        version: 5.9.3
-
   examples/openai-compatible-provider:
     dependencies:
       '@xandout/libra-harness':
@@ -223,6 +180,49 @@ importers:
       '@xandout/libra-harness':
         specifier: link:../..
         version: link:../..
+
+  extras/libra-code:
+    dependencies:
+      '@xandout/libra-harness':
+        specifier: link:../..
+        version: link:../..
+      diff:
+        specifier: ^5.2.2
+        version: 5.2.2
+      ink:
+        specifier: ^5.2.1
+        version: 5.2.1(@types/react@18.3.31)(react@18.3.1)
+      ink-scroll-list:
+        specifier: ^0.4.1
+        version: 0.4.1(ink@5.2.1(@types/react@18.3.31)(react@18.3.1))(react@18.3.1)
+      ink-scroll-view:
+        specifier: ^0.3.7
+        version: 0.3.7(ink@5.2.1(@types/react@18.3.31)(react@18.3.1))(react@18.3.1)
+      marked:
+        specifier: ^18.0.11
+        version: 18.0.11
+      marked-terminal:
+        specifier: ^7.3.0
+        version: 7.3.0(marked@18.0.11)
+      react:
+        specifier: ^18.3.1
+        version: 18.3.1
+    devDependencies:
+      '@types/diff':
+        specifier: ^5.2.3
+        version: 5.2.3
+      '@types/marked':
+        specifier: ^6.0.0
+        version: 6.0.0
+      '@types/react':
+        specifier: ^18.3.31
+        version: 18.3.31
+      tsx:
+        specifier: ^4.19.0
+        version: 4.23.12
+      typescript:
+        specifier: ^5.5.0
+        version: 5.9.3
 
 packages:
 

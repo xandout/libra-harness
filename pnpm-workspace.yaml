@@ -1,6 +1,7 @@
 packages:
   - '.'
   - 'examples/*'
+  - 'extras/*'
 allowBuilds:
   esbuild: true
   protobufjs: true

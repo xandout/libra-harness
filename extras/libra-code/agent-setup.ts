@@ -36,6 +36,8 @@ export const CONFIG_FILE = join(LIBRA_HOME, 'config.json');
 export interface LibraCodeConfig {
   model?: string;
   maxIterations?: number;
+  /** Custom system prompt. Overrides the default if set. */
+  systemPrompt?: string;
 }
 
 export function loadConfig(): LibraCodeConfig {
@@ -81,6 +83,44 @@ Rules:
 - Never commit secrets or credentials.
 - Use todo_write to track multi-step tasks.`;
 
+/**
+ * Load project-specific instructions from AGENTS.md in the given directory.
+ * Returns the raw content, or undefined if no AGENTS.md exists.
+ */
+export function loadAgentsMd(dir: string): string | undefined {
+  const path = join(dir, 'AGENTS.md');
+  if (!existsSync(path)) return undefined;
+  try {
+    const content = readFileSync(path, 'utf-8').trim();
+    return content || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Build the full system prompt.
+ *
+ * Precedence (highest wins):
+ *   1. config.systemPrompt — user-set custom prompt (lc config set systemPrompt)
+ *   2. SYSTEM_PROMPT — the built-in default
+ *
+ * Then AGENTS.md from the project root is appended (if present), so
+ * project-specific instructions are always visible to the model.
+ */
+export function buildSystemPrompt(projectDir?: string): string {
+  const config = loadConfig();
+  const base = config.systemPrompt?.trim() || SYSTEM_PROMPT;
+  const agentsMd = loadAgentsMd(projectDir ?? process.cwd());
+  if (!agentsMd) return base;
+  return `${base}
+
+══════════════════════════════════════════════════════════════════════
+PROJECT INSTRUCTIONS (AGENTS.md)
+══════════════════════════════════════════════════════════════════════
+${agentsMd}`;
+}
+
 // ── Agent builder ────────────────────────────────────────────────────
 export interface BuildAgentOptions {
   /** Include journal + command-polling extensions (for --worker mode). */
@@ -119,7 +159,7 @@ export async function buildAgent(opts: BuildAgentOptions = {}): Promise<BuiltAge
 
   const agent = new Agent({
     model,
-    systemPrompt: SYSTEM_PROMPT,
+    systemPrompt: buildSystemPrompt(cwd),
     maxIterations: config.maxIterations ?? 50,
   });
 

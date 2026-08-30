@@ -1,7 +1,7 @@
 {
-  "name": "libra-code",
+  "name": "@xandout/libra-code",
   "version": "0.1.0",
-  "description": "A code agent CLI powered by libra-harness. Install globally with: npm install -g libra-code",
+  "description": "A code agent CLI powered by libra-harness. Install globally with: npm install -g @xandout/libra-code",
   "type": "module",
   "bin": {
     "lc": "./dist/index.js"
@@ -33,5 +33,13 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xandout/libra-harness.git",
+    "directory": "extras/libra-code"
   }
 }

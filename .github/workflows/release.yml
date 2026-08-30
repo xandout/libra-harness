@@ -44,13 +44,37 @@ jobs:
           VERSION=$(node -p "require('./package.json').version")
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
-      - name: Push version tag
+      - name: Bump lc version (match root)
+        run: |
+          cd extras/libra-code
+          npm version patch -m "chore: lc release v%s"
+        env:
+          VERSION: ${{ env.VERSION }}
+
+      - name: Push version tags
         run: git push --follow-tags
 
-      - name: Publish to npm
+      - name: Publish libra-harness to npm
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Build and publish libra-code to npm
+        run: |
+          cd extras/libra-code
+          # Replace link dep with the just-published version
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
+            pkg.dependencies['@xandout/libra-harness'] = process.env.VERSION;
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          pnpm install --frozen-lockfile=false
+          pnpm build
+          npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ env.VERSION }}
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2

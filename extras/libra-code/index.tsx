@@ -28,18 +28,30 @@ async function main() {
   // ── Subcommands ──
   if (args[0] === 'config') {
     const config = loadConfig();
-    if (args[1] === 'set' && args[2] && args[3]) {
-      (config as any)[args[2]] = args[3];
-      saveConfig(config);
-      console.log(`Set ${args[2]} = ${args[3]}`);
+    if (args[1] === 'set' && args[2] && args[3] !== undefined) {
+      const value = args.slice(3).join(' ');
+      if (value === '') {
+        delete (config as any)[args[2]];
+        saveConfig(config);
+        console.log(`Cleared ${args[2]}`);
+      } else {
+        (config as any)[args[2]] = value;
+        saveConfig(config);
+        console.log(`Set ${args[2]} = ${value}`);
+      }
     } else if (args[1] === 'get' && args[2]) {
       console.log((config as any)[args[2]] ?? 'undefined');
     } else if (args[1] === 'path') {
       console.log(CONFIG_FILE);
+    } else if (args[1] === 'prompt') {
+      // Show the effective system prompt (base + AGENTS.md).
+      const { buildSystemPrompt } = await import('./agent-setup.js');
+      console.log(buildSystemPrompt(process.cwd()));
     } else {
       console.log('Usage: lc config set <key> <value>');
       console.log('       lc config get <key>');
       console.log('       lc config path');
+      console.log('       lc config prompt    Show the effective system prompt');
       console.log('');
       console.log('Current config:');
       console.log(JSON.stringify(config, null, 2));
@@ -69,13 +81,16 @@ async function main() {
     console.log('       lc config set <key> <value>   Set a config option');
     console.log('       lc config get <key>           Get a config option');
     console.log('       lc config path                Show config file path');
+    console.log('       lc config prompt              Show the effective system prompt');
     console.log('       lc providers                  List configured model providers');
     console.log('       lc help                       Show this help');
     console.log('');
     console.log('Config:');
     console.log('  model          Model ID in "provider/model" format (e.g. deepseek/deepseek-chat)');
     console.log('  maxIterations  Max LLM iterations per turn (default: 50)');
+    console.log('  systemPrompt   Custom system prompt (overrides default; AGENTS.md still appended)');
     console.log('');
+    console.log('Project instructions: AGENTS.md in the project root is appended to the system prompt.');
     console.log('Session: one per working directory, stored in ~/.libra/sessions/');
     return;
   }
