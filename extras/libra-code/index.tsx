@@ -4,9 +4,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { render } from 'ink';
 import React from 'react';
-import { Agent } from '@xandout/libra-harness';
 import { configuredProviders } from '@xandout/libra-harness/extras/models';
-import type { Extension } from '@xandout/libra-harness';
 import {
   LIBRA_HOME, SESSIONS_DIR, TODOS_DIR, TURNS_DIR, TURN_META_DIR, LOCKS_DIR, CONFIG_FILE,
   loadConfig, saveConfig, ensureDirs, sessionKeyForCwd, buildAgent,
@@ -130,8 +128,7 @@ async function main() {
   if (useTui) {
     await runWithTui(prompt, sessionKey, exitOnComplete);
   } else {
-    const { agent, todoFile } = await buildAgent();
-    await runWithoutTui(agent, prompt, sessionKey, todoFile);
+    await runStdout(prompt, sessionKey);
   }
 }
 
@@ -165,10 +162,10 @@ async function runWorker(args: string[]) {
     process.exit(1);
   }
 
-  // Build agent with journal extensions.
+  // Build agent — journal extensions are always installed now.
   let built;
   try {
-    built = await buildAgent({ journalMode: true });
+    built = await buildAgent();
   } catch (err) {
     const journal = new TurnJournal(TURNS_DIR, TURN_META_DIR, turnId, prompt);
     const msg = err instanceof Error ? err.message : String(err);
@@ -588,52 +585,78 @@ async function runWithTui(
 }
 
 // ── Plain text mode (no TUI) ─────────────────────────────────────────
-async function runWithoutTui(
-  agent: Agent,
+// The agent runs in-process. All output goes through the journal —
+// stdout mode subscribes to the journal and prints events to the
+// terminal. This is the same journal that worker mode writes and the
+// TUI reads, so every consumer sees the same events.
+async function runStdout(
   prompt: string,
   sessionKey: string,
-  todoFile: string,
 ) {
-  const progressExtension: Extension = {
-    name: 'progress',
-    priority: 90,
-    install(agent) {
-      agent.hook('beforeTool', 'progress', async (ctx) => {
-        const toolCall = ctx.toolCall;
-        if (!toolCall) return;
-        const args = (() => { try { return JSON.parse(toolCall.arguments); } catch { return {}; } })();
-        let detail = '';
-        if (args.file_path) detail = String(args.file_path);
-        else if (args.pattern) detail = args.path ? `${args.pattern} in ${args.path}` : String(args.pattern);
-        else if (args.command) detail = String(args.command);
-        else if (args.shell_id) detail = String(args.shell_id);
-        else detail = toolCall.arguments.slice(0, 80);
-        process.stderr.write(`\n  → ${toolCall.name}(${detail})\n`);
-      });
+  const turnId = TurnJournal.newTurnId();
+  const journal = new TurnJournal(TURNS_DIR, TURN_META_DIR, turnId, prompt);
 
-      agent.hook('afterTool', 'progress', async (ctx) => {
-        const toolResult = ctx.toolResult;
-        if (!toolResult) return;
-        const preview = toolResult.content.split('\n')[0].slice(0, 100);
-        const marker = toolResult.isError ? '✗' : '✓';
-        process.stderr.write(`  ${marker} ${preview}\n`);
-      });
-    },
-  };
-  agent.use(progressExtension);
+  let built;
+  try {
+    built = await buildAgent();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    journal.markError(msg);
+    journal.append('done', { reply: `Error: ${msg}`, finishReason: 'error' });
+    process.stderr.write(`Error: ${msg}\n`);
+    process.exit(1);
+  }
 
+  const { agent } = built;
+
+  // Subscribe to the journal and print events to stdout/stderr.
   let firstText = true;
+  const unsub = journal.subscribe(0, (ev) => {
+    switch (ev.type) {
+      case 'status':
+        // Don't print status in stdout mode — it's noise without a TUI.
+        break;
+      case 'text':
+        if (firstText) {
+          process.stdout.write('\n');
+          firstText = false;
+        }
+        process.stdout.write(ev.delta || '');
+        break;
+      case 'tool':
+        if (ev.phase === 'start') {
+          const detail = ev.file || '';
+          process.stderr.write(`\n  → ${ev.name}(${detail})\n`);
+        } else if (ev.phase === 'end') {
+          process.stderr.write(`  ✓ ${ev.name}\n`);
+        }
+        break;
+      case 'file':
+        process.stderr.write(`  📝 ${ev.file}\n`);
+        break;
+      case 'steer':
+        process.stderr.write(`\n  ⟦steer: ${ev.text}⟧\n`);
+        break;
+      case 'halt':
+        process.stderr.write('\n  Halted.\n');
+        break;
+      case 'stats':
+        // No stats display in stdout mode.
+        break;
+      case 'done':
+        // Handled after the agent finishes (below).
+        break;
+    }
+  });
+
   const handle = agent.run({
     message: prompt,
     metadata: {
       sessionId: sessionKey,
+      __journal: journal,
       streamCallbacks: {
         onText: (delta: string) => {
-          if (firstText) {
-            process.stdout.write('\n');
-            firstText = false;
-          }
-          process.stdout.write(delta);
+          journal.append('text', { delta });
         },
       },
     },
@@ -655,10 +678,20 @@ async function runWithoutTui(
 
   const result = await handle;
   process.off('SIGINT', onSigInt);
+  unsub();
 
   if (result.finishReason === 'halted') {
-    process.stderr.write('\n  Halted.\n');
-  } else if (firstText) {
+    journal.markHalted();
+    journal.append('halt', { reason: 'halted' });
+    journal.append('done', { reply: '', finishReason: 'halted' });
+  } else {
+    const reply = result.message || '';
+    journal.markDone(reply);
+    journal.append('done', { reply, finishReason: result.finishReason });
+  }
+
+  if (firstText) {
+    // No text was streamed — print the final reply.
     console.log(result.message || '(no response)');
   } else {
     process.stdout.write('\n');

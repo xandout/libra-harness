@@ -126,8 +126,6 @@ ${agentsMd}`;
 
 // ── Agent builder ────────────────────────────────────────────────────
 export interface BuildAgentOptions {
-  /** Include journal + command-polling extensions (for --worker mode). */
-  journalMode?: boolean;
 }
 
 export interface BuiltAgent {
@@ -229,7 +227,9 @@ export async function buildAgent(opts: BuildAgentOptions = {}): Promise<BuiltAge
     maxIterations: config.maxIterations ?? 50,
   });
 
-  // Extensions — same order for both modes.
+  // Extensions — always installed. The journal is the single source of
+  // truth for all output; every mode (worker, TUI, stdout) subscribes to
+  // it. Turn events + command polling are always on.
   agent.use(createDiskSessionExtension({
     sessionDir: SESSIONS_DIR,
     maxContextMessages: 100,
@@ -244,12 +244,8 @@ export async function buildAgent(opts: BuildAgentOptions = {}): Promise<BuiltAge
     model,
     codeSearchMaxIterations: 10,
   }));
-
-  // Journal mode (--worker): add turn events + command polling.
-  if (opts.journalMode) {
-    agent.use(createTurnEventsExtension());
-    agent.use(createCommandPollingExtension());
-  }
+  agent.use(createTurnEventsExtension());
+  agent.use(createCommandPollingExtension());
 
   return { agent, fileChanges, sessionStats, todoFile };
 }
