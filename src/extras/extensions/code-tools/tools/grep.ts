@@ -27,7 +27,8 @@ interface GrepFileResult {
 }
 
 function isNoiseDir(name: string): boolean {
-  return name === 'node_modules' || name === '.git' || name === 'dist' || name === '.next' || name === 'coverage';
+  return name === 'node_modules' || name === '.git' || name === 'dist' || name === '.next' || name === 'coverage' ||
+    name === '.cache' || name === '.npm' || name === '.local' || name === '.config' || name === '.libra';
 }
 
 // Simple glob to regex (same minimal implementation as find.ts)

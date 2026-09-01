@@ -100,7 +100,8 @@ function findFiles(rootDir: string, pattern: RegExp, baseDir: string): string[] 
 }
 
 function isNoiseDir(name: string): boolean {
-  return name === 'node_modules' || name === '.git' || name === 'dist' || name === '.next' || name === 'coverage';
+  return name === 'node_modules' || name === '.git' || name === 'dist' || name === '.next' || name === 'coverage' ||
+    name === '.cache' || name === '.npm' || name === '.local' || name === '.config' || name === '.libra';
 }
 
 // ── find_file_by_name tool ───────────────────────────────────────────
