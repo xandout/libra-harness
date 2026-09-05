@@ -102,6 +102,7 @@ async function main() {
   let thinkingLevel: string | undefined;
   let watchMode = false;
   let attachMode = false;
+  let customSessionKey: string | undefined;
 
   const filtered: string[] = [];
   for (let i = 0; i < args.length; i++) {
@@ -115,6 +116,8 @@ async function main() {
       watchMode = true;
     } else if (arg === '--attach' || arg === '-a') {
       attachMode = true;
+    } else if (arg === '--session' && args[i + 1]) {
+      customSessionKey = args[++i];
     } else if ((arg === '--thinking-level' || arg === '--thinking' || arg === '--reasoning-effort') && args[i + 1]) {
       thinkingLevel = args[++i];
     } else if (arg.startsWith('--thinking-level=') || arg.startsWith('--thinking=') || arg.startsWith('--reasoning-effort=')) {
@@ -130,7 +133,7 @@ async function main() {
   ensureDirs();
 
   const cwd = process.cwd();
-  const sessionKey = sessionKeyForCwd(cwd);
+  const sessionKey = customSessionKey || sessionKeyForCwd(cwd);
 
   if (useTui) {
     await runWithTui(prompt, sessionKey, exitOnComplete, thinkingLevel);

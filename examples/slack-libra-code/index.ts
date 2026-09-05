@@ -271,6 +271,7 @@ async function executeLc(
   sessionKey: string,
   channelId: string,
   threadTs?: string,
+  onProgress?: (status: string) => void,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolvePromise) => {
     // Make built-in bin directory available in PATH
@@ -288,7 +289,7 @@ async function executeLc(
 
 ${prompt}`;
 
-    const fullArgs = [...resolvedLc.args, promptWithTools];
+    const fullArgs = [...resolvedLc.args, '--session', sessionKey, promptWithTools];
     const proc = spawn(resolvedLc.command, fullArgs, {
       cwd: lcCwd,
       env: {
@@ -334,7 +335,16 @@ ${prompt}`;
     });
 
     proc.stderr?.on('data', (data) => {
-      stderr += data.toString();
+      const text = data.toString();
+      stderr += text;
+      if (onProgress) {
+        const lines = text.split('\n');
+        for (const line of lines) {
+          if (line.trim().startsWith('→ ')) {
+            onProgress(line.trim().slice(2));
+          }
+        }
+      }
     });
 
     proc.on('close', (exitCode) => {
@@ -375,7 +385,42 @@ async function runTurn(opts: {
   await addReaction(client, channelId, messageTs, 'thinking_face');
   console.log(`[slack] Running lc for [${sessionKey}]: "${cleanedText.slice(0, 60)}"`);
 
-  const { stdout, stderr, exitCode } = await executeLc(cleanedText, sessionKey, channelId, replyThreadTs);
+  let statusMsgTs: string | undefined;
+  let lastUpdate = 0;
+  
+  const onProgress = async (status: string) => {
+    // Only update every 3 seconds to avoid rate limits
+    if (Date.now() - lastUpdate < 3000) return;
+    lastUpdate = Date.now();
+    try {
+      if (!statusMsgTs && replyThreadTs) {
+         const res = await client.chat.postMessage({
+           channel: channelId,
+           text: `_⏳ Running tool: ${status}..._`,
+           thread_ts: replyThreadTs,
+         });
+         statusMsgTs = res.ts;
+      } else if (statusMsgTs && replyThreadTs) {
+         await client.chat.update({
+           channel: channelId,
+           ts: statusMsgTs,
+           text: `_⏳ Running tool: ${status}..._`,
+         });
+      }
+    } catch (e) {
+      // ignore
+    }
+  };
+
+  const { stdout, stderr, exitCode } = await executeLc(cleanedText, sessionKey, channelId, replyThreadTs, onProgress);
+  
+  if (statusMsgTs) {
+    try {
+      await client.chat.delete({ channel: channelId, ts: statusMsgTs });
+    } catch (e) {
+      // ignore
+    }
+  }
 
   if (exitCode === 0) {
     await swapReaction(client, channelId, messageTs, 'thinking_face', 'white_check_mark');

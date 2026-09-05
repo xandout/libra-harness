@@ -541,14 +541,12 @@ describe('disk-session', () => {
 
   // ── Tool-call intermediate filtering ────────────────────────────
 
-  it('filters out tool-call intermediates from channel context to prevent split pairs', async () => {
+  it('preserves tool-call intermediates but slices at turn boundaries to prevent split sequences', async () => {
     // If a tool call pair (assistant+tool) spans the boundary of the
-    // channelContextMessages window, the tool message would be included
-    // without its preceding assistant message — causing an LLM API error.
-    // The fix: filter out tool messages and tool-only assistant messages
-    // from channel context windows (topLevelBefore and recentTopLevel).
-    // Thread messages keep tool-call intermediates (they're complete sequences).
-    const ext = makeExt({ channelContextMessages: 4, recentChannelMessages: 0 });
+    // channelContextMessages window, the tool message would be sliced mid-sequence
+    // if we just did a naive .slice(). With sliceAtTurnBoundary, it skips forward
+    // to the next user message, dropping the partial turn entirely rather than splitting it.
+    const ext = makeExt({ channelContextMessages: 3, recentChannelMessages: 0 }); // 3 ensures it cuts into the 4-message turn
     let seenMsgs: Message[] = [];
 
     // Create a tool-call exchange early in the channel (NOT the thread parent)
@@ -582,7 +580,7 @@ describe('disk-session', () => {
       async execute() { return { toolCallId: 'tc1', content: 'tool output' }; },
     });
 
-    // Turn 1: tool call exchange (produces assistant+tool+assistant records)
+    // Turn 1: tool call exchange (produces user+assistant[tool]+tool+assistant records = 4 records)
     await toolAgent.run({
       message: 'use the tool',
       metadata: { session: { key: 'C1', messageTs: '1001' } },
@@ -592,22 +590,23 @@ describe('disk-session', () => {
     const regAgent = makeAgent(ext);
     await runTurn(regAgent, 'thread parent', sessionIdentity('C1', '1002'));
 
-    // Turns 3-4: more messages to push the tool exchange out of the window
-    await runTurn(regAgent, 'msg3', sessionIdentity('C1', '1003'));
-    await runTurn(regAgent, 'msg4', sessionIdentity('C1', '1004'));
-
-    // Now thread reply on ts=1002 — the channel context window (4)
-    // would include records from the tool exchange (ts=1001) if not filtered.
+    // Now thread reply on ts=1002
+    // The topLevelBefore messages before the parent are the 4 messages from Turn 1.
+    // We configured channelContextMessages: 3.
+    // If we took the last 3 messages of Turn 1, we would get [assistant, tool, assistant].
+    // But sliceAtTurnBoundary will see it starts with 'assistant', skip forward looking for
+    // a 'user' or 'system', find none, and return an empty array.
     regAgent.hook('beforeContext', 'capture', async (ctx) => {
       seenMsgs = ctx.turn.messages.map((m) => ({ role: m.role, content: m.content }));
     });
     await runTurn(regAgent, 'thread reply', sessionIdentity('C1', '1005', { threadTs: '1002' }));
 
-    // No tool messages should be in the channel context
+    // Because the context window (3) starts in the middle of Turn 1,
+    // sliceAtTurnBoundary will drop it entirely.
     const toolMsgs = seenMsgs.filter((m) => m.role === 'tool');
     expect(toolMsgs).toHaveLength(0);
 
-    // No assistant messages with empty content (tool-call only) in channel context
+    // No assistant messages from Turn 1 should be present.
     const emptyAssistantMsgs = seenMsgs.filter((m) => m.role === 'assistant' && !messageContentToText(m.content).trim());
     expect(emptyAssistantMsgs).toHaveLength(0);
 

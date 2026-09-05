@@ -274,22 +274,12 @@ export default function createDiskSessionExtension(
     };
   }
 
-  // Filter for context windows: only keep user messages, system
-  // messages (background channel context), and assistant messages with
-  // text content (not tool-call intermediates or control records).
-  // Tool messages, control records, and assistant messages that only
-  // contain toolCalls are turn-internal mechanics — including them
-  // without the full tool-call flow produces invalid message sequences
-  // for the LLM. Control records (e.g. /halt) are persisted for audit
-  // but never shown to the model.
+  // Filter for context windows: keep user, system, assistant, and tool messages.
+  // We no longer filter out tool calls here. Instead, we rely on turn-boundary
+  // slicing to ensure we don't split a tool sequence.
   const isConversationMessage = (r: SessionRecord): boolean => {
-    if (r.role === 'tool') return false;
     if (r.role === 'control') return false;
-    // Drop any assistant message that has tool_calls — even if it also
-    // has text content. Keeping it without the matching tool response
-    // messages produces an invalid sequence for the LLM.
-    if (r.role === 'assistant' && r.toolCalls?.length) return false;
-    return true; // user, system, assistant (without tool calls)
+    return true;
   };
 
   // Drop trailing user messages that don't have a following assistant
@@ -304,12 +294,26 @@ export default function createDiskSessionExtension(
     return result;
   }
 
+  function sliceAtTurnBoundary(records: SessionRecord[], max: number): SessionRecord[] {
+    if (records.length <= max) return records;
+    let startIndex = records.length - max;
+    // Skip forward until we find a turn boundary ('user' or 'system')
+    while (
+      startIndex < records.length &&
+      records[startIndex].role !== 'user' &&
+      records[startIndex].role !== 'system'
+    ) {
+      startIndex++;
+    }
+    return records.slice(startIndex);
+  }
+
   // ── Build context (the "fork") from a snapshot ────────────────
   // The snapshot is a read-only copy of the session records at the
   // moment the turn started. This function builds the messages array
   // that the agent will see.
   //
-  // For top-level messages and DMs: last N records (simple slice).
+  // For top-level messages and DMs: last N records (sliced at turn boundary).
   // For thread replies: channel context before parent + thread history.
   function buildContext(
     snapshot: SessionRecord[],
@@ -318,17 +322,12 @@ export default function createDiskSessionExtension(
   ): Message[] {
     if (snapshot.length === 0) return [];
 
-    // DM or top-level message: last N messages, but filter out
-    // tool-call intermediates that might get split by the slice.
+    // DM or top-level message: last N messages, but safe-sliced to not
+    // split tool-call sequences.
     if (isDirect || !threadTs) {
       const filtered = snapshot.filter(isConversationMessage);
-      // Drop incomplete turns: a user message at the end without a
-      // following assistant response means the turn was interrupted
-      // (crash, halt, etc). Including it would confuse the agent with
-      // an unanswered request from a previous session.
       const complete = dropIncompleteTrailingTurn(filtered);
-      return complete
-        .slice(-maxContextMessages)
+      return sliceAtTurnBoundary(complete, maxContextMessages)
         .map(toMessage);
     }
 
@@ -338,31 +337,25 @@ export default function createDiskSessionExtension(
     if (parentIdx === -1) {
       // Parent not in snapshot (evicted from cache or very old).
       // Fall back to last N messages.
-      return snapshot
-        .filter(isConversationMessage)
-        .slice(-maxContextMessages)
-        .map(toMessage);
+      return sliceAtTurnBoundary(
+        snapshot.filter(isConversationMessage),
+        maxContextMessages
+      ).map(toMessage);
     }
 
     // Top-level messages before the parent (channel context at fork point).
     const topLevelBefore = snapshot
       .slice(0, parentIdx)
-      .filter((r) => !r.threadTs && isConversationMessage(r))
-      .slice(-channelContextMessages);
+      .filter((r) => !r.threadTs && isConversationMessage(r));
+    const slicedTopLevelBefore = sliceAtTurnBoundary(topLevelBefore, channelContextMessages);
 
     // All messages in this thread (including the parent).
-    // Filter out tool-call intermediates — they produce invalid message
-    // sequences if they get split or truncated by the context window.
     const threadMessages = snapshot
       .filter(
         (r) => (r.ts === threadTs || r.threadTs === threadTs) && isConversationMessage(r),
       );
 
     // Recent top-level messages after the last thread reply.
-    // This gives the agent awareness of what's happened in the channel
-    // since the thread was last active — without pulling in the entire
-    // channel history. Find the last thread message's index in the
-    // snapshot by ts, then take top-level messages after it.
     const lastThreadTs = threadMessages[threadMessages.length - 1]?.ts ?? threadTs;
     let lastThreadIdx = parentIdx;
     for (let i = snapshot.length - 1; i >= 0; i--) {
@@ -371,14 +364,15 @@ export default function createDiskSessionExtension(
         break;
       }
     }
-    const recentTopLevel = recentChannelMessages > 0
-      ? snapshot
-          .slice(lastThreadIdx + 1)
-          .filter((r) => !r.threadTs && isConversationMessage(r))
-          .slice(-recentChannelMessages)
+    const recentTopLevel = snapshot
+      .slice(lastThreadIdx + 1)
+      .filter((r) => !r.threadTs && isConversationMessage(r));
+    
+    const slicedRecentTopLevel = recentChannelMessages > 0
+      ? sliceAtTurnBoundary(recentTopLevel, recentChannelMessages)
       : [];
 
-    return [...topLevelBefore, ...threadMessages, ...recentTopLevel].map(toMessage);
+    return [...slicedTopLevelBefore, ...threadMessages, ...slicedRecentTopLevel].map(toMessage);
   }
 
   // ── Resolve session identity from turn metadata ───────────────
