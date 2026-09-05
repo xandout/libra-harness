@@ -317,7 +317,7 @@ export class TurnJournal {
 // travels in `turn.metadata.__journal` (set per request in sendPrompt),
 // so the same extension is safe to install once per agent.
 
-import type { Extension } from '@xandout/libra-harness';
+import type { Extension, TurnContext, HookContext } from '@xandout/libra-harness';
 
 export function createTurnEventsExtension(): Extension {
   return {
@@ -370,37 +370,54 @@ export function createTurnEventsExtension(): Extension {
 // The journal reference travels in `turn.metadata.__journal`.
 
 export function createCommandPollingExtension(): Extension {
+  const intervals = new WeakMap<TurnContext, NodeJS.Timeout>();
+
+  const checkCommands = (ctx: HookContext, journal: TurnJournal) => {
+    const cmds = journal.drainCommands();
+    for (const cmd of cmds) {
+      if (cmd.type === 'steer') {
+        ctx.turn.steer(cmd.text);
+        journal.append('steer', { text: cmd.text });
+      } else if (cmd.type === 'halt') {
+        ctx.turn.halt(cmd.reason);
+      }
+    }
+  };
+
   return {
     name: 'command-polling',
     priority: 999,
     install(agent) {
-      // Check for commands before each LLM call.
-      agent.hook('beforeLLM', 'command-polling', async (ctx) => {
+      agent.hook('beforeTurn', 'command-polling', async (ctx) => {
         const journal = ctx.turn.metadata.__journal as TurnJournal | undefined;
         if (!journal) return;
-        const cmds = journal.drainCommands();
-        for (const cmd of cmds) {
-          if (cmd.type === 'steer') {
-            ctx.turn.steer(cmd.text);
-            journal.append('steer', { text: cmd.text });
-          } else if (cmd.type === 'halt') {
-            ctx.turn.halt(cmd.reason);
-          }
-        }
+        
+        // Initial check
+        checkCommands(ctx, journal);
+
+        // Continuous polling during the turn
+        const interval = setInterval(() => {
+          checkCommands(ctx, journal);
+        }, 500);
+        intervals.set(ctx.turn, interval);
       });
 
-      // Check for commands after each tool batch (before next LLM call).
+      // We still check at key stages just in case
+      agent.hook('beforeLLM', 'command-polling', async (ctx) => {
+        const journal = ctx.turn.metadata.__journal as TurnJournal | undefined;
+        if (journal) checkCommands(ctx, journal);
+      });
+
       agent.hook('afterTool', 'command-polling', async (ctx) => {
         const journal = ctx.turn.metadata.__journal as TurnJournal | undefined;
-        if (!journal) return;
-        const cmds = journal.drainCommands();
-        for (const cmd of cmds) {
-          if (cmd.type === 'steer') {
-            ctx.turn.steer(cmd.text);
-            journal.append('steer', { text: cmd.text });
-          } else if (cmd.type === 'halt') {
-            ctx.turn.halt(cmd.reason);
-          }
+        if (journal) checkCommands(ctx, journal);
+      });
+
+      agent.hook('afterTurn', 'command-polling', async (ctx) => {
+        const interval = intervals.get(ctx.turn);
+        if (interval) {
+          clearInterval(interval);
+          intervals.delete(ctx.turn);
         }
       });
     },

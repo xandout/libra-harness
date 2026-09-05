@@ -367,7 +367,7 @@ export const execTool: ShellToolFactory = (cfg) => ({
     },
     required: ['command'],
   },
-  async execute(args) {
+  async execute(args, context) {
     const command = String(args.command ?? '');
     if (!command) {
       return { toolCallId: '', content: 'Error: command is required' };
@@ -391,16 +391,47 @@ export const execTool: ShellToolFactory = (cfg) => ({
 
     const elapsed = await new Promise<number>((resolve) => {
       const start = Date.now();
+      
+      const onAbort = () => {
+        clearInterval(check);
+        try { entry.process?.kill('SIGKILL'); } catch {}
+        cfg.registry.delete(entry.id);
+        resolve(Date.now() - start);
+      };
+
+      if (context?.signal?.aborted) {
+        onAbort();
+        return;
+      }
+      
+      if (context?.signal) {
+        context.signal.addEventListener('abort', onAbort, { once: true });
+      }
+
       const check = setInterval(() => {
         if (entry.done) {
           clearInterval(check);
+          if (context?.signal) {
+            context.signal.removeEventListener('abort', onAbort);
+          }
           resolve(Date.now() - start);
         } else if (Date.now() - start >= timeout) {
           clearInterval(check);
+          if (context?.signal) {
+            context.signal.removeEventListener('abort', onAbort);
+          }
           resolve(Date.now() - start);
         }
       }, 50);
     });
+
+    if (context?.signal?.aborted) {
+      return {
+        toolCallId: '',
+        content: `Halted by user. Process was killed.`,
+        isError: true,
+      };
+    }
 
     if (entry.done) {
       const output = entry.output || '(no output)';

@@ -175,8 +175,7 @@ const inFlight = new Map<string, InFlightTurn>();
 const activeThreads = new Set<string>();
 
 // ── Helpers for Turn Steer & Halt via Journal Commands ───────────────
-function getActiveTurnId(cwd: string, homeDir: string): string | null {
-  const sessionKey = 'cwd_' + cwd.replace(/[^a-zA-Z0-9]/g, '_');
+function getActiveTurnId(sessionKey: string, homeDir: string): string | null {
   const lockFile = join(homeDir, 'locks', `${sessionKey}.lock`);
   try {
     if (existsSync(lockFile)) {
@@ -305,17 +304,17 @@ ${prompt}`;
     });
 
     const steer = (text: string) => {
-      const turnId = getActiveTurnId(lcCwd, libraHome);
+      const turnId = getActiveTurnId(sessionKey, libraHome);
       if (turnId) {
         writeTurnCommand(libraHome, turnId, { type: 'steer', text });
         console.log(`[turn] Steer injected into turn ${turnId}: "${text.slice(0, 50)}"`);
       } else {
-        console.warn(`[turn] Could not find active turnId to steer in ${lcCwd}`);
+        console.warn(`[turn] Could not find active turnId to steer in ${sessionKey}`);
       }
     };
 
     const halt = (reason?: string) => {
-      const turnId = getActiveTurnId(lcCwd, libraHome);
+      const turnId = getActiveTurnId(sessionKey, libraHome);
       if (turnId) {
         writeTurnCommand(libraHome, turnId, { type: 'halt', reason: reason || 'halted' });
         console.log(`[turn] Halt command written for turn ${turnId}`);
