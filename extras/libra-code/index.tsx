@@ -72,6 +72,8 @@ async function main() {
     console.log('lc — libra code agent');
     console.log('');
     console.log('Usage: lc [prompt]            Run the agent or reattach to active session');
+    console.log('       lc --watch             Watch active session (Ctrl+C detaches, agent continues)');
+    console.log('       lc --attach [prompt]   Attach to active session (Ctrl+C halts/kills agent)');
     console.log('       lc --tui [prompt]      Run with interactive TUI (long-running)');
     console.log('       lc -x <prompt>         Run with TUI, exit when agent finishes');
     console.log('       lc --tui               Open TUI with no initial prompt');
@@ -98,6 +100,8 @@ async function main() {
   let useTui = false;
   let exitOnComplete = false;
   let thinkingLevel: string | undefined;
+  let watchMode = false;
+  let attachMode = false;
 
   const filtered: string[] = [];
   for (let i = 0; i < args.length; i++) {
@@ -107,6 +111,10 @@ async function main() {
     } else if (arg === '--exit-on-complete' || arg === '-x') {
       exitOnComplete = true;
       useTui = true;
+    } else if (arg === '--watch' || arg === '-w') {
+      watchMode = true;
+    } else if (arg === '--attach' || arg === '-a') {
+      attachMode = true;
     } else if ((arg === '--thinking-level' || arg === '--thinking' || arg === '--reasoning-effort') && args[i + 1]) {
       thinkingLevel = args[++i];
     } else if (arg.startsWith('--thinking-level=') || arg.startsWith('--thinking=') || arg.startsWith('--reasoning-effort=')) {
@@ -127,7 +135,7 @@ async function main() {
   if (useTui) {
     await runWithTui(prompt, sessionKey, exitOnComplete, thinkingLevel);
   } else {
-    await runStdout(prompt, sessionKey, thinkingLevel);
+    await runStdout(prompt, sessionKey, thinkingLevel, { watch: watchMode, attach: attachMode });
   }
 }
 
@@ -604,6 +612,7 @@ async function reattachStdout(
   sessionKey: string,
   lock: { pid: number; turnId: string },
   steerPrompt?: string,
+  options: { detachOnCtrlC: boolean } = { detachOnCtrlC: true },
 ) {
   const turnId = lock.turnId;
   const journalPath = join(TURNS_DIR, `${turnId}.jsonl`);
@@ -614,7 +623,8 @@ async function reattachStdout(
     return;
   }
 
-  process.stderr.write(`Reattaching to active agent (turn ${turnId}, pid ${lock.pid})…\n`);
+  const hint = options.detachOnCtrlC ? '(Ctrl+C to detach)' : '(Ctrl+C to halt agent)';
+  process.stderr.write(`Reattaching to active agent (turn ${turnId}, pid ${lock.pid}) ${hint}…\n`);
 
   if (steerPrompt) {
     process.stderr.write(`  ⟦steer: ${steerPrompt}⟧\n`);
@@ -667,17 +677,32 @@ async function reattachStdout(
     return;
   }
 
-  // Ctrl+C halts the running agent
+  let watchTimer: ReturnType<typeof setInterval> | null = null;
+  const cleanup = () => {
+    if (watchTimer) {
+      clearInterval(watchTimer);
+      watchTimer = null;
+    }
+    process.off('SIGINT', onSigInt);
+  };
+
+  // Ctrl+C handler: detaches if detachOnCtrlC, or halts/kills if attached
   let ctrlCCount = 0;
   const onSigInt = () => {
-    ctrlCCount++;
-    if (ctrlCCount === 1) {
-      process.stderr.write('\n  ⏹ Halting agent… (Ctrl+C again to force quit)\n');
-      journal.writeCommand({ type: 'halt', reason: 'user interrupted' });
+    if (options.detachOnCtrlC) {
+      process.stderr.write('\n  Detached from session (agent still running in background).\n');
+      cleanup();
+      process.exit(0);
     } else {
-      process.stderr.write('\n  Force quit.\n');
-      try { process.kill(lock.pid, 'SIGKILL'); } catch {}
-      process.exit(130);
+      ctrlCCount++;
+      if (ctrlCCount === 1) {
+        process.stderr.write('\n  ⏹ Halting agent… (Ctrl+C again to force quit)\n');
+        journal.writeCommand({ type: 'halt', reason: 'user interrupted' });
+      } else {
+        process.stderr.write('\n  Force quit.\n');
+        try { process.kill(lock.pid, 'SIGKILL'); } catch {}
+        process.exit(130);
+      }
     }
   };
   process.on('SIGINT', onSigInt);
@@ -690,13 +715,8 @@ async function reattachStdout(
   } catch {}
 
   await new Promise<void>((resolve) => {
-    let watchTimer: ReturnType<typeof setInterval> | null = null;
-    const cleanup = () => {
-      if (watchTimer) {
-        clearInterval(watchTimer);
-        watchTimer = null;
-      }
-      process.off('SIGINT', onSigInt);
+    const finish = () => {
+      cleanup();
       resolve();
     };
 
@@ -717,7 +737,7 @@ async function reattachStdout(
                 const ev = JSON.parse(line) as TurnEvent;
                 printEvent(ev);
                 if (ev.type === 'done') {
-                  cleanup();
+                  finish();
                   return;
                 }
               } catch {}
@@ -726,10 +746,10 @@ async function reattachStdout(
         }
 
         if (!alive) {
-          cleanup();
+          finish();
         }
       } catch {
-        cleanup();
+        finish();
       }
     }, 100);
   });
@@ -743,22 +763,48 @@ async function runStdout(
   prompt: string,
   sessionKey: string,
   thinkingLevel?: string,
+  options?: { watch?: boolean; attach?: boolean },
 ) {
   const lockManager = new SessionLockManager(LOCKS_DIR);
   const existingLock = lockManager.readLock(sessionKey);
+  let alive = false;
   if (existingLock) {
-    let alive = false;
     try { process.kill(existingLock.pid, 0); alive = true; } catch {}
-    if (alive && existingLock.turnId) {
-      await reattachStdout(sessionKey, existingLock, prompt || undefined);
-      return;
-    } else {
-      lockManager.forceBreak(sessionKey);
+  }
+
+  if (options?.watch) {
+    if (!existingLock || !alive || !existingLock.turnId) {
+      process.stderr.write('No active session running for this directory.\n');
+      process.exit(1);
     }
+    await reattachStdout(sessionKey, existingLock, prompt || undefined, { detachOnCtrlC: true });
+    return;
+  }
+
+  if (options?.attach) {
+    if (!existingLock || !alive || !existingLock.turnId) {
+      process.stderr.write('No active session running for this directory.\n');
+      process.exit(1);
+    }
+    await reattachStdout(sessionKey, existingLock, prompt || undefined, { detachOnCtrlC: false });
+    return;
+  }
+
+  // Neither --watch nor --attach explicitly passed.
+  if (existingLock && alive && existingLock.turnId) {
+    // If prompt is given (lc "steer..."), default to attach (Ctrl+C halts).
+    // If no prompt is given (lc), default to watch (Ctrl+C detaches).
+    const detachOnCtrlC = !prompt;
+    await reattachStdout(sessionKey, existingLock, prompt || undefined, { detachOnCtrlC });
+    return;
+  } else if (existingLock && !alive) {
+    lockManager.forceBreak(sessionKey);
   }
 
   if (!prompt) {
-    console.log('Usage: lc <prompt>');
+    console.log('Usage: lc [prompt]');
+    console.log('       lc --watch');
+    console.log('       lc --attach [prompt]');
     console.log('Run "lc help" for more options.');
     process.exit(1);
   }
@@ -767,7 +813,7 @@ async function runStdout(
   if (!lockManager.acquire(sessionKey, turnId)) {
     const recheck = lockManager.readLock(sessionKey);
     if (recheck && recheck.turnId) {
-      await reattachStdout(sessionKey, recheck, prompt);
+      await reattachStdout(sessionKey, recheck, prompt, { detachOnCtrlC: false });
       return;
     }
   }
