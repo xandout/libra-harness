@@ -18,6 +18,7 @@ RUN apt-get update \
     xsel \
     wmctrl \
     x11vnc \
+    openbox \
     git \
     procps \
     ca-certificates \

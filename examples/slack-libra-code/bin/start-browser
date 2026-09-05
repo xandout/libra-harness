@@ -15,6 +15,9 @@ fi
 
 mkdir -p "$PROFILE_DIR"
 
+# Clean up stale locks to prevent "profile in use" xmessage popups hanging chrome
+rm -f "$PROFILE_DIR/SingletonLock" "$PROFILE_DIR/SingletonCookie" "$PROFILE_DIR/SingletonSocket"
+
 google-chrome \
   --remote-debugging-port="$DEBUG_PORT" \
   --user-data-dir="$PROFILE_DIR" \
@@ -35,5 +38,14 @@ google-chrome \
   --window-size=1920,1080 \
   about:blank >/tmp/chrome.log 2>&1 &
 
-sleep 1
-echo "Chrome started on display $DISPLAY with debug port $DEBUG_PORT"
+echo "Waiting for Chrome CDP endpoint on port $DEBUG_PORT..."
+for i in {1..30}; do
+  if curl -s "http://127.0.0.1:$DEBUG_PORT/json/version" >/dev/null; then
+    echo "Chrome started on display $DISPLAY with debug port $DEBUG_PORT"
+    exit 0
+  fi
+  sleep 0.5
+done
+
+echo "Error: Chrome CDP endpoint failed to start"
+exit 1

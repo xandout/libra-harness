@@ -17,6 +17,10 @@ if ! pgrep -x "Xvfb" >/dev/null; then
   export DISPLAY=:99
 fi
 
+if ! pgrep -x "openbox" >/dev/null; then
+  openbox-session &
+fi
+
 # Start x11vnc for VNC observation
 if [ "${VNC_ENABLED:-true}" = "true" ]; then
   mkdir -p /root/.vnc && x11vnc -storepasswd "${VNC_PASSWORD:-connie}" /root/.vnc/passwd 2>/dev/null || true
