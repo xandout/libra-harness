@@ -87,6 +87,7 @@ async function main() {
     console.log('  model          Model ID in "provider/model" format (e.g. deepseek/deepseek-chat)');
     console.log('  maxIterations  Max LLM iterations per turn (default: 50)');
     console.log('  systemPrompt   Custom system prompt (overrides default; AGENTS.md still appended)');
+    console.log('  thinkingLevel  Thinking/reasoning level: off, low, medium, high, max (default: high)');
     console.log('');
     console.log('Project instructions: AGENTS.md in the project root is appended to the system prompt.');
     console.log('Session: one per working directory, stored in ~/.libra/sessions/');
@@ -96,14 +97,20 @@ async function main() {
   // ── Parse flags ──
   let useTui = false;
   let exitOnComplete = false;
+  let thinkingLevel: string | undefined;
 
   const filtered: string[] = [];
-  for (const arg of args) {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
     if (arg === '--tui' || arg === '-t') {
       useTui = true;
     } else if (arg === '--exit-on-complete' || arg === '-x') {
       exitOnComplete = true;
       useTui = true;
+    } else if ((arg === '--thinking-level' || arg === '--thinking' || arg === '--reasoning-effort') && args[i + 1]) {
+      thinkingLevel = args[++i];
+    } else if (arg.startsWith('--thinking-level=') || arg.startsWith('--thinking=') || arg.startsWith('--reasoning-effort=')) {
+      thinkingLevel = arg.slice(arg.indexOf('=') + 1);
     } else {
       filtered.push(arg);
     }
@@ -126,9 +133,9 @@ async function main() {
   const sessionKey = sessionKeyForCwd(cwd);
 
   if (useTui) {
-    await runWithTui(prompt, sessionKey, exitOnComplete);
+    await runWithTui(prompt, sessionKey, exitOnComplete, thinkingLevel);
   } else {
-    await runStdout(prompt, sessionKey);
+    await runStdout(prompt, sessionKey, thinkingLevel);
   }
 }
 
@@ -140,11 +147,16 @@ async function runWorker(args: string[]) {
   let turnId = '';
   let sessionKey = '';
   let prompt = '';
+  let thinkingLevel: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--turn' && args[i + 1]) { turnId = args[++i]; continue; }
     if (args[i] === '--session' && args[i + 1]) { sessionKey = args[++i]; continue; }
     if (args[i] === '--prompt' && args[i + 1]) { prompt = args[++i]; continue; }
+    if ((args[i] === '--thinking-level' || args[i] === '--thinking' || args[i] === '--reasoning-effort') && args[i + 1]) {
+      thinkingLevel = args[++i];
+      continue;
+    }
   }
 
   if (!turnId || !sessionKey || !prompt) {
@@ -165,7 +177,7 @@ async function runWorker(args: string[]) {
   // Build agent — journal extensions are always installed now.
   let built;
   try {
-    built = await buildAgent();
+    built = await buildAgent({ thinkingLevel });
   } catch (err) {
     const journal = new TurnJournal(TURNS_DIR, TURN_META_DIR, turnId, prompt);
     const msg = err instanceof Error ? err.message : String(err);
@@ -221,6 +233,7 @@ async function runWithTui(
   initialPrompt: string,
   sessionKey: string,
   exitOnComplete: boolean,
+  thinkingLevel?: string,
 ) {
   const todoFile = join(TODOS_DIR, `${sessionKey}.json`);
 
@@ -452,13 +465,17 @@ async function runWithTui(
     startWatching(journalPath);
 
     // Spawn `lc --worker` — silent, detached.
-    agentProcess = spawn(process.execPath, [
+    const workerArgs = [
       process.argv[1],
       '--worker',
       '--turn', turnId,
       '--session', sessionKey,
       '--prompt', text,
-    ], {
+    ];
+    if (thinkingLevel) {
+      workerArgs.push('--thinking-level', thinkingLevel);
+    }
+    agentProcess = spawn(process.execPath, workerArgs, {
       detached: true,
       stdio: 'ignore',
     });
@@ -592,13 +609,14 @@ async function runWithTui(
 async function runStdout(
   prompt: string,
   sessionKey: string,
+  thinkingLevel?: string,
 ) {
   const turnId = TurnJournal.newTurnId();
   const journal = new TurnJournal(TURNS_DIR, TURN_META_DIR, turnId, prompt);
 
   let built;
   try {
-    built = await buildAgent();
+    built = await buildAgent({ thinkingLevel });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     journal.markError(msg);

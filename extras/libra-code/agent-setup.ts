@@ -35,12 +35,15 @@ export const TURN_META_DIR = join(LIBRA_HOME, 'turn-meta');
 export const LOCKS_DIR = join(LIBRA_HOME, 'locks');
 export const CONFIG_FILE = join(LIBRA_HOME, 'config.json');
 
-// ── Config ───────────────────────────────────────────────────────────
 export interface LibraCodeConfig {
   model?: string;
   maxIterations?: number;
   /** Custom system prompt. Overrides the default if set. */
   systemPrompt?: string;
+  /** Thinking level for models that support reasoning mode: 'off' | 'low' | 'medium' | 'high' | 'max' */
+  thinkingLevel?: string;
+  /** Alias for thinkingLevel */
+  reasoningEffort?: string;
 }
 
 export function loadConfig(): LibraCodeConfig {
@@ -71,61 +74,122 @@ export function sessionKeyForCwd(cwd: string): string {
   return 'cwd_' + cwd.replace(/[^a-zA-Z0-9]/g, '_');
 }
 
-// ── System prompt ────────────────────────────────────────────────────
-export const SYSTEM_PROMPT = `You are a code agent. You help with software engineering tasks.
-
-You have tools for reading, writing, and editing files, finding files by name, searching file contents, running shell commands, and tracking tasks. Use them to explore and modify code.
-
-Rules:
-- Read files before editing them.
-- Explore the codebase before making changes.
-- Use absolute paths for all file operations.
-- Be concise in your responses.
-- When making changes, explain what you did and why.
-- Do not push to git unless explicitly asked.
-- Never commit secrets or credentials.
-- Use todo_write to track multi-step tasks.`;
-
-/**
- * Load project-specific instructions from AGENTS.md in the given directory.
- * Returns the raw content, or undefined if no AGENTS.md exists.
- */
-export function loadAgentsMd(dir: string): string | undefined {
-  const path = join(dir, 'AGENTS.md');
-  if (!existsSync(path)) return undefined;
-  try {
-    const content = readFileSync(path, 'utf-8').trim();
-    return content || undefined;
-  } catch {
-    return undefined;
-  }
+export interface ThinkingResolvedConfig {
+  thinkingLevel?: string;
+  reasoningEffort?: 'low' | 'high' | 'max';
+  providerOptions?: Record<string, Record<string, unknown>>;
 }
 
 /**
- * Build the full system prompt.
+ * Resolve thinking level and reasoning effort options from explicit options,
+ * configuration, or environment variables.
  *
- * Precedence (highest wins):
- *   1. config.systemPrompt — user-set custom prompt (lc config set systemPrompt)
- *   2. SYSTEM_PROMPT — the built-in default
- *
- * Then AGENTS.md from the project root is appended (if present), so
- * project-specific instructions are always visible to the model.
+ * Supported levels:
+ * - 'off' / 'disabled': thinking mode disabled
+ * - 'low': minimal reasoning
+ * - 'medium': standard reasoning
+ * - 'high': standard reasoning (default for reasoning models)
+ * - 'max': maximum reasoning effort
  */
-export function buildSystemPrompt(projectDir?: string): string {
+export function resolveThinkingConfig(thinkingInput?: string): ThinkingResolvedConfig {
   const config = loadConfig();
-  const base = config.systemPrompt?.trim() || SYSTEM_PROMPT;
-  const agentsMd = loadAgentsMd(projectDir ?? process.cwd());
-  if (!agentsMd) return base;
-  return `${base}
+  const raw =
+    thinkingInput ??
+    config.thinkingLevel ??
+    config.reasoningEffort ??
+    process.env.LIBRA_THINKING_LEVEL ??
+    process.env.THINKING_LEVEL ??
+    process.env.LIBRA_REASONING_EFFORT ??
+    process.env.REASONING_EFFORT;
 
-══════════════════════════════════════════════════════════════════════
-PROJECT INSTRUCTIONS (AGENTS.md)
-══════════════════════════════════════════════════════════════════════
-${agentsMd}`;
+  if (!raw || typeof raw !== 'string') {
+    return {};
+  }
+
+  const val = raw.trim().toLowerCase();
+
+  if (val === 'off' || val === 'disabled' || val === 'false' || val === '0' || val === 'none') {
+    return {
+      thinkingLevel: 'off',
+      providerOptions: {
+        deepseek: {
+          thinking: { type: 'disabled' },
+        },
+      },
+    };
+  }
+
+  if (val === 'low') {
+    return {
+      thinkingLevel: 'low',
+      reasoningEffort: 'low',
+      providerOptions: {
+        deepseek: {
+          thinking: { type: 'enabled' },
+          reasoningEffort: 'low',
+        },
+      },
+    };
+  }
+
+  if (val === 'medium') {
+    return {
+      thinkingLevel: 'medium',
+      reasoningEffort: 'high',
+      providerOptions: {
+        deepseek: {
+          thinking: { type: 'enabled' },
+          reasoningEffort: 'medium',
+        },
+      },
+    };
+  }
+
+  if (val === 'high' || val === 'enabled' || val === 'on' || val === 'true') {
+    return {
+      thinkingLevel: 'high',
+      reasoningEffort: 'high',
+      providerOptions: {
+        deepseek: {
+          thinking: { type: 'enabled' },
+          reasoningEffort: 'high',
+        },
+      },
+    };
+  }
+
+  if (val === 'max' || val === 'xhigh') {
+    return {
+      thinkingLevel: 'max',
+      reasoningEffort: 'max',
+      providerOptions: {
+        deepseek: {
+          thinking: { type: 'enabled' },
+          reasoningEffort: 'max',
+        },
+      },
+    };
+  }
+
+  const mappedEffort: 'low' | 'high' | 'max' =
+    val === 'low' ? 'low' : val === 'max' || val === 'xhigh' ? 'max' : 'high';
+
+  return {
+    thinkingLevel: val,
+    reasoningEffort: mappedEffort,
+    providerOptions: {
+      deepseek: {
+        thinking: { type: 'enabled' },
+        reasoningEffort: val,
+      },
+    },
+  };
 }
 
 // ── Agent builder ────────────────────────────────────────────────────
 export interface BuildAgentOptions {
+  thinkingLevel?: string;
+  reasoningEffort?: string;
 }
 
 export interface BuiltAgent {
@@ -221,10 +285,14 @@ export async function buildAgent(opts: BuildAgentOptions = {}): Promise<BuiltAge
     toolCalls: 0, toolErrors: 0, lastPromptTokens: 0, lastCompletionTokens: 0,
   };
 
+  const thinkingConfig = resolveThinkingConfig(opts.thinkingLevel ?? opts.reasoningEffort);
+
   const agent = new Agent({
     model,
     systemPrompt: buildSystemPrompt(cwd),
     maxIterations: config.maxIterations ?? 50,
+    ...(thinkingConfig.reasoningEffort && { reasoningEffort: thinkingConfig.reasoningEffort }),
+    ...(thinkingConfig.providerOptions && { providerOptions: thinkingConfig.providerOptions }),
   });
 
   // Extensions — always installed. The journal is the single source of
