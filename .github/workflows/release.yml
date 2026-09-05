@@ -45,27 +45,70 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Bump root version manually (npm version crashes on workspace
-          # link: dependencies — see npm/cli#8322).
-          node <<'EOF'
+          git fetch --tags --force
+
+          VERSION=$(node <<'EOF'
           const fs = require('fs');
+          const { execSync } = require('child_process');
+
           const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
-          const [major, minor, patch] = pkg.version.split('.').map(Number);
-          pkg.version = `${major}.${minor}.${patch + 1}`;
-          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          let [major, minor, patch] = pkg.version.split('.').map(Number);
+
+          function tagExists(tag) {
+            try {
+              const res = execSync(`git tag -l "${tag}"`, { encoding: 'utf-8' }).trim();
+              return res.length > 0;
+            } catch {
+              return false;
+            }
+          }
+
+          function npmVersionExists(pkgName, ver) {
+            try {
+              const res = execSync(`npm view "${pkgName}@${ver}" version`, { encoding: 'utf-8' }).trim();
+              return res === ver;
+            } catch {
+              return false;
+            }
+          }
+
+          let nextPatch = patch;
+          let targetVer = `${major}.${minor}.${nextPatch}`;
+
+          while (true) {
+            const tag = `v${targetVer}`;
+            const harnessOnNpm = npmVersionExists('@xandout/libra-harness', targetVer);
+            const codeOnNpm = npmVersionExists('@xandout/libra-code', targetVer);
+            const hasTag = tagExists(tag);
+
+            if (!hasTag && !harnessOnNpm && !codeOnNpm) {
+              break;
+            }
+            console.error(`Version ${targetVer} already exists (tag: ${hasTag}, harness: ${harnessOnNpm}, code: ${codeOnNpm}). Incrementing...`);
+            nextPatch++;
+            targetVer = `${major}.${minor}.${nextPatch}`;
+          }
+
+          console.log(targetVer);
           EOF
-          VERSION=$(node -p "require('./package.json').version")
+          )
+
+          echo "Selected VERSION=$VERSION"
           echo "VERSION=$VERSION" >> $GITHUB_ENV
-          # Set lc version to match.
-          cd extras/libra-code
-          VERSION="$VERSION" node <<'EOF'
-          const fs = require('fs');
-          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
-          pkg.version = process.env.VERSION;
-          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          EOF
-          cd ../..
-          # Commit both version bumps together, then tag.
+
+          # Set package.json versions
+          VERSION="$VERSION" node -e "
+            const fs = require('fs');
+            const ver = process.env.VERSION;
+            const p1 = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
+            p1.version = ver;
+            fs.writeFileSync('package.json', JSON.stringify(p1, null, 2) + '\n');
+
+            const p2 = JSON.parse(fs.readFileSync('extras/libra-code/package.json', 'utf-8'));
+            p2.version = ver;
+            fs.writeFileSync('extras/libra-code/package.json', JSON.stringify(p2, null, 2) + '\n');
+          "
+
           git add package.json extras/libra-code/package.json
           git commit -m "chore: release v${VERSION}"
           git tag "v${VERSION}"
@@ -74,7 +117,13 @@ jobs:
         run: git push --follow-tags
 
       - name: Publish libra-harness to npm
-        run: npm publish --provenance --access public
+        run: |
+          VERSION="${{ env.VERSION }}"
+          if npm view "@xandout/libra-harness@${VERSION}" version 2>/dev/null | grep -q "$VERSION"; then
+            echo "@xandout/libra-harness@${VERSION} already published on npm. Skipping."
+          else
+            npm publish --provenance --access public
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -84,7 +133,13 @@ jobs:
           node-version: 24
           registry-url: https://npm.pkg.github.com
           scope: '@xandout'
-      - run: npm publish --access public
+      - run: |
+          VERSION="${{ env.VERSION }}"
+          if npm view "@xandout/libra-harness@${VERSION}" version 2>/dev/null | grep -q "$VERSION"; then
+            echo "@xandout/libra-harness@${VERSION} already published on GitHub Packages. Skipping."
+          else
+            npm publish --access public || true
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -120,14 +175,18 @@ jobs:
         run: |
           cd extras/libra-code
           pnpm build
-          # Replace the link dep with the published version range.
+          VERSION="${{ env.VERSION }}"
           node -e "
             const fs = require('fs');
             const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
             pkg.dependencies['@xandout/libra-harness'] = '^' + process.env.VERSION;
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
-          npm publish --provenance --access public
+          if npm view "@xandout/libra-code@${VERSION}" version 2>/dev/null | grep -q "$VERSION"; then
+            echo "@xandout/libra-code@${VERSION} already published on npm. Skipping."
+          else
+            npm publish --provenance --access public
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ env.VERSION }}
@@ -140,6 +199,11 @@ jobs:
           scope: '@xandout'
       - run: |
           cd extras/libra-code
-          npm publish --access public
+          VERSION="${{ env.VERSION }}"
+          if npm view "@xandout/libra-code@${VERSION}" version 2>/dev/null | grep -q "$VERSION"; then
+            echo "@xandout/libra-code@${VERSION} already published on GitHub Packages. Skipping."
+          else
+            npm publish --access public || true
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
