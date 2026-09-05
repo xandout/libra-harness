@@ -74,6 +74,59 @@ export function sessionKeyForCwd(cwd: string): string {
   return 'cwd_' + cwd.replace(/[^a-zA-Z0-9]/g, '_');
 }
 
+// ── System prompt ────────────────────────────────────────────────────
+export const SYSTEM_PROMPT = `You are a code agent. You help with software engineering tasks.
+
+You have tools for reading, writing, and editing files, finding files by name, searching file contents, running shell commands, and tracking tasks. Use them to explore and modify code.
+
+Rules:
+- Read files before editing them.
+- Explore the codebase before making changes.
+- Use absolute paths for all file operations.
+- Be concise in your responses.
+- When making changes, explain what you did and why.
+- Do not push to git unless explicitly asked.
+- Never commit secrets or credentials.
+- Use todo_write to track multi-step tasks.`;
+
+/**
+ * Load project-specific instructions from AGENTS.md in the given directory.
+ * Returns the raw content, or undefined if no AGENTS.md exists.
+ */
+export function loadAgentsMd(dir: string): string | undefined {
+  const path = join(dir, 'AGENTS.md');
+  if (!existsSync(path)) return undefined;
+  try {
+    const content = readFileSync(path, 'utf-8').trim();
+    return content || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Build the full system prompt.
+ *
+ * Precedence (highest wins):
+ *   1. config.systemPrompt — user-set custom prompt (lc config set systemPrompt)
+ *   2. SYSTEM_PROMPT — the built-in default
+ *
+ * Then AGENTS.md from the project root is appended (if present), so
+ * project-specific instructions are always visible to the model.
+ */
+export function buildSystemPrompt(projectDir?: string): string {
+  const config = loadConfig();
+  const base = config.systemPrompt?.trim() || SYSTEM_PROMPT;
+  const agentsMd = loadAgentsMd(projectDir ?? process.cwd());
+  if (!agentsMd) return base;
+  return `${base}
+
+══════════════════════════════════════════════════════════════════════
+PROJECT INSTRUCTIONS (AGENTS.md)
+══════════════════════════════════════════════════════════════════════
+${agentsMd}`;
+}
+
 export interface ThinkingResolvedConfig {
   thinkingLevel?: string;
   reasoningEffort?: 'low' | 'high' | 'max';
