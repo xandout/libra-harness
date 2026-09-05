@@ -486,95 +486,104 @@ app.message(async ({ message, client }) => {
   });
 });
 
-// ── Slash Command: /oc ───────────────────────────────────────────────
+// ── Slash Command: /ronny ───────────────────────────────────────────────
 // OpenClaw style slash command supporting halt, steer, status, and prompts
-app.command('/oc', async ({ command, ack, respond, client }) => {
+app.command('/ronny', async ({ command, ack, respond, client }) => {
   await ack();
-
-  const rawText = (command.text || '').trim();
+  const text = (command.text || '').trim();
   const channelId = command.channel_id;
+  const isDm = channelId.startsWith('D');
+  const messageTs = command.thread_ts || command.ts || String(Date.now() / 1000);
+  const sessionKey = command.thread_ts 
+    ? `slack_${channelId}_${command.thread_ts}` 
+    : `slack_${channelId}`;
 
-  // 1. Halt: /oc halt [reason] or /oc stop [reason]
-  const haltMatch = rawText.match(/^(halt|stop|cancel)(?:\s+(.*))?$/i);
-  if (haltMatch) {
-    const reason = haltMatch[2]?.trim();
+  // 1. Halt
+  if (text.startsWith('halt') || text.startsWith('stop') || text.startsWith('cancel')) {
+    const reason = text.replace(/^(halt|stop|cancel)\s*/i, '').trim();
     let halted = 0;
     for (const [key, item] of inFlight.entries()) {
-      if (item.channelId === channelId) {
-        item.halt(reason);
+      if (key === sessionKey || (!command.thread_ts && key.startsWith(`slack_${channelId}`))) {
+        item.halt(reason || 'user halted via Slack');
         halted++;
-        inFlight.delete(key);
       }
     }
     if (halted > 0) {
-      await respond({ text: `⏹ Halted ${halted} active \`lc\` turn(s)${reason ? ` (reason: ${reason})` : ''}.`, response_type: 'ephemeral' });
-      await postMessage(client, channelId, `⏹ *Turn halted by <@${command.user_id}>*${reason ? `: ${reason}` : ''}`);
+      await respond({ text: `⏹ Halted ${halted} active \`lc\` turn(s).`, response_type: 'ephemeral' });
     } else {
-      await respond({ text: 'No active `lc` tasks running in this channel.', response_type: 'ephemeral' });
+      const turnId = getActiveTurnId(sessionKey, libraHome);
+      if (turnId) {
+        writeTurnCommand(libraHome, turnId, { type: 'halt', reason: reason || 'user halted via Slack' });
+        await respond({ text: `Halt command written for turn \`${turnId}\`.`, response_type: 'ephemeral' });
+      } else {
+        await respond({ text: 'No active turn found to halt.', response_type: 'ephemeral' });
+      }
     }
     return;
   }
 
-  // 2. Steer: /oc steer <message>
-  const steerMatch = rawText.match(/^steer(?:\s+(.*))?$/is);
-  if (steerMatch) {
-    const steerText = steerMatch[1]?.trim();
-    if (!steerText) {
-      await respond({ text: 'Usage: `/oc steer <message to inject into active turn>`', response_type: 'ephemeral' });
+  // 2. Steer
+  if (text.startsWith('steer')) {
+    const message = text.replace(/^steer\s*/i, '').trim();
+    if (!message) {
+      await respond({ text: 'Usage: `/ronny steer <message to inject into active turn>`', response_type: 'ephemeral' });
       return;
     }
-
     let steered = false;
     for (const [key, item] of inFlight.entries()) {
-      if (item.channelId === channelId) {
-        item.steer(steerText);
+      if (key === sessionKey || (!command.thread_ts && key.startsWith(`slack_${channelId}`))) {
+        item.steer(message);
         steered = true;
-        await respond({ text: `↪️ Steered active turn with: "${steerText}"`, response_type: 'ephemeral' });
-        await postMessage(client, channelId, `↪️ *Steering injected by <@${command.user_id}>*: ${steerText}`, item.threadTs);
+        await respond({ text: `↪️ Steered active turn with: "${message}"`, response_type: 'ephemeral' });
         break;
       }
     }
-
     if (!steered) {
-      await respond({ text: 'No active turn found to steer in this channel. Run a task first, or omit "steer" to run a prompt.', response_type: 'ephemeral' });
+      const turnId = getActiveTurnId(sessionKey, libraHome);
+      if (turnId) {
+        writeTurnCommand(libraHome, turnId, { type: 'steer', text: message });
+        await respond({ text: `Steering command written for turn \`${turnId}\`.`, response_type: 'ephemeral' });
+      } else {
+        await respond({ text: 'No active turn found to steer.', response_type: 'ephemeral' });
+      }
     }
     return;
   }
 
-  // 3. Status: /oc status
-  if (rawText.toLowerCase() === 'status') {
+  // 3. Status
+  if (text === 'status') {
     const activeList = Array.from(inFlight.keys());
+    const turnId = getActiveTurnId(sessionKey, libraHome);
     const statusMsg = [
       `*Slack-Libra-Code Status*`,
       `• Active Turns: ${activeList.length ? activeList.join(', ') : 'None (idle)'}`,
       `• Target CWD: \`${lcCwd}\``,
-      `• Model: \`${process.env.MODEL || process.env.LIBRA_MODEL || 'default'}\``,
-      `• Bot User: \`<@${botUserId}>\``,
+      `• Lock File Turn ID: \`${turnId || 'none'}\``,
     ].join('\n');
     await respond({ text: statusMsg, response_type: 'ephemeral' });
     return;
   }
 
-  // 4. Usage info if empty
-  if (!rawText) {
+  // 4. Help
+  if (text === 'help' || text === '') {
     await respond({
-      text: 'Usage:\n• `/oc <prompt>` — Run a code agent turn\n• `/oc steer <message>` — Steer running turn\n• `/oc halt [reason]` — Stop running turn\n• `/oc status` — Check agent status',
-      response_type: 'ephemeral',
+      text: 'Usage:\n• `/ronny <prompt>` — Run a code agent turn\n• `/ronny steer <message>` — Steer running turn\n• `/ronny halt [reason]` — Stop running turn\n• `/ronny status` — Check agent status',
+      response_type: 'ephemeral'
     });
     return;
   }
 
-  // 5. Default: /oc <prompt>
-  await respond({ text: `⏳ Running \`lc\` for: "${rawText.slice(0, 60)}"`, response_type: 'ephemeral' });
+  // 5. Default: run prompt
+  await respond({ text: `⏳ Running \`lc\` for: "${text.slice(0, 60)}"`, response_type: 'ephemeral' });
   await runTurn({
     channelId,
-    cleanedText: rawText,
+    cleanedText: text,
     client,
-    messageTs: String(Date.now() / 1000),
-    isDm: channelId.startsWith('D'),
+    messageTs,
+    threadTs: command.thread_ts,
+    isDm,
   });
 });
-
 // ── Slash Command: /halt (legacy alias) ──────────────────────────────
 app.command('/halt', async ({ command, ack, respond, client }) => {
   await ack();
@@ -607,7 +616,7 @@ app.command('/halt', async ({ command, ack, respond, client }) => {
     console.log(`  Bot User ID: ${botUserId}`);
     console.log(`  Target CWD:  ${lcCwd}`);
     console.log(`  Command:     ${resolvedLc.command} ${resolvedLc.args.join(' ')}`);
-    console.log('  Listening for DMs, @mentions, and /oc commands on Slack...');
+    console.log('  Listening for DMs, @mentions, and /ronny commands on Slack...');
   } catch (err) {
     console.error('Failed to start Slack app:', err);
     process.exit(1);

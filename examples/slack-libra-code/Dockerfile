@@ -55,7 +55,7 @@ ENV LC_CWD=/home/node/workspace
 ENV LIBRA_HOME=/home/node/workspace/.libra
 
 # Prepare directory structure
-RUN mkdir -p /app /home/node/workspace /home/node/hibriten-shared
+RUN mkdir -p /app /home/node/workspace
 
 COPY bin/* /usr/local/bin/
 RUN chmod +x /usr/local/bin/*

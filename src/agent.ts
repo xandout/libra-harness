@@ -387,13 +387,25 @@ export class Agent {
       // ── No tool calls → final response (unless steering pending) ──
       const toolCalls = modelResponse.message.toolCalls;
       if (!toolCalls || toolCalls.length === 0) {
+        const textContent = messageContentToText(modelResponse.message.content).trim();
+
+        // If the model sent absolutely nothing, auto-prompt to get a response
+        // rather than silently ending the turn with no output.
+        if (!textContent) {
+          turn.messages.push({
+            role: 'user',
+            content: 'You sent an empty response. Please provide a meaningful response to the last completed task. Do not acknowledge this empty response, just provide the expected output.'
+          });
+          continue;
+        }
+
         // If steering messages arrived during the LLM call, don't end
         // the turn — drain them and loop so the agent can respond.
         if (steeringQueue.length > 0) {
           this.drainSteering(turn, steeringQueue);
           continue;
         }
-        return await this.finishTurn(turn, messageContentToText(modelResponse.message.content), 'stop', iterations, allToolCalls);
+        return await this.finishTurn(turn, textContent, 'stop', iterations, allToolCalls);
       }
 
       // ── Separate external (pass-through) from internal (execute) tool calls ──

@@ -6,7 +6,7 @@
 #
 # Examples:
 #   slack-screenshot                                  # Captures display :99 and uploads to active Slack thread
-#   slack-screenshot https://hibriten.app "Current app dashboard"
+#   slack-screenshot https://example.com "Current app dashboard"
 
 set -euo pipefail
 
