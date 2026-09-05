@@ -126,6 +126,8 @@ jobs:
           npm pack
           cd extras/libra-code
           pnpm build
+          # Temporarily swap link dep to versioned range for the tarball manifest only,
+          # then restore link:../.. so the working tree stays lockfile-compatible.
           node -e "
             const fs = require('fs');
             const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
@@ -133,6 +135,12 @@ jobs:
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
           npm pack
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
+            pkg.dependencies['@xandout/libra-harness'] = 'link:../..';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
           mv *.tgz ../..
           cd ../..
 
@@ -180,6 +188,12 @@ jobs:
           else
             npm publish --registry=https://npm.pkg.github.com --access public || true
           fi
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
+            pkg.dependencies['@xandout/libra-harness'] = 'link:../..';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -232,6 +246,12 @@ jobs:
             npm config set //registry.npmjs.org/:_authToken "${NODE_AUTH_TOKEN}"
             npm publish --provenance --access public || echo "::warning::Failed to publish @xandout/libra-code to public npm (check NPM_TOKEN permissions/scope)"
           fi
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
+            pkg.dependencies['@xandout/libra-harness'] = 'link:../..';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ env.VERSION }}
