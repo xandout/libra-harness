@@ -116,18 +116,22 @@ jobs:
       - name: Push version tags
         run: git push --follow-tags
 
-      - name: Publish libra-harness to npm
+      - name: Build release tarballs
         run: |
-          VERSION="${{ env.VERSION }}"
-          if npm view "@xandout/libra-harness@${VERSION}" version 2>/dev/null | grep -q "$VERSION"; then
-            echo "@xandout/libra-harness@${VERSION} already published on npm. Skipping."
-          else
-            npm publish --provenance --access public
-          fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          pnpm build
+          npm pack
+          cd extras/libra-code && pnpm build && npm pack && mv *.tgz ../.. && cd ../..
 
-      - name: Publish libra-harness to GitHub Packages
+      - name: Create GitHub release with tarball assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: v${{ env.VERSION }}
+          files: |
+            *.tgz
+          generate_release_notes: true
+
+      - name: Publish libra-harness to GitHub Packages (Instant)
         uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -143,17 +147,25 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+      - name: Publish libra-harness to public npm
+        uses: actions/setup-node@v4
         with:
-          tag_name: v${{ env.VERSION }}
-          name: v${{ env.VERSION }}
-          generate_release_notes: true
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: |
+          VERSION="${{ env.VERSION }}"
+          if npm view "@xandout/libra-harness@${VERSION}" version 2>/dev/null | grep -q "$VERSION"; then
+            echo "@xandout/libra-harness@${VERSION} already published on npm. Skipping."
+          else
+            npm publish --provenance --access public
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Verify harness is published on npm
+      - name: Verify harness is published on public npm
         run: |
           VERSION="${{ env.VERSION }}"
-          echo "Waiting for @xandout/libra-harness@${VERSION} to appear on npm..."
+          echo "Waiting for @xandout/libra-harness@${VERSION} to appear on public npm..."
           for i in $(seq 1 40); do
             if npm view "@xandout/libra-harness@${VERSION}" version 2>/dev/null | grep -q "$VERSION"; then
               echo "Found @xandout/libra-harness@${VERSION} on npm"
@@ -165,13 +177,7 @@ jobs:
           echo "ERROR: @xandout/libra-harness@${VERSION} never appeared on npm"
           exit 1
 
-      - name: Setup node for npm registry publish (libra-code)
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          registry-url: https://registry.npmjs.org
-
-      - name: Build and publish libra-code to npm
+      - name: Build and publish libra-code to public npm
         run: |
           cd extras/libra-code
           pnpm build
@@ -191,7 +197,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ env.VERSION }}
 
-      - name: Publish libra-code to GitHub Packages
+      - name: Publish libra-code to GitHub Packages (Instant)
         uses: actions/setup-node@v4
         with:
           node-version: 24
