@@ -30,7 +30,7 @@ if [ "${VNC_ENABLED:-true}" = "true" ]; then
 fi
 
 # Start headed Chrome on :99 with persistent profile and remote debugging
-if [ "${BROWSER_AUTOSTART:-true}" = "true" ]; then
+if [ "${BROWSER_AUTOSTART:-false}" = "true" ]; then
   if command -v start-browser >/dev/null 2>&1; then
     start-browser || true
   fi
