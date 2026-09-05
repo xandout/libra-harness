@@ -96,7 +96,7 @@ jobs:
           echo "Selected VERSION=$VERSION"
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
-          # Set package.json versions and rewrite workspace dependency for distribution
+          # Set package.json versions (keep workspace dependency in git so pnpm lockfile stays valid)
           VERSION="$VERSION" node -e "
             const fs = require('fs');
             const ver = process.env.VERSION;
@@ -107,7 +107,6 @@ jobs:
 
             const p2 = JSON.parse(fs.readFileSync('extras/libra-code/package.json', 'utf-8'));
             p2.version = ver;
-            p2.dependencies['@xandout/libra-harness'] = '^' + ver;
             fs.writeFileSync('extras/libra-code/package.json', JSON.stringify(p2, null, 2) + '\n');
           "
 
@@ -122,7 +121,17 @@ jobs:
         run: |
           pnpm build
           npm pack
-          cd extras/libra-code && pnpm build && npm pack && mv *.tgz ../.. && cd ../..
+          cd extras/libra-code
+          pnpm build
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
+            pkg.dependencies['@xandout/libra-harness'] = '^' + process.env.VERSION;
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          npm pack
+          mv *.tgz ../..
+          cd ../..
 
       - name: Create GitHub release with tarball assets (INSTANT)
         uses: softprops/action-gh-release@v2
@@ -158,6 +167,12 @@ jobs:
       - run: |
           cd extras/libra-code
           VERSION="${{ env.VERSION }}"
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
+            pkg.dependencies['@xandout/libra-harness'] = '^' + process.env.VERSION;
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
           if npm view "@xandout/libra-code@${VERSION}" version 2>/dev/null | grep -q "$VERSION"; then
             echo "@xandout/libra-code@${VERSION} already published on GitHub Packages. Skipping."
           else
@@ -207,6 +222,12 @@ jobs:
           cd extras/libra-code
           pnpm build
           VERSION="${{ env.VERSION }}"
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
+            pkg.dependencies['@xandout/libra-harness'] = '^' + process.env.VERSION;
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
           if npm view "@xandout/libra-code@${VERSION}" version 2>/dev/null | grep -q "$VERSION"; then
             echo "@xandout/libra-code@${VERSION} already published on npm. Skipping."
           else
