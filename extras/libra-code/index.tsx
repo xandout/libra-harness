@@ -71,7 +71,7 @@ async function main() {
   if (args[0] === 'help' || args[0] === '--help' || args[0] === '-h') {
     console.log('lc — libra code agent');
     console.log('');
-    console.log('Usage: lc <prompt>            Run the agent (all args joined as one prompt)');
+    console.log('Usage: lc [prompt]            Run the agent or reattach to active session');
     console.log('       lc --tui [prompt]      Run with interactive TUI (long-running)');
     console.log('       lc -x <prompt>         Run with TUI, exit when agent finishes');
     console.log('       lc --tui               Open TUI with no initial prompt');
@@ -116,16 +116,8 @@ async function main() {
     }
   }
 
-  // ── Default: run the agent with all args as the prompt ──
+  // ── Default: run the agent or reattach to active session ──
   const prompt = filtered.join(' ').trim();
-
-  // Without TUI, prompt is required.
-  // With TUI, prompt is optional (can type interactively).
-  if (!prompt && !useTui) {
-    console.log('Usage: lc <prompt>');
-    console.log('Run "lc help" for more options.');
-    process.exit(1);
-  }
 
   ensureDirs();
 
@@ -604,14 +596,182 @@ async function runWithTui(
 // ── Plain text mode (no TUI) ─────────────────────────────────────────
 // The agent runs in-process. All output goes through the journal —
 // stdout mode subscribes to the journal and prints events to the
-// terminal. This is the same journal that worker mode writes and the
-// TUI reads, so every consumer sees the same events.
+// terminal. If an agent is already running for this session (e.g. spawned
+// by another process, worker, or TUI), stdout mode reattaches to it instead of
+// starting a new one.
+
+async function reattachStdout(
+  sessionKey: string,
+  lock: { pid: number; turnId: string },
+  steerPrompt?: string,
+) {
+  const turnId = lock.turnId;
+  const journalPath = join(TURNS_DIR, `${turnId}.jsonl`);
+  const journal = TurnJournal.loadFromDisk(TURNS_DIR, TURN_META_DIR, turnId);
+
+  if (!journal) {
+    process.stderr.write(`Could not load journal for turn ${turnId}.\n`);
+    return;
+  }
+
+  process.stderr.write(`Reattaching to active agent (turn ${turnId}, pid ${lock.pid})…\n`);
+
+  if (steerPrompt) {
+    process.stderr.write(`  ⟦steer: ${steerPrompt}⟧\n`);
+    journal.writeCommand({ type: 'steer', text: steerPrompt });
+  }
+
+  let firstText = true;
+  function printEvent(ev: TurnEvent) {
+    switch (ev.type) {
+      case 'status':
+        break;
+      case 'text':
+        if (firstText) {
+          process.stdout.write('\n');
+          firstText = false;
+        }
+        process.stdout.write(ev.delta || '');
+        break;
+      case 'tool':
+        if (ev.phase === 'start') {
+          const detail = ev.file || '';
+          process.stderr.write(`\n  → ${ev.name}(${detail})\n`);
+        } else if (ev.phase === 'end') {
+          process.stderr.write(`  ✓ ${ev.name}\n`);
+        }
+        break;
+      case 'file':
+        process.stderr.write(`  📝 ${ev.file}\n`);
+        break;
+      case 'steer':
+        process.stderr.write(`\n  ⟦steer: ${ev.text}⟧\n`);
+        break;
+      case 'halt':
+        process.stderr.write('\n  Halted.\n');
+        break;
+      case 'done':
+        break;
+    }
+  }
+
+  // Replay all events recorded so far
+  const initialEvents = journal.getAll();
+  for (const ev of initialEvents) {
+    printEvent(ev);
+  }
+
+  // If already finished, exit immediately
+  if (journal.isFinished || initialEvents.some((e) => e.type === 'done')) {
+    if (!firstText) process.stdout.write('\n');
+    return;
+  }
+
+  // Ctrl+C halts the running agent
+  let ctrlCCount = 0;
+  const onSigInt = () => {
+    ctrlCCount++;
+    if (ctrlCCount === 1) {
+      process.stderr.write('\n  ⏹ Halting agent… (Ctrl+C again to force quit)\n');
+      journal.writeCommand({ type: 'halt', reason: 'user interrupted' });
+    } else {
+      process.stderr.write('\n  Force quit.\n');
+      try { process.kill(lock.pid, 'SIGKILL'); } catch {}
+      process.exit(130);
+    }
+  };
+  process.on('SIGINT', onSigInt);
+
+  // Watch for new events
+  let watchOffset = 0;
+  try {
+    const stat = statSync(journalPath);
+    watchOffset = stat.size;
+  } catch {}
+
+  await new Promise<void>((resolve) => {
+    let watchTimer: ReturnType<typeof setInterval> | null = null;
+    const cleanup = () => {
+      if (watchTimer) {
+        clearInterval(watchTimer);
+        watchTimer = null;
+      }
+      process.off('SIGINT', onSigInt);
+      resolve();
+    };
+
+    watchTimer = setInterval(() => {
+      try {
+        let alive = false;
+        try { process.kill(lock.pid, 0); alive = true; } catch {}
+
+        if (existsSync(journalPath)) {
+          const stat = statSync(journalPath);
+          if (stat.size > watchOffset) {
+            const content = readFileSync(journalPath, 'utf-8');
+            const newContent = content.slice(watchOffset);
+            watchOffset = content.length;
+            for (const line of newContent.split('\n')) {
+              if (!line.trim()) continue;
+              try {
+                const ev = JSON.parse(line) as TurnEvent;
+                printEvent(ev);
+                if (ev.type === 'done') {
+                  cleanup();
+                  return;
+                }
+              } catch {}
+            }
+          }
+        }
+
+        if (!alive) {
+          cleanup();
+        }
+      } catch {
+        cleanup();
+      }
+    }, 100);
+  });
+
+  if (!firstText) {
+    process.stdout.write('\n');
+  }
+}
+
 async function runStdout(
   prompt: string,
   sessionKey: string,
   thinkingLevel?: string,
 ) {
+  const lockManager = new SessionLockManager(LOCKS_DIR);
+  const existingLock = lockManager.readLock(sessionKey);
+  if (existingLock) {
+    let alive = false;
+    try { process.kill(existingLock.pid, 0); alive = true; } catch {}
+    if (alive && existingLock.turnId) {
+      await reattachStdout(sessionKey, existingLock, prompt || undefined);
+      return;
+    } else {
+      lockManager.forceBreak(sessionKey);
+    }
+  }
+
+  if (!prompt) {
+    console.log('Usage: lc <prompt>');
+    console.log('Run "lc help" for more options.');
+    process.exit(1);
+  }
+
   const turnId = TurnJournal.newTurnId();
+  if (!lockManager.acquire(sessionKey, turnId)) {
+    const recheck = lockManager.readLock(sessionKey);
+    if (recheck && recheck.turnId) {
+      await reattachStdout(sessionKey, recheck, prompt);
+      return;
+    }
+  }
+
   const journal = new TurnJournal(TURNS_DIR, TURN_META_DIR, turnId, prompt);
 
   let built;
@@ -621,6 +781,7 @@ async function runStdout(
     const msg = err instanceof Error ? err.message : String(err);
     journal.markError(msg);
     journal.append('done', { reply: `Error: ${msg}`, finishReason: 'error' });
+    lockManager.release(sessionKey);
     process.stderr.write(`Error: ${msg}\n`);
     process.exit(1);
   }
@@ -667,52 +828,56 @@ async function runStdout(
     }
   });
 
-  const handle = agent.run({
-    message: prompt,
-    metadata: {
-      sessionId: sessionKey,
-      __journal: journal,
-      streamCallbacks: {
-        onText: (delta: string) => {
-          journal.append('text', { delta });
+  try {
+    const handle = agent.run({
+      message: prompt,
+      metadata: {
+        sessionId: sessionKey,
+        __journal: journal,
+        streamCallbacks: {
+          onText: (delta: string) => {
+            journal.append('text', { delta });
+          },
         },
       },
-    },
-  });
+    });
 
-  // Ctrl+C halts the running agent instead of killing the process.
-  let ctrlCCount = 0;
-  const onSigInt = () => {
-    ctrlCCount++;
-    if (ctrlCCount === 1) {
-      process.stderr.write('\n  ⏹ Halting agent… (Ctrl+C again to force quit)\n');
-      handle.halt('user interrupted');
+    // Ctrl+C halts the running agent instead of killing the process.
+    let ctrlCCount = 0;
+    const onSigInt = () => {
+      ctrlCCount++;
+      if (ctrlCCount === 1) {
+        process.stderr.write('\n  ⏹ Halting agent… (Ctrl+C again to force quit)\n');
+        handle.halt('user interrupted');
+      } else {
+        process.stderr.write('\n  Force quit.\n');
+        process.exit(130);
+      }
+    };
+    process.on('SIGINT', onSigInt);
+
+    const result = await handle;
+    process.off('SIGINT', onSigInt);
+    unsub();
+
+    if (result.finishReason === 'halted') {
+      journal.markHalted();
+      journal.append('halt', { reason: 'halted' });
+      journal.append('done', { reply: '', finishReason: 'halted' });
     } else {
-      process.stderr.write('\n  Force quit.\n');
-      process.exit(130);
+      const reply = result.message || '';
+      journal.markDone(reply);
+      journal.append('done', { reply, finishReason: result.finishReason });
     }
-  };
-  process.on('SIGINT', onSigInt);
 
-  const result = await handle;
-  process.off('SIGINT', onSigInt);
-  unsub();
-
-  if (result.finishReason === 'halted') {
-    journal.markHalted();
-    journal.append('halt', { reason: 'halted' });
-    journal.append('done', { reply: '', finishReason: 'halted' });
-  } else {
-    const reply = result.message || '';
-    journal.markDone(reply);
-    journal.append('done', { reply, finishReason: result.finishReason });
-  }
-
-  if (firstText) {
-    // No text was streamed — print the final reply.
-    console.log(result.message || '(no response)');
-  } else {
-    process.stdout.write('\n');
+    if (firstText) {
+      // No text was streamed — print the final reply.
+      console.log(result.message || '(no response)');
+    } else {
+      process.stdout.write('\n');
+    }
+  } finally {
+    lockManager.release(sessionKey);
   }
 }
 
