@@ -145,29 +145,28 @@ jobs:
             *.tgz
           generate_release_notes: true
 
-      - name: Publish libra-harness to GitHub Packages (INSTANT)
+      - name: Setup Node for GitHub Packages
         uses: actions/setup-node@v4
         with:
           node-version: 24
           registry-url: https://npm.pkg.github.com
           scope: '@xandout'
-      - run: |
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish libra-harness to GitHub Packages (INSTANT)
+        run: |
           VERSION="${{ env.VERSION }}"
-          if npm view "@xandout/libra-harness@${VERSION}" version 2>/dev/null | grep -q "$VERSION"; then
+          if npm view "@xandout/libra-harness@${VERSION}" --registry=https://npm.pkg.github.com version 2>/dev/null | grep -q "$VERSION"; then
             echo "@xandout/libra-harness@${VERSION} already published on GitHub Packages. Skipping."
           else
-            npm publish --access public || true
+            npm publish --registry=https://npm.pkg.github.com --access public || true
           fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish libra-code to GitHub Packages (INSTANT)
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          registry-url: https://npm.pkg.github.com
-          scope: '@xandout'
-      - run: |
+        run: |
           cd extras/libra-code
           VERSION="${{ env.VERSION }}"
           node -e "
@@ -176,22 +175,26 @@ jobs:
             pkg.dependencies['@xandout/libra-harness'] = '^' + process.env.VERSION;
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
-          if npm view "@xandout/libra-code@${VERSION}" version 2>/dev/null | grep -q "$VERSION"; then
+          if npm view "@xandout/libra-code@${VERSION}" --registry=https://npm.pkg.github.com version 2>/dev/null | grep -q "$VERSION"; then
             echo "@xandout/libra-code@${VERSION} already published on GitHub Packages. Skipping."
           else
-            npm publish --access public || true
+            npm publish --registry=https://npm.pkg.github.com --access public || true
           fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # ── Slow public npm publishing tasks run LAST ──
 
-      - name: Publish libra-harness to public npm
+      - name: Setup Node for public npm
         uses: actions/setup-node@v4
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-      - run: |
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish libra-harness to public npm
+        run: |
           VERSION="${{ env.VERSION }}"
           if npm view "@xandout/libra-harness@${VERSION}" version 2>/dev/null | grep -q "$VERSION"; then
             echo "@xandout/libra-harness@${VERSION} already published on npm. Skipping."
@@ -217,11 +220,7 @@ jobs:
           exit 1
 
       - name: Build and publish libra-code to public npm
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          registry-url: https://registry.npmjs.org
-      - run: |
+        run: |
           cd extras/libra-code
           pnpm build
           VERSION="${{ env.VERSION }}"
