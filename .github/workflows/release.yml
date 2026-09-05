@@ -96,16 +96,18 @@ jobs:
           echo "Selected VERSION=$VERSION"
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
-          # Set package.json versions
+          # Set package.json versions and rewrite workspace dependency for distribution
           VERSION="$VERSION" node -e "
             const fs = require('fs');
             const ver = process.env.VERSION;
+
             const p1 = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
             p1.version = ver;
             fs.writeFileSync('package.json', JSON.stringify(p1, null, 2) + '\n');
 
             const p2 = JSON.parse(fs.readFileSync('extras/libra-code/package.json', 'utf-8'));
             p2.version = ver;
+            p2.dependencies['@xandout/libra-harness'] = '^' + ver;
             fs.writeFileSync('extras/libra-code/package.json', JSON.stringify(p2, null, 2) + '\n');
           "
 
@@ -116,13 +118,13 @@ jobs:
       - name: Push version tags
         run: git push --follow-tags
 
-      - name: Build release tarballs
+      - name: Build release tarballs (.tgz)
         run: |
           pnpm build
           npm pack
           cd extras/libra-code && pnpm build && npm pack && mv *.tgz ../.. && cd ../..
 
-      - name: Create GitHub release with tarball assets
+      - name: Create GitHub release with tarball assets (INSTANT)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.VERSION }}
@@ -131,7 +133,7 @@ jobs:
             *.tgz
           generate_release_notes: true
 
-      - name: Publish libra-harness to GitHub Packages (Instant)
+      - name: Publish libra-harness to GitHub Packages (INSTANT)
         uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -146,6 +148,25 @@ jobs:
           fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish libra-code to GitHub Packages (INSTANT)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://npm.pkg.github.com
+          scope: '@xandout'
+      - run: |
+          cd extras/libra-code
+          VERSION="${{ env.VERSION }}"
+          if npm view "@xandout/libra-code@${VERSION}" version 2>/dev/null | grep -q "$VERSION"; then
+            echo "@xandout/libra-code@${VERSION} already published on GitHub Packages. Skipping."
+          else
+            npm publish --access public || true
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Slow public npm publishing tasks run LAST ──
 
       - name: Publish libra-harness to public npm
         uses: actions/setup-node@v4
@@ -178,16 +199,14 @@ jobs:
           exit 1
 
       - name: Build and publish libra-code to public npm
-        run: |
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: |
           cd extras/libra-code
           pnpm build
           VERSION="${{ env.VERSION }}"
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
-            pkg.dependencies['@xandout/libra-harness'] = '^' + process.env.VERSION;
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
           if npm view "@xandout/libra-code@${VERSION}" version 2>/dev/null | grep -q "$VERSION"; then
             echo "@xandout/libra-code@${VERSION} already published on npm. Skipping."
           else
@@ -196,20 +215,3 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ env.VERSION }}
-
-      - name: Publish libra-code to GitHub Packages (Instant)
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          registry-url: https://npm.pkg.github.com
-          scope: '@xandout'
-      - run: |
-          cd extras/libra-code
-          VERSION="${{ env.VERSION }}"
-          if npm view "@xandout/libra-code@${VERSION}" version 2>/dev/null | grep -q "$VERSION"; then
-            echo "@xandout/libra-code@${VERSION} already published on GitHub Packages. Skipping."
-          else
-            npm publish --access public || true
-          fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
