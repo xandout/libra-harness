@@ -925,6 +925,14 @@ async function runStdout(
     } else {
       process.stdout.write('\n');
     }
+
+    if (result.finishReason === 'error' && result.metadata?.error) {
+      const err = result.metadata.error as any;
+      process.stderr.write(`\n[agent error] ${err?.message || String(err)}\n`);
+      if (err?.stack) {
+        process.stderr.write(`${err.stack}\n`);
+      }
+    }
   } finally {
     lockManager.release(sessionKey);
   }

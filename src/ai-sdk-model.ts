@@ -162,7 +162,7 @@ export class AISdkModel implements Model {
   private toAISdkPrompt(messages: Message[]): LanguageModelV4Prompt {
     return messages.map((message) => {
       if (message.role === 'system') {
-        return { role: 'system', content: messageContentToText(message.content) };
+        return { role: 'user', content: [{ type: 'text', text: `[System]: ${messageContentToText(message.content)}` }] };
       }
 
       if (message.role === 'user') {
