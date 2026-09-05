@@ -109,10 +109,32 @@ Commands:
   }
 
   async function getQuad(selector) {
-    const nodeIds = await client.send('DOM.performSearch', { query: selector, includeUserAgentShadowDOM: true });
+    await client.send('DOM.enable');
+    
+    // Support "text=..." pseudo-selector by converting to XPath
+    let query = selector;
+    if (selector.startsWith('text=')) {
+      const text = selector.substring(5).replace(/'/g, "\\'");
+      query = `//*[contains(text(), '${text}')]`;
+    }
+
+    const nodeIds = await client.send('DOM.performSearch', { query, includeUserAgentShadowDOM: true });
     if (nodeIds.searchCount === 0) throw new Error(`Element not found: ${selector}`);
     const results = await client.send('DOM.getSearchResults', { searchId: nodeIds.searchId, fromIndex: 0, toIndex: 1 });
     const nodeId = results.nodeIds[0];
+    
+    // Scroll element into view using JS to ensure it's clickable and not hidden by banners
+    const { object } = await client.send('DOM.resolveNode', { nodeId });
+    if (object && object.objectId) {
+      await client.send('Runtime.callFunctionOn', {
+        objectId: object.objectId,
+        functionDeclaration: "function() { this.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' }); }",
+        awaitPromise: true
+      });
+      // Give layout a tiny moment to settle
+      await new Promise(r => setTimeout(r, 50));
+    }
+
     const { model } = await client.send('DOM.getBoxModel', { nodeId });
     return model;
   }
@@ -193,19 +215,29 @@ Commands:
       const selector = args[1];
       if (!selector) throw new Error('wait-for requires a selector');
       
+      let query = selector;
+      if (selector.startsWith('text=')) {
+        const text = selector.substring(5).replace(/'/g, "\\'");
+        query = `//*[contains(text(), '${text}')]`;
+      }
+      
       const timeout = 10000;
       const start = Date.now();
+      let found = false;
+      await client.send('DOM.enable');
+      
       while (Date.now() - start < timeout) {
         try {
-          const res = await evalJs(`document.querySelector("${selector.replace(/"/g, '\\"')}") !== null`);
-          if (res.value) {
+          const nodeIds = await client.send('DOM.performSearch', { query, includeUserAgentShadowDOM: true });
+          if (nodeIds.searchCount > 0) {
             console.log(`Found ${selector}`);
+            found = true;
             break;
           }
         } catch (e) {}
         await new Promise(r => setTimeout(r, 200));
       }
-      if (Date.now() - start >= timeout) {
+      if (!found) {
         throw new Error(`Timeout waiting for ${selector}`);
       }
 
