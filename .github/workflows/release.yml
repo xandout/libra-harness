@@ -72,7 +72,7 @@ jobs:
             }
           }
 
-          let nextPatch = patch;
+          let nextPatch = patch + 1;
           let targetVer = `${major}.${minor}.${nextPatch}`;
 
           while (true) {
@@ -112,8 +112,10 @@ jobs:
           "
 
           git add package.json extras/libra-code/package.json
-          git commit -m "chore: release v${VERSION}"
-          git tag "v${VERSION}"
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: release v${VERSION}"
+          fi
+          git tag -f "v${VERSION}"
 
       - name: Push version tags
         run: git push --follow-tags
