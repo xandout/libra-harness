@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# start-browser — Launch headed Chrome on :99 with persistent profile and remote debugging
+set -euo pipefail
+
+DISPLAY="${DISPLAY:-:99}"
+export DISPLAY
+
+PROFILE_DIR="${CHROME_PROFILE_DIR:-/home/node/chrome-profile}"
+DEBUG_PORT="${CHROME_DEBUG_PORT:-18800}"
+
+if pgrep -f "remote-debugging-port=$DEBUG_PORT" >/dev/null; then
+  echo "Chrome already running on port $DEBUG_PORT"
+  exit 0
+fi
+
+mkdir -p "$PROFILE_DIR"
+
+google-chrome \
+  --remote-debugging-port="$DEBUG_PORT" \
+  --user-data-dir="$PROFILE_DIR" \
+  --no-first-run \
+  --no-default-browser-check \
+  --disable-sync \
+  --disable-background-networking \
+  --disable-component-update \
+  --disable-features=Translate,MediaRouter \
+  --disable-session-crashed-bubble \
+  --hide-crash-restore-bubble \
+  --password-store=basic \
+  --no-sandbox \
+  --disable-dev-shm-usage \
+  --no-proxy-server \
+  --disable-blink-features=AutomationControlled \
+  --user-agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36" \
+  --window-size=1920,1080 \
+  about:blank >/tmp/chrome.log 2>&1 &
+
+sleep 1
+echo "Chrome started on display $DISPLAY with debug port $DEBUG_PORT"

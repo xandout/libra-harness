@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# screenshot — Capture X11 display :99 or render a web URL via Chrome
+# screenshot — Capture X11 display :99 or render a web URL via headed Chrome
 #
 # Usage:
 #   screenshot [output_path.png] [url_or_screen]
 #
 # Examples:
-#   screenshot                                # Saves full display to /tmp/screenshot_<timestamp>.png
+#   screenshot                                # Saves full display :99 to /tmp/screenshot_<timestamp>.png
 #   screenshot /tmp/my-page.png https://google.com
 #   screenshot /tmp/desktop.png screen
 
@@ -20,18 +20,33 @@ TARGET="${2:-}"
 mkdir -p "$(dirname "$OUTPUT")"
 
 if [ -n "$TARGET" ] && [[ "$TARGET" =~ ^https?:// ]]; then
-  # Webpage screenshot via headless Chrome
-  google-chrome --headless --no-sandbox --disable-gpu --screenshot="$OUTPUT" --window-size=1920,1080 "$TARGET" >/dev/null 2>&1
-else
-  # Virtual X11 display screenshot via ImageMagick import or xwd
-  if command -v import >/dev/null 2>&1; then
-    import -display "$DISPLAY" -window root "$OUTPUT"
-  elif command -v xwd >/dev/null 2>&1; then
-    xwd -display "$DISPLAY" -root -silent | convert - "$OUTPUT"
-  else
-    echo "Error: neither 'import' (ImageMagick) nor 'xwd' is installed" >&2
-    exit 1
+  # Ensure headed Chrome is running on :99
+  if ! pgrep -f "google-chrome" >/dev/null; then
+    if command -v start-browser >/dev/null 2>&1; then
+      start-browser
+      sleep 2
+    fi
   fi
+
+  # Navigate Chrome window on :99 to target URL
+  google-chrome \
+    --user-data-dir="${CHROME_PROFILE_DIR:-/home/node/chrome-profile}" \
+    --no-sandbox \
+    --disable-dev-shm-usage \
+    "$TARGET" >/dev/null 2>&1 &
+
+  # Wait briefly for page render on screen
+  sleep 3
+fi
+
+# Capture the visible X11 display :99 so you see exactly what is on the screen in VNC
+if command -v import >/dev/null 2>&1; then
+  import -display "$DISPLAY" -window root "$OUTPUT"
+elif command -v xwd >/dev/null 2>&1; then
+  xwd -display "$DISPLAY" -root -silent | convert - "$OUTPUT"
+else
+  echo "Error: neither 'import' (ImageMagick) nor 'xwd' is installed" >&2
+  exit 1
 fi
 
 if [ -f "$OUTPUT" ]; then
