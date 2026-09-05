@@ -107,6 +107,7 @@ jobs:
 
             const p2 = JSON.parse(fs.readFileSync('extras/libra-code/package.json', 'utf-8'));
             p2.version = ver;
+            p2.dependencies['@xandout/libra-harness'] = 'link:../..';
             fs.writeFileSync('extras/libra-code/package.json', JSON.stringify(p2, null, 2) + '\n');
           "
 
