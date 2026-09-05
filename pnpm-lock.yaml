@@ -157,6 +157,28 @@ importers:
         specifier: ^7.0.2
         version: 7.0.2
 
+  examples/slack-libra-code:
+    dependencies:
+      '@slack/bolt':
+        specifier: ^5.0.0
+        version: 5.0.0(@types/express@5.0.6)(supports-color@7.2.0)(undici@7.29.0)
+      '@slack/web-api':
+        specifier: ^8.0.0
+        version: 8.0.0
+      '@xandout/libra-harness':
+        specifier: link:../..
+        version: link:../..
+    devDependencies:
+      '@types/node':
+        specifier: ^26.2.0
+        version: 26.2.0
+      tsx:
+        specifier: ^4.19.0
+        version: 4.23.12
+      typescript:
+        specifier: ^5.5.0
+        version: 5.9.3
+
   examples/streaming:
     dependencies:
       '@xandout/libra-harness':
