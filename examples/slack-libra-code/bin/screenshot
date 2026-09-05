@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# screenshot — Capture X11 display :99 or render a web URL via Chrome
+#
+# Usage:
+#   screenshot [output_path.png] [url_or_screen]
+#
+# Examples:
+#   screenshot                                # Saves full display to /tmp/screenshot_<timestamp>.png
+#   screenshot /tmp/my-page.png https://google.com
+#   screenshot /tmp/desktop.png screen
+
+set -euo pipefail
+
+DISPLAY="${DISPLAY:-:99}"
+export DISPLAY
+
+OUTPUT="${1:-/tmp/screenshot_$(date +%s).png}"
+TARGET="${2:-}"
+
+mkdir -p "$(dirname "$OUTPUT")"
+
+if [ -n "$TARGET" ] && [[ "$TARGET" =~ ^https?:// ]]; then
+  # Webpage screenshot via headless Chrome
+  google-chrome --headless --no-sandbox --disable-gpu --screenshot="$OUTPUT" --window-size=1920,1080 "$TARGET" >/dev/null 2>&1
+else
+  # Virtual X11 display screenshot via ImageMagick import or xwd
+  if command -v import >/dev/null 2>&1; then
+    import -display "$DISPLAY" -window root "$OUTPUT"
+  elif command -v xwd >/dev/null 2>&1; then
+    xwd -display "$DISPLAY" -root -silent | convert - "$OUTPUT"
+  else
+    echo "Error: neither 'import' (ImageMagick) nor 'xwd' is installed" >&2
+    exit 1
+  fi
+fi
+
+if [ -f "$OUTPUT" ]; then
+  echo "$OUTPUT"
+else
+  echo "Error: failed to create screenshot at $OUTPUT" >&2
+  exit 1
+fi

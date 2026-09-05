@@ -9,26 +9,25 @@ A simple Slack Socket Mode bot that forwards incoming messages to `lc` (the libr
 - **Disk Session Persistence**: `lc` maintains continuous multi-turn conversation memory on disk (`~/.libra/sessions/`).
 - **Slack Reactions**: Shows `:thinking_face:` while `lc` is working, `:white_check_mark:` when completed, and `:x:` on error.
 - **Threaded Execution**: Replies directly within threads in channels or DMs.
-- **In-flight Turn Control**: Supports `/halt` slash command to stop running turns.
+- **In-flight Turn Control**: Supports `/oc halt [reason]` to stop and `/oc steer <msg>` to redirect mid-turn.
+- **Built-in Browser & Slack Tools**: Gives `lc` access to `screenshot`, `slack-upload`, `slack-screenshot`, `slack-post`, and `slack-read` directly in PATH.
 
-## Setup
+## Slash Commands
 
-1. Create a Slack App at https://api.slack.com/apps:
-   - **Socket Mode**: Enable Socket Mode (Settings → Socket Mode).
-   - **Bot Token Scopes** (OAuth & Permissions):
-     - `chat:write`
-     - `app_mentions:read`
-     - `im:history`
-     - `im:read`
-     - `im:write`
-     - `reactions:write`
-     - `commands`
-   - **Event Subscriptions**:
-     - `app_mention`
-     - `message.im`
-     - `message.channels` (optional, for channel monitoring)
-   - **Slash Commands** (optional):
-     - `/halt` — Halt currently running `lc` execution
+Register `/oc` in your Slack App (Features → Slash Commands):
+- `/oc <prompt>` — Execute a code agent turn directly
+- `/oc steer <message>` — Steer / redirect an in-flight turn
+- `/oc halt [reason]` — Stop an in-flight turn immediately
+- `/oc status` — Show agent status, CWD, active turn, and configured model
+
+## Built-in Tools Available to `lc`
+
+When `lc` runs in the container, it has access to:
+- `screenshot [output.png] [url]` — Take a full screenshot of the X11 virtual display (`:99`) or render a web URL via Chrome
+- `slack-upload <file> [comment]` — Upload any image or file directly into the active Slack thread
+- `slack-screenshot [url] [comment]` — Capture a screenshot and post it to Slack in one step
+- `slack-post <message>` — Post an additional message or Block Kit JSON to the Slack thread
+- `slack-read` — Read recent messages from the current channel or thread
 
 2. Install the app to your workspace to generate:
    - **Bot User OAuth Token** (`xoxb-...`) → `SLACK_BOT_TOKEN`

@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { App } from '@slack/bolt';
@@ -47,6 +47,7 @@ if (!botToken || !appToken) {
 
 const targetChannel = process.env.SLACK_CHANNEL?.replace(/^#/, '').trim();
 const lcCwd = resolve(process.env.LC_CWD || process.cwd());
+const libraHome = process.env.LIBRA_HOME || resolve(lcCwd, '.libra');
 const lcSource = process.env.LC_SOURCE?.trim();
 
 // ── LC command resolver ──────────────────────────────────────────────
@@ -129,7 +130,7 @@ function resolveLcCommand(source?: string): ResolvedCommand {
     }
   }
 
-  // 3. npm package name (e.g. @xandout/libra-code, or source provided that isn't a local path)
+  // 3. npm package name (e.g. @xandout/libra-code)
   if (source) {
     return {
       command: 'npx',
@@ -150,6 +151,7 @@ const resolvedLc = resolveLcCommand(lcSource);
 console.log(`[lc] Resolved command: ${resolvedLc.command} ${resolvedLc.args.join(' ')}`);
 console.log(`[lc] Source: ${resolvedLc.description}`);
 console.log(`[lc] Working directory: ${lcCwd}`);
+console.log(`[lc] Libra home: ${libraHome}`);
 
 // ── Slack Bolt App ───────────────────────────────────────────────────
 const app = new App({
@@ -160,9 +162,44 @@ const app = new App({
 
 let botUserId: string | undefined;
 
-// In-flight execution tracker: sessionKey -> ChildProcess
-const inFlight = new Map<string, { proc: ChildProcess; channelId: string; threadTs?: string }>();
+// In-flight execution tracker
+interface InFlightTurn {
+  proc: ChildProcess;
+  channelId: string;
+  threadTs?: string;
+  steer: (text: string) => void;
+  halt: (reason?: string) => void;
+}
+
+const inFlight = new Map<string, InFlightTurn>();
 const activeThreads = new Set<string>();
+
+// ── Helpers for Turn Steer & Halt via Journal Commands ───────────────
+function getActiveTurnId(cwd: string, homeDir: string): string | null {
+  const sessionKey = 'cwd_' + cwd.replace(/[^a-zA-Z0-9]/g, '_');
+  const lockFile = join(homeDir, 'locks', `${sessionKey}.lock`);
+  try {
+    if (existsSync(lockFile)) {
+      const lock = JSON.parse(readFileSync(lockFile, 'utf-8'));
+      return lock.turnId || null;
+    }
+  } catch {}
+  return null;
+}
+
+function writeTurnCommand(
+  homeDir: string,
+  turnId: string,
+  cmd: { type: 'steer'; text: string } | { type: 'halt'; reason: string },
+): void {
+  const turnsDir = join(homeDir, 'turns');
+  const cmdFile = join(turnsDir, `${turnId}.cmd.jsonl`);
+  try {
+    appendFileSync(cmdFile, JSON.stringify(cmd) + '\n', 'utf-8');
+  } catch (err) {
+    console.error(`[turn] Failed to write command to ${cmdFile}:`, err);
+  }
+}
 
 // ── Slack reaction helpers ───────────────────────────────────────────
 async function addReaction(client: WebClient, channel: string, timestamp: string, name: string): Promise<void> {
@@ -228,18 +265,66 @@ function sessionKeyFor(channel: string, threadTs?: string): string {
   return threadTs ? `${channel}:${threadTs}` : channel;
 }
 
-// ── Run LC subprocess ────────────────────────────────────────────────
-async function executeLc(prompt: string, sessionKey: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+// ── Run LC subprocess with Steer & Halt integration ──────────────────
+async function executeLc(
+  prompt: string,
+  sessionKey: string,
+  channelId: string,
+  threadTs?: string,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolvePromise) => {
-    const fullArgs = [...resolvedLc.args, prompt];
+    // Make built-in bin directory available in PATH
+    const binDir = resolve(new URL('./bin', import.meta.url).pathname);
+    const existingPath = process.env.PATH || '';
+    const augmentedPath = existsSync(binDir) ? `${binDir}:${existingPath}` : existingPath;
+
+    // Provide guidance on available Slack and browser tools directly to lc
+    const promptWithTools = `[Available Shell Tools:
+- screenshot [output.png] [url]: Take a screenshot of virtual desktop (:99) or a URL via headless Chrome
+- slack-upload <file> [comment]: Upload any file or image directly into this Slack thread
+- slack-screenshot [url] [comment]: Take a screenshot and upload directly to this Slack thread in one step
+- slack-post <message>: Post an additional update to this Slack thread
+- slack-read: Read recent messages from this channel/thread]
+
+${prompt}`;
+
+    const fullArgs = [...resolvedLc.args, promptWithTools];
     const proc = spawn(resolvedLc.command, fullArgs, {
       cwd: lcCwd,
       env: {
         ...process.env,
+        PATH: augmentedPath,
+        LC_CWD: lcCwd,
+        LIBRA_HOME: libraHome,
+        SLACK_BOT_TOKEN: botToken,
+        SLACK_CHANNEL_ID: channelId,
+        SLACK_THREAD_TS: threadTs || '',
+        DISPLAY: process.env.DISPLAY || ':99',
       },
     });
 
-    inFlight.set(sessionKey, { proc, channelId: sessionKey.split(':')[0], threadTs: sessionKey.split(':')[1] });
+    const steer = (text: string) => {
+      const turnId = getActiveTurnId(lcCwd, libraHome);
+      if (turnId) {
+        writeTurnCommand(libraHome, turnId, { type: 'steer', text });
+        console.log(`[turn] Steer injected into turn ${turnId}: "${text.slice(0, 50)}"`);
+      } else {
+        console.warn(`[turn] Could not find active turnId to steer in ${lcCwd}`);
+      }
+    };
+
+    const halt = (reason?: string) => {
+      const turnId = getActiveTurnId(lcCwd, libraHome);
+      if (turnId) {
+        writeTurnCommand(libraHome, turnId, { type: 'halt', reason: reason || 'halted' });
+        console.log(`[turn] Halt command written for turn ${turnId}`);
+      }
+      try {
+        proc.kill('SIGINT');
+      } catch {}
+    };
+
+    inFlight.set(sessionKey, { proc, channelId, threadTs, steer, halt });
 
     let stdout = '';
     let stderr = '';
@@ -264,9 +349,50 @@ async function executeLc(prompt: string, sessionKey: string): Promise<{ stdout: 
   });
 }
 
-// ── Slack event listeners ────────────────────────────────────────────
+// ── Turn runner helper ───────────────────────────────────────────────
+async function runTurn(opts: {
+  channelId: string;
+  threadTs?: string;
+  messageTs: string;
+  cleanedText: string;
+  client: WebClient;
+  isDm: boolean;
+}): Promise<void> {
+  const { channelId, threadTs, messageTs, cleanedText, client, isDm } = opts;
+  const sessionKey = sessionKeyFor(channelId, isDm ? undefined : (threadTs || messageTs));
+  const replyThreadTs = isDm ? undefined : (threadTs || messageTs);
 
-app.message(async ({ message, client, logger }) => {
+  // If already running for this session, STEER it!
+  if (inFlight.has(sessionKey)) {
+    const active = inFlight.get(sessionKey)!;
+    await addReaction(client, channelId, messageTs, 'eyes');
+    active.steer(cleanedText);
+    console.log(`[slack] Steered running turn for [${sessionKey}] with: "${cleanedText.slice(0, 50)}"`);
+    return;
+  }
+
+  // Mark thinking
+  await addReaction(client, channelId, messageTs, 'thinking_face');
+  console.log(`[slack] Running lc for [${sessionKey}]: "${cleanedText.slice(0, 60)}"`);
+
+  const { stdout, stderr, exitCode } = await executeLc(cleanedText, sessionKey, channelId, replyThreadTs);
+
+  if (exitCode === 0) {
+    await swapReaction(client, channelId, messageTs, 'thinking_face', 'white_check_mark');
+    const reply = stdout.trim() || 'Done (no text output).';
+    await postMessage(client, channelId, reply, replyThreadTs);
+    if (replyThreadTs) activeThreads.add(replyThreadTs);
+    console.log(`[slack] lc completed successfully for [${sessionKey}]`);
+  } else {
+    await swapReaction(client, channelId, messageTs, 'thinking_face', 'x');
+    const errorDetails = stderr.trim() || stdout.trim() || `Process exited with code ${exitCode}`;
+    await postMessage(client, channelId, `:x: **lc error**:\n\`\`\`\n${errorDetails.slice(-2000)}\n\`\`\``, replyThreadTs);
+    console.error(`[slack] lc failed with exit code ${exitCode} for [${sessionKey}]`);
+  }
+}
+
+// ── Slack message listener ───────────────────────────────────────────
+app.message(async ({ message, client }) => {
   // Ignore unsupported subtypes
   const subtype = 'subtype' in message ? String(message.subtype || '') : '';
   if (subtype && subtype !== 'file_share') return;
@@ -306,55 +432,121 @@ app.message(async ({ message, client, logger }) => {
     return;
   }
 
-  const sessionKey = sessionKeyFor(channelId, isDm ? undefined : (threadTs || messageTs));
-  const replyThreadTs = isDm ? undefined : (threadTs || messageTs);
+  await runTurn({
+    channelId,
+    threadTs: threadTs || undefined,
+    messageTs,
+    cleanedText,
+    client,
+    isDm,
+  });
+});
 
-  // If already running for this session, notify user
-  if (inFlight.has(sessionKey)) {
-    await addReaction(client, channelId, messageTs, 'hourglass_flowing_sand');
-    await postMessage(client, channelId, 'An `lc` task is already running in this thread. Please wait or use `/halt` to stop it.', replyThreadTs);
+// ── Slash Command: /oc ───────────────────────────────────────────────
+// OpenClaw style slash command supporting halt, steer, status, and prompts
+app.command('/oc', async ({ command, ack, respond, client }) => {
+  await ack();
+
+  const rawText = (command.text || '').trim();
+  const channelId = command.channel_id;
+
+  // 1. Halt: /oc halt [reason] or /oc stop [reason]
+  const haltMatch = rawText.match(/^(halt|stop|cancel)(?:\s+(.*))?$/i);
+  if (haltMatch) {
+    const reason = haltMatch[2]?.trim();
+    let halted = 0;
+    for (const [key, item] of inFlight.entries()) {
+      if (item.channelId === channelId) {
+        item.halt(reason);
+        halted++;
+        inFlight.delete(key);
+      }
+    }
+    if (halted > 0) {
+      await respond({ text: `⏹ Halted ${halted} active \`lc\` turn(s)${reason ? ` (reason: ${reason})` : ''}.`, response_type: 'ephemeral' });
+      await postMessage(client, channelId, `⏹ *Turn halted by <@${command.user_id}>*${reason ? `: ${reason}` : ''}`);
+    } else {
+      await respond({ text: 'No active `lc` tasks running in this channel.', response_type: 'ephemeral' });
+    }
     return;
   }
 
-  // Mark thinking
-  await addReaction(client, channelId, messageTs, 'thinking_face');
-  console.log(`[slack] Running lc for [${sessionKey}]: "${cleanedText.slice(0, 60)}"`);
+  // 2. Steer: /oc steer <message>
+  const steerMatch = rawText.match(/^steer(?:\s+(.*))?$/is);
+  if (steerMatch) {
+    const steerText = steerMatch[1]?.trim();
+    if (!steerText) {
+      await respond({ text: 'Usage: `/oc steer <message to inject into active turn>`', response_type: 'ephemeral' });
+      return;
+    }
 
-  const { stdout, stderr, exitCode } = await executeLc(cleanedText, sessionKey);
+    let steered = false;
+    for (const [key, item] of inFlight.entries()) {
+      if (item.channelId === channelId) {
+        item.steer(steerText);
+        steered = true;
+        await respond({ text: `↪️ Steered active turn with: "${steerText}"`, response_type: 'ephemeral' });
+        await postMessage(client, channelId, `↪️ *Steering injected by <@${command.user_id}>*: ${steerText}`, item.threadTs);
+        break;
+      }
+    }
 
-  if (exitCode === 0) {
-    await swapReaction(client, channelId, messageTs, 'thinking_face', 'white_check_mark');
-    const reply = stdout.trim() || 'Done (no text output).';
-    await postMessage(client, channelId, reply, replyThreadTs);
-    if (replyThreadTs) activeThreads.add(replyThreadTs);
-    console.log(`[slack] lc completed successfully for [${sessionKey}]`);
-  } else {
-    await swapReaction(client, channelId, messageTs, 'thinking_face', 'x');
-    const errorDetails = stderr.trim() || stdout.trim() || `Process exited with code ${exitCode}`;
-    await postMessage(client, channelId, `:x: **lc error**:\n\`\`\`\n${errorDetails.slice(-2000)}\n\`\`\``, replyThreadTs);
-    console.error(`[slack] lc failed with exit code ${exitCode} for [${sessionKey}]`);
+    if (!steered) {
+      await respond({ text: 'No active turn found to steer in this channel. Run a task first, or omit "steer" to run a prompt.', response_type: 'ephemeral' });
+    }
+    return;
   }
+
+  // 3. Status: /oc status
+  if (rawText.toLowerCase() === 'status') {
+    const activeList = Array.from(inFlight.keys());
+    const statusMsg = [
+      `*Slack-Libra-Code Status*`,
+      `• Active Turns: ${activeList.length ? activeList.join(', ') : 'None (idle)'}`,
+      `• Target CWD: \`${lcCwd}\``,
+      `• Model: \`${process.env.MODEL || process.env.LIBRA_MODEL || 'default'}\``,
+      `• Bot User: \`<@${botUserId}>\``,
+    ].join('\n');
+    await respond({ text: statusMsg, response_type: 'ephemeral' });
+    return;
+  }
+
+  // 4. Usage info if empty
+  if (!rawText) {
+    await respond({
+      text: 'Usage:\n• `/oc <prompt>` — Run a code agent turn\n• `/oc steer <message>` — Steer running turn\n• `/oc halt [reason]` — Stop running turn\n• `/oc status` — Check agent status',
+      response_type: 'ephemeral',
+    });
+    return;
+  }
+
+  // 5. Default: /oc <prompt>
+  await respond({ text: `⏳ Running \`lc\` for: "${rawText.slice(0, 60)}"`, response_type: 'ephemeral' });
+  await runTurn({
+    channelId,
+    cleanedText: rawText,
+    client,
+    messageTs: String(Date.now() / 1000),
+    isDm: channelId.startsWith('D'),
+  });
 });
 
-// ── Slash Command: /halt ─────────────────────────────────────────────
-app.command('/halt', async ({ command, ack, respond }) => {
+// ── Slash Command: /halt (legacy alias) ──────────────────────────────
+app.command('/halt', async ({ command, ack, respond, client }) => {
   await ack();
-
   const channelId = command.channel_id;
-  // Look for any active process in this channel
-  let haltedCount = 0;
+  let halted = 0;
   for (const [key, item] of inFlight.entries()) {
     if (item.channelId === channelId) {
-      try {
-        item.proc.kill('SIGINT');
-        haltedCount++;
-      } catch {}
+      item.halt('user requested /halt');
+      halted++;
       inFlight.delete(key);
     }
   }
 
-  if (haltedCount > 0) {
-    await respond({ text: `⏹ Halted ${haltedCount} running \`lc\` process(es).`, response_type: 'ephemeral' });
+  if (halted > 0) {
+    await respond({ text: `⏹ Halted ${halted} running \`lc\` process(es).`, response_type: 'ephemeral' });
+    await postMessage(client, channelId, `⏹ *Turn halted by <@${command.user_id}>*`);
   } else {
     await respond({ text: 'No active `lc` tasks running in this channel.', response_type: 'ephemeral' });
   }
@@ -371,7 +563,7 @@ app.command('/halt', async ({ command, ack, respond }) => {
     console.log(`  Bot User ID: ${botUserId}`);
     console.log(`  Target CWD:  ${lcCwd}`);
     console.log(`  Command:     ${resolvedLc.command} ${resolvedLc.args.join(' ')}`);
-    console.log('  Listening for DMs and @mentions on Slack...');
+    console.log('  Listening for DMs, @mentions, and /oc commands on Slack...');
   } catch (err) {
     console.error('Failed to start Slack app:', err);
     process.exit(1);

@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# slack-screenshot — Capture a screenshot and upload directly to Slack in one step
+#
+# Usage:
+#   slack-screenshot [url_or_screen] [comment]
+#
+# Examples:
+#   slack-screenshot                                  # Captures display :99 and uploads to active Slack thread
+#   slack-screenshot https://hibriten.app "Current app dashboard"
+
+set -euo pipefail
+
+TARGET="${1:-}"
+COMMENT="${2:-Screenshot}"
+
+TMP_FILE="/tmp/screenshot_$(date +%s).png"
+
+# Take screenshot
+screenshot "$TMP_FILE" "$TARGET" >/dev/null
+
+# Upload to Slack
+slack-upload "$TMP_FILE" "$COMMENT"
+
+# Clean up
+rm -f "$TMP_FILE"

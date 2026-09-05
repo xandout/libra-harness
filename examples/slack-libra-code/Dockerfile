@@ -56,6 +56,9 @@ ENV LIBRA_HOME=/home/node/workspace/.libra
 # Prepare directory structure
 RUN mkdir -p /app /home/node/workspace /home/node/hibriten-shared
 
+COPY bin/* /usr/local/bin/
+RUN chmod +x /usr/local/bin/*
+
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

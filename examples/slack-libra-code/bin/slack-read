@@ -1,0 +1,50 @@
+#!/usr/bin/env node
+/**
+ * slack-read — Read recent Slack messages from the current thread or channel.
+ *
+ * Usage:
+ *   slack-read [--channel <id>] [--thread <ts>] [--limit <number>]
+ */
+
+import { WebClient } from '@slack/web-api';
+
+const token = process.env.SLACK_BOT_TOKEN;
+if (!token) {
+  console.error('Error: SLACK_BOT_TOKEN is not set.');
+  process.exit(1);
+}
+
+const client = new WebClient(token);
+
+const args = process.argv.slice(2);
+let channel = process.env.SLACK_CHANNEL_ID;
+let threadTs = process.env.SLACK_THREAD_TS || undefined;
+let limit = 20;
+
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--channel' && args[i + 1]) channel = args[++i];
+  else if (args[i] === '--thread' && args[i + 1]) threadTs = args[++i];
+  else if (args[i] === '--limit' && args[i + 1]) limit = parseInt(args[++i], 10);
+}
+
+if (!channel) {
+  console.error('Error: Slack channel not specified and SLACK_CHANNEL_ID is not set.');
+  process.exit(1);
+}
+
+try {
+  if (threadTs) {
+    const res = await client.conversations.replies({ channel, ts: threadTs, limit });
+    for (const msg of res.messages || []) {
+      console.log(`[${msg.user || 'bot'} @ ${msg.ts}]: ${msg.text || ''}`);
+    }
+  } else {
+    const res = await client.conversations.history({ channel, limit });
+    for (const msg of res.messages || []) {
+      console.log(`[${msg.user || 'bot'} @ ${msg.ts}]: ${msg.text || ''}`);
+    }
+  }
+} catch (err: any) {
+  console.error('Failed to read Slack conversation:', err.message || err);
+  process.exit(1);
+}

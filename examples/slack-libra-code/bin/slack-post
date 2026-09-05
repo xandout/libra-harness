@@ -1,0 +1,56 @@
+#!/usr/bin/env node
+/**
+ * slack-post — Post a text or block message to Slack as the bot.
+ *
+ * Usage:
+ *   slack-post <message> [--channel <id>] [--thread <ts>]
+ */
+
+import { WebClient } from '@slack/web-api';
+
+const token = process.env.SLACK_BOT_TOKEN;
+if (!token) {
+  console.error('Error: SLACK_BOT_TOKEN is not set.');
+  process.exit(1);
+}
+
+const client = new WebClient(token);
+
+const args = process.argv.slice(2);
+if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
+  console.log('Usage: slack-post <message> [--channel <id>] [--thread <ts>]');
+  process.exit(0);
+}
+
+let text = '';
+let channel = process.env.SLACK_CHANNEL_ID;
+let threadTs = process.env.SLACK_THREAD_TS || undefined;
+
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--channel' && args[i + 1]) {
+    channel = args[++i];
+  } else if (args[i] === '--thread' && args[i + 1]) {
+    threadTs = args[++i];
+  } else if (!text) {
+    text = args[i];
+  } else {
+    text += ' ' + args[i];
+  }
+}
+
+if (!channel) {
+  console.error('Error: Slack channel not specified and SLACK_CHANNEL_ID is not set.');
+  process.exit(1);
+}
+
+try {
+  await client.chat.postMessage({
+    channel,
+    text,
+    thread_ts: threadTs || undefined,
+  });
+  console.log(`Posted message to Slack (${channel}${threadTs ? ' thread ' + threadTs : ''})`);
+} catch (err: any) {
+  console.error('Failed to post message to Slack:', err.message || err);
+  process.exit(1);
+}

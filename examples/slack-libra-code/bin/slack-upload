@@ -1,0 +1,76 @@
+#!/usr/bin/env node
+/**
+ * slack-upload — Upload a file or image to Slack as the bot.
+ *
+ * Usage:
+ *   slack-upload <file_path> [comment] [--channel <id>] [--thread <ts>]
+ *
+ * Environment:
+ *   SLACK_BOT_TOKEN   — Required bot token
+ *   SLACK_CHANNEL_ID  — Default channel ID (injected by runner)
+ *   SLACK_THREAD_TS   — Default thread timestamp (injected by runner)
+ */
+
+import { WebClient } from '@slack/web-api';
+import { readFileSync, existsSync } from 'node:fs';
+import { basename } from 'node:path';
+
+const token = process.env.SLACK_BOT_TOKEN;
+if (!token) {
+  console.error('Error: SLACK_BOT_TOKEN environment variable is not set.');
+  process.exit(1);
+}
+
+const client = new WebClient(token);
+
+const args = process.argv.slice(2);
+if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
+  console.log('Usage: slack-upload <file_path> [comment] [--channel <id>] [--thread <ts>]');
+  process.exit(0);
+}
+
+let filePath = '';
+let comment = '';
+let channel = process.env.SLACK_CHANNEL_ID;
+let threadTs = process.env.SLACK_THREAD_TS || undefined;
+
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--channel' && args[i + 1]) {
+    channel = args[++i];
+  } else if (args[i] === '--thread' && args[i + 1]) {
+    threadTs = args[++i];
+  } else if (!filePath) {
+    filePath = args[i];
+  } else if (!comment) {
+    comment = args[i];
+  } else {
+    comment += ' ' + args[i];
+  }
+}
+
+if (!filePath || !existsSync(filePath)) {
+  console.error(`Error: File not found: ${filePath}`);
+  process.exit(1);
+}
+
+if (!channel) {
+  console.error('Error: Slack channel not specified and SLACK_CHANNEL_ID is not set.');
+  process.exit(1);
+}
+
+const fileData = readFileSync(filePath);
+const filename = basename(filePath);
+
+try {
+  const result = await client.files.uploadV2({
+    channel_id: channel,
+    thread_ts: threadTs || undefined,
+    file: fileData,
+    filename,
+    initial_comment: comment || undefined,
+  });
+  console.log(`Uploaded ${filename} to Slack (${channel}${threadTs ? ' thread ' + threadTs : ''})`);
+} catch (err: any) {
+  console.error('Failed to upload file to Slack:', err.message || err);
+  process.exit(1);
+}
