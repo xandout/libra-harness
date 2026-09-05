@@ -15,6 +15,10 @@
     "dev": "tsx index.ts"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.36",
+    "@ai-sdk/deepseek": "^3.0.36",
+    "@ai-sdk/google": "^4.0.39",
+    "@ai-sdk/openai": "^4.0.36",
     "@xandout/libra-harness": "link:../..",
     "diff": "^5.2.2",
     "ink": "^5.2.1",
