@@ -4,18 +4,20 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 permissions:
   contents: write
   id-token: write
   packages: write
 
 jobs:
-  harness:
+  release:
     runs-on: ubuntu-latest
     # Skip commits made by the bot (version bumps) to avoid release loops.
     if: github.event.head_commit.author.name != 'github-actions[bot]'
-    outputs:
-      version: ${{ env.VERSION }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -93,34 +95,11 @@ jobs:
           name: v${{ env.VERSION }}
           generate_release_notes: true
 
-  libra-code:
-    runs-on: ubuntu-latest
-    needs: harness
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: main
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          registry-url: https://registry.npmjs.org
-          cache: pnpm
-
-      - run: pnpm install --frozen-lockfile
-
-      - run: pnpm build
-
       - name: Verify harness is published on npm
         run: |
-          VERSION="${{ needs.harness.outputs.version }}"
+          VERSION="${{ env.VERSION }}"
           echo "Waiting for @xandout/libra-harness@${VERSION} to appear on npm..."
-          for i in $(seq 1 30); do
+          for i in $(seq 1 40); do
             if npm view "@xandout/libra-harness@${VERSION}" version 2>/dev/null | grep -q "$VERSION"; then
               echo "Found @xandout/libra-harness@${VERSION} on npm"
               exit 0
@@ -130,6 +109,12 @@ jobs:
           done
           echo "ERROR: @xandout/libra-harness@${VERSION} never appeared on npm"
           exit 1
+
+      - name: Setup node for npm registry publish (libra-code)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
 
       - name: Build and publish libra-code to npm
         run: |
@@ -145,7 +130,7 @@ jobs:
           npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          VERSION: ${{ needs.harness.outputs.version }}
+          VERSION: ${{ env.VERSION }}
 
       - name: Publish libra-code to GitHub Packages
         uses: actions/setup-node@v4
