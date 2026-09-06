@@ -280,7 +280,42 @@ async function runWithTui(
     doRender();
   };
   const doRender = () => {
-    if (!renderFns) return;
+    if (!renderFns) {
+      renderFns = render(
+        <TuiApp
+          messages={displayState.messages}
+          toolActivity={displayState.toolActivity}
+          fileChanges={displayState.fileChanges}
+          todos={displayState.todos}
+          stats={displayState.stats}
+          streamingText={displayState.streamingText}
+          isRunning={displayState.isRunning}
+          onSubmit={(text: string) => { sendPrompt(text); }}
+          onSteer={(text: string) => {
+            if (socketClient) {
+              socketClient.sendCommand({ type: 'steer', text });
+            }
+          }}
+          onHalt={() => {
+            if (socketClient && !haltPressed) {
+              haltPressed = true;
+              socketClient.sendCommand({ type: 'halt', reason: 'user halted' });
+              setTimeout(() => { haltPressed = false; }, 3000);
+            } else if (agentProcess && haltPressed) {
+              try { agentProcess.kill('SIGTERM'); } catch {}
+              haltPressed = false;
+            }
+          }}
+          onExit={() => {
+            socketClient?.disconnect();
+            renderFns?.unmount();
+            process.exit(0);
+          }}
+        />,
+        { exitOnCtrlC: false }
+      );
+      return;
+    }
     renderFns.rerender(
       <TuiApp
         messages={displayState.messages}
@@ -292,18 +327,17 @@ async function runWithTui(
         isRunning={displayState.isRunning}
         onSubmit={(text: string) => { sendPrompt(text); }}
         onSteer={(text: string) => {
-          if (currentJournal) {
-            currentJournal.writeCommand({ type: 'steer', text });
+          if (socketClient) {
+            socketClient.sendCommand({ type: 'steer', text });
           }
         }}
         onHalt={() => {
-          if (currentJournal && !haltPressed) {
+          if (socketClient && !haltPressed) {
             haltPressed = true;
-            currentJournal.writeCommand({ type: 'halt', reason: 'user halted' });
+            socketClient.sendCommand({ type: 'halt', reason: 'user halted' });
             setTimeout(() => { haltPressed = false; }, 3000);
           } else if (agentProcess && haltPressed) {
             try { agentProcess.kill('SIGTERM'); } catch {}
-            lockManager.forceBreak(sessionKey);
             haltPressed = false;
           }
         }}
@@ -472,41 +506,6 @@ async function runWithTui(
     });
   }
 
-  // ── Render the TUI ──
-  const { rerender, unmount } = render(
-    <TuiApp
-      messages={displayState.messages}
-      toolActivity={displayState.toolActivity}
-      fileChanges={displayState.fileChanges}
-      todos={displayState.todos}
-      stats={displayState.stats}
-      streamingText={displayState.streamingText}
-      isRunning={displayState.isRunning}
-      onSubmit={(text: string) => { sendPrompt(text); }}
-      onSteer={(text: string) => {
-        if (socketClient) {
-          socketClient.sendCommand({ type: 'steer', text });
-        }
-      }}
-      onHalt={() => {
-        if (socketClient && !haltPressed) {
-          haltPressed = true;
-          socketClient.sendCommand({ type: 'halt', reason: 'user halted' });
-          setTimeout(() => { haltPressed = false; }, 3000);
-        } else if (agentProcess && haltPressed) {
-          try { agentProcess.kill('SIGTERM'); } catch {}
-          haltPressed = false;
-        }
-      }}
-      onExit={() => {
-        socketClient?.disconnect();
-        unmount();
-        process.exit(0);
-      }}
-    />,
-    { exitOnCtrlC: false },
-  );
-  renderFns = { rerender, unmount };
 
   // ── Reattach to a running agent (if one exists for this session) ──
   const socketPath = getSocketPath(SOCKETS_DIR, sessionKey);
