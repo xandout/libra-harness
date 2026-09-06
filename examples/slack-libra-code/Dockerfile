@@ -24,6 +24,7 @@ RUN apt-get update \
     procps \
     ca-certificates \
     curl \
+    postgresql-client \
   && rm -rf /var/lib/apt/lists/*
 
 # Install Docker CLI (client only — no daemon) from Docker's official repo
