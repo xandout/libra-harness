@@ -1,6 +1,6 @@
 {
   "name": "@xandout/libra-code",
-  "version": "0.1.54",
+  "version": "0.1.55",
   "description": "A code agent CLI powered by libra-harness. Install globally with: npm install -g @xandout/libra-code",
   "type": "module",
   "bin": {
