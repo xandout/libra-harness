@@ -14,11 +14,13 @@
  *   - Capture: screenshot (or shot)
  */
 
-import { writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { resolve as pathResolve, basename as pathBasename, extname as pathExtname } from 'node:path';
 
 const CDP_PORT = process.env.CHROME_DEBUG_PORT || 18800;
 const CDP_URL = `http://127.0.0.1:${CDP_PORT}`;
 const REFS_FILE = '/tmp/cdp_ax_refs.json';
+const DEFAULT_DOWNLOAD_DIR = process.env.CHROME_DOWNLOAD_DIR || (existsSync('/home/node/workspace') ? '/home/node/workspace/downloads' : pathResolve(process.cwd(), 'downloads'));
 
 const KEY_MAP = {
   enter: { code: 'Enter', key: 'Enter', keyCode: 13, text: '\r' },
@@ -116,11 +118,13 @@ class CdpClient {
     this.ws.close();
   }
 
-  async send(method, params = {}) {
+  async send(method, params = {}, sessionId = undefined) {
     return new Promise((resolve, reject) => {
       const id = this.id++;
       this.callbacks.set(id, { resolve, reject });
-      this.ws.send(JSON.stringify({ id, method, params }));
+      const msg = { id, method, params };
+      if (sessionId) msg.sessionId = sessionId;
+      this.ws.send(JSON.stringify(msg));
     });
   }
 
@@ -233,34 +237,42 @@ async function main() {
     console.log(`Usage: cdp <command> [args]
 
 Inspection & Semantic Tree:
-  ax [max_depth]            Dump clean accessibility tree with [@ref] tags (default depth: 8)
-  title                     Print document.title
-  url                       Print current URL
-  eval <js>                 Evaluate JavaScript in the page context
-  screenshot [file.png]     Capture crisp page screenshot via CDP (alias: shot)
+  ax [max_depth]                 Dump clean accessibility tree with [@ref] tags (default depth: 8)
+  title                          Print document.title
+  url                            Print current URL
+  eval <js>                      Evaluate JavaScript in the page context
+  screenshot [file.png]          Capture crisp page screenshot via CDP (alias: shot)
+  snapshot [file.mhtml]          Capture full page archive as MHTML
+  pdf [file.pdf]                 Print page to PDF
 
 Interaction:
-  click <target>            Click an element. Target can be:
-                              - AX Ref tag:       cdp click @3   (or: cdp click 3)
-                              - Role + Name:      cdp click "button:Search" or "role=button name=Search"
-                              - Accessible Text:  cdp click "text=Search" (exact match first!)
-                              - CSS Selector:     cdp click "#subBtn" or "input[type=submit]"
-  type <target> <text>      Focus element and type text (supports @ref, role:name, text=, CSS)
-  press <key>               Press key: Enter, Tab, Escape, Backspace, ArrowDown, etc.
-  scroll [up|down] [amount] Scroll page up or down (default: 500px)
-  wait-for <target>         Wait until element appears in DOM
+  click <target>                 Click an element. Target can be:
+                                   - AX Ref tag:       cdp click @3   (or: cdp click 3)
+                                   - Role + Name:      cdp click "button:Search" or "role=button name=Search"
+                                   - Accessible Text:  cdp click "text=Search" (exact match first!)
+                                   - CSS Selector:     cdp click "#subBtn" or "input[type=submit]"
+  type <target> <text>           Focus element and type text (supports React/controlled inputs & standard inputs)
+  select <target> <value>        Select dropdown option by value or text in <select> elements
+  press <key>                    Press key: Enter, Tab, Escape, Backspace, ArrowDown, etc.
+  scroll [up|down] [amount]      Scroll page up or down (default: 500px)
+  wait-for <target>              Wait until element appears in DOM
 
-Navigation:
-  goto <url>                Navigate active tab to URL
-  reload                    Reload active page
-  back                      Go back in history
-  forward                   Go forward in history
+Navigation & Downloads:
+  goto <url> [--timeout ms]      Navigate active tab to URL (default timeout: 15s)
+  download <url> [opts]          Download file via Chrome. Options:
+                                   --dir <dir>         Download directory (default: workspace/downloads)
+                                   --timeout <ms>      Download timeout (default: 60000ms)
+                                   --by-anchor         Synthesize <a download> click to force download
+  reload                         Reload active page
+  back                           Go back in history
+  forward                        Go forward in history
 
 Tab Management:
-  tabs                      List all open browser tabs (alias: ls-tabs)
-  new-tab [url]             Open a new tab (alias: new; default: about:blank)
-  switch-tab <id|index>     Switch active tab by ID or list index (0, 1, ...)
-  close-tab [id]            Close a tab (default: active tab)
+  tabs                           List all open browser tabs (alias: ls-tabs)
+  new-tab [url]                  Open a new tab (alias: new; default: about:blank)
+  switch-tab <id|index>          Switch active tab by ID or list index (0, 1, ...)
+  close-tab [id]                 Close a tab (default: active tab)
+  wait-tab [query] [--timeout ms] Wait for a new tab matching title/url query (or new tab count)
 `);
     process.exit(0);
   }
@@ -315,6 +327,130 @@ Tab Management:
     });
     console.log(`Closed tab ${targetId}`);
     return;
+  }
+
+  if (cmd === 'wait-tab') {
+    const query = args[1] || '';
+    let timeout = 15000;
+    for (let i = 1; i < args.length; i++) {
+      if (args[i] === '--timeout' && args[i + 1]) {
+        timeout = parseInt(args[++i], 10);
+      }
+    }
+
+    const startTargets = await getPageTargets();
+    const startCount = startTargets.length;
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < timeout) {
+      const current = await getPageTargets();
+      if (query && !/^\d+$/.test(query)) {
+        const q = query.toLowerCase();
+        const found = current.find((t) => (t.title && t.title.toLowerCase().includes(q)) || (t.url && t.url.toLowerCase().includes(q)));
+        if (found) {
+          console.log(`Found tab [id: ${found.id}]: ${found.title || '(untitled)'} — ${found.url}`);
+          return;
+        }
+      } else if (current.length > startCount) {
+        const newTab = current[current.length - 1];
+        console.log(`Found new tab [id: ${newTab.id}]: ${newTab.title || '(untitled)'} — ${newTab.url}`);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    throw new Error(`Timeout waiting for tab${query ? ' matching: ' + query : ''}`);
+  }
+
+  if (cmd === 'download') {
+    const url = args[1];
+    if (!url) throw new Error('download requires a URL (e.g. cdp download https://example.com/file.pdf)');
+
+    let downloadDir = DEFAULT_DOWNLOAD_DIR;
+    let timeout = 60000;
+    let byAnchor = false;
+
+    for (let i = 2; i < args.length; i++) {
+      if (args[i] === '--dir' && args[i + 1]) {
+        downloadDir = pathResolve(args[++i]);
+      } else if (args[i] === '--timeout' && args[i + 1]) {
+        timeout = parseInt(args[++i], 10);
+      } else if (args[i] === '--by-anchor') {
+        byAnchor = true;
+      }
+    }
+
+    mkdirSync(downloadDir, { recursive: true });
+
+    // Connect to Browser WebSocket endpoint for global download events
+    const version = await fetchJson(`${CDP_URL}/json/version`);
+    const browserClient = new CdpClient(version.webSocketDebuggerUrl);
+    await browserClient.connect();
+
+    try {
+      await browserClient.send('Browser.setDownloadBehavior', {
+        behavior: 'allow',
+        downloadPath: downloadDir,
+        eventsEnabled: true,
+      });
+
+      const downloadPromise = new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error(`Download timed out after ${timeout}ms`));
+        }, timeout);
+
+        let activeGuid = null;
+        let suggestedName = null;
+
+        browserClient.on('Browser.downloadWillBegin', (params) => {
+          activeGuid = params.guid;
+          suggestedName = params.suggestedFilename;
+        });
+
+        browserClient.on('Browser.downloadProgress', (params) => {
+          if (activeGuid && params.guid !== activeGuid) return;
+          if (params.state === 'completed') {
+            clearTimeout(timer);
+            const finalPath = params.filePath || (suggestedName ? pathResolve(downloadDir, suggestedName) : pathResolve(downloadDir, params.guid));
+            resolve(finalPath);
+          } else if (params.state === 'canceled') {
+            clearTimeout(timer);
+            reject(new Error('Download was canceled by browser'));
+          }
+        });
+      });
+
+      // Trigger download via active page tab
+      const pageTarget = await getActivePageTarget();
+      const tabClient = new CdpClient(pageTarget.webSocketDebuggerUrl);
+      await tabClient.connect();
+
+      try {
+        if (byAnchor) {
+          await tabClient.send('Runtime.evaluate', {
+            expression: `(() => {
+              const a = document.createElement('a');
+              a.href = ${JSON.stringify(url)};
+              a.setAttribute('download', '');
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+            })()`,
+            awaitPromise: true,
+          });
+        } else {
+          // Navigate to URL
+          await tabClient.send('Page.navigate', { url });
+        }
+
+        const downloadedPath = await downloadPromise;
+        console.log(downloadedPath);
+        return;
+      } finally {
+        await tabClient.close();
+      }
+    } finally {
+      await browserClient.close();
+    }
   }
 
   // ── Page-level commands: connect WebSocket to active tab ──
@@ -517,11 +653,47 @@ Tab Management:
     if (cmd === 'goto') {
       const url = args[1];
       if (!url) throw new Error('goto requires a URL');
+      let timeout = 15000;
+      for (let i = 2; i < args.length; i++) {
+        if (args[i] === '--timeout' && args[i + 1]) {
+          timeout = parseInt(args[++i], 10);
+        }
+      }
       await client.send('Page.enable');
       const loadWait = new Promise((resolve) => client.on('Page.loadEventFired', resolve));
       await client.send('Page.navigate', { url });
-      await Promise.race([loadWait, new Promise((resolve) => setTimeout(resolve, 5000))]);
+      await Promise.race([
+        loadWait,
+        new Promise((resolve) => setTimeout(resolve, timeout)),
+      ]);
       console.log(`Navigated to ${url}`);
+
+    } else if (cmd === 'snapshot') {
+      await client.send('Page.enable');
+      const res = await client.send('Page.captureSnapshot', { format: 'mhtml' });
+      const outPath = args[1] || `/tmp/cdp_snapshot_${Date.now()}.mhtml`;
+      writeFileSync(outPath, res.data, 'utf-8');
+      console.log(outPath);
+
+    } else if (cmd === 'pdf') {
+      const outPath = args[1] || `/tmp/cdp_page_${Date.now()}.pdf`;
+      // Target.attachToTarget via Browser session allows Page.printToPDF even in headed mode
+      const version = await fetchJson(`${CDP_URL}/json/version`);
+      const browserClient = new CdpClient(version.webSocketDebuggerUrl);
+      await browserClient.connect();
+      try {
+        const attachRes = await browserClient.send('Target.attachToTarget', { targetId: page.id, flatten: true });
+        const sessionId = attachRes.sessionId;
+        const printRes = await browserClient.send('Page.printToPDF', {
+          printBackground: true,
+          preferCSSPageSize: true,
+        }, sessionId);
+        const buffer = Buffer.from(printRes.data, 'base64');
+        writeFileSync(outPath, buffer);
+        console.log(outPath);
+      } finally {
+        await browserClient.close();
+      }
 
     } else if (cmd === 'ax') {
       const maxDepth = args[1] ? parseInt(args[1], 10) : 8;
@@ -608,13 +780,78 @@ Tab Management:
       await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
       await new Promise((r) => setTimeout(r, 50));
 
-      // Dispatch keystrokes
+      // Attempt native value setter for React / controlled inputs in active element
+      await evalJs(`(() => {
+        const el = document.activeElement;
+        if (!el) return;
+        const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (desc && desc.set) {
+          desc.set.call(el, ${JSON.stringify(text)});
+        } else {
+          el.value = ${JSON.stringify(text)};
+        }
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      })()`);
+
+      // Also dispatch keystrokes for listeners monitoring key events
       for (const char of text) {
         await client.send('Input.dispatchKeyEvent', { type: 'char', text: char });
-        await new Promise((r) => setTimeout(r, 15));
+        await new Promise((r) => setTimeout(r, 10));
       }
       const info = point.ref ? `[@${point.ref} ${point.matchedRole || point.tagName}]` : `[${point.tagName}${point.id ? '#' + point.id : ''}]`;
       console.log(`Typed into ${target} ${info}`);
+
+    } else if (cmd === 'select') {
+      const target = args[1];
+      const value = args.slice(2).join(' ');
+      if (!target || !value) throw new Error('select requires a target and option value/text (e.g. cdp select @4 50 or cdp select "select#size" "Large")');
+
+      const point = await getElementPoint(target);
+      const x = point.x;
+      const y = point.y;
+
+      // Focus element
+      await client.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+      await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const selectResult = await evalJs(`(() => {
+        const el = document.activeElement;
+        if (!el || el.tagName.toLowerCase() !== 'select') {
+          return { error: 'Target element is not a <select>' };
+        }
+        const val = ${JSON.stringify(value)}.toLowerCase();
+        const options = Array.from(el.options);
+        // Find matching option by exact value, exact text, or substring text
+        let opt = options.find(o => o.value.toLowerCase() === val);
+        if (!opt) opt = options.find(o => o.text.trim().toLowerCase() === val);
+        if (!opt) opt = options.find(o => o.text.trim().toLowerCase().includes(val));
+
+        if (!opt) {
+          return { error: 'Option not found in <select>: ' + ${JSON.stringify(value)} };
+        }
+
+        const desc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value');
+        if (desc && desc.set) {
+          desc.set.call(el, opt.value);
+        } else {
+          el.value = opt.value;
+        }
+        opt.selected = true;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return { selectedValue: opt.value, selectedText: opt.text.trim() };
+      })()`);
+
+      if (selectResult && selectResult.value && selectResult.value.error) {
+        throw new Error(selectResult.value.error);
+      }
+
+      const resVal = selectResult?.value;
+      const info = point.ref ? `[@${point.ref} select]` : `[select${point.id ? '#' + point.id : ''}]`;
+      console.log(`Selected "${resVal?.selectedText || value}" (value: "${resVal?.selectedValue || value}") in ${target} ${info}`);
 
     } else if (cmd === 'scroll') {
       const dir = args[1] === 'up' ? -1 : 1;

@@ -17,9 +17,13 @@ All browser interactions are driven by `cdp` commands connecting to a headed Chr
   - **Best target**: `@ref` (e.g. `cdp click @5`). 100% immune to substring collisions or selector ambiguity!
   - Alternative: `role:name` (e.g. `cdp click "button:Search"` or `cdp click "link:Searches"`).
   - Alternative: exact text (e.g. `cdp click "text=Search"`). Exact matches take priority over partial matches.
-- `cdp type <target> <text>`: Focus element and type text (e.g. `cdp type @3 28601` or `cdp type "textbox:Zip" 28601`).
+- `cdp type <target> <text>`: Focus element and type text (e.g. `cdp type @3 28601` or `cdp type "textbox:Zip" 28601`). Fully supports React and controlled inputs by invoking native property setters and triggering input/change events.
+- `cdp select <target> <value>`: Select dropdown option in `<select>` elements by option value, exact text, or substring text (e.g. `cdp select @4 50`).
 - `cdp press <key>`: Press a key: `Enter`, `Tab`, `Escape`, `Backspace`, `ArrowDown`, etc.
-- `cdp goto <url>`: Navigate to a URL.
+- `cdp goto <url> [--timeout ms]`: Navigate to a URL (default timeout: 15s).
+- `cdp download <url> [--dir DIR] [--by-anchor] [--timeout ms]`: Download a web resource via Chrome with full cookie/session authentication. Files default to `~/workspace/downloads`. Use `--by-anchor` to force downloads of PDFs/PNGs that Chrome would otherwise render inline.
+- `cdp snapshot [file.mhtml]`: Capture full page archive as MHTML.
+- `cdp pdf [file.pdf]`: Print current page to PDF.
 - `cdp scroll [up|down] [px]`: Scroll the page (default: 500px).
 - `cdp wait-for <target>`: Wait until an element exists in the DOM.
 - `cdp eval <js>`: Evaluate JavaScript expression in page context.
@@ -28,6 +32,7 @@ All browser interactions are driven by `cdp` commands connecting to a headed Chr
 - `cdp switch-tab <id|index>`: Switch active tab.
 - `cdp new-tab [url]`: Open a new tab (optionally navigating to URL).
 - `cdp close-tab [id]`: Close a tab.
+- `cdp wait-tab [query] [--timeout ms]`: Wait for a newly opened tab or popup from `window.open` / `<a target="_blank">`.
 - `cdp reload`: Reload the active page.
 - `cdp back` / `cdp forward`: Navigate browser history.
 
