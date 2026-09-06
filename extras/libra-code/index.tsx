@@ -385,7 +385,6 @@ async function runWithTui(
         displayState.isRunning = false;
         displayState.todos = loadTodos(todoFile);
         agentProcess = null;
-        currentJournal = null;
         forceUpdate();
 
         if (exitOnComplete) {
