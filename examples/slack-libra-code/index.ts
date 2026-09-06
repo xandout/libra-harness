@@ -359,12 +359,15 @@ async function executeLc(
     let stderr = '';
 
     proc.stdout?.on('data', (data) => {
-      stdout += data.toString();
+      const text = data.toString();
+      stdout += text;
+      process.stdout.write(text);
     });
 
     proc.stderr?.on('data', (data) => {
       const text = data.toString();
       stderr += text;
+      process.stderr.write(text);
       if (onProgress) {
         const lines = text.split('\n');
         for (const line of lines) {
