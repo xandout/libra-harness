@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Agent, messageContentToText, type Message } from '@xandout/libra-harness';
-import { createDiskSessionExtension, type SessionRecord, type SessionIdentity } from './index.js';
+import { createDiskSessionExtension, sanitizeConversationMessages, type SessionRecord, type SessionIdentity } from './index.js';
 
 // ── Mock model ─────────────────────────────────────────────────────
 // Returns a fixed assistant message. Optionally logs what the agent sees.
@@ -831,5 +831,256 @@ describe('disk-session', () => {
     expect(records[0].content).toBe('[U1]: background chatter');
     expect(records[1].role).toBe('user');
     expect(records[2].role).toBe('assistant');
+  });
+
+  // ── Schema sanitization & Steering integrity ───────────────────
+
+  describe('sanitizeConversationMessages', () => {
+    it('drops orphan tool messages that have no preceding assistant message', () => {
+      const input: Message[] = [
+        { role: 'user', content: 'hello' },
+        { role: 'tool', toolCallId: 'call_orphan', content: 'orphan output' },
+        { role: 'assistant', content: 'hi' },
+      ];
+      const output = sanitizeConversationMessages(input);
+      expect(output).toEqual([
+        { role: 'user', content: 'hello' },
+        { role: 'assistant', content: 'hi' },
+      ]);
+    });
+
+    it('drops orphan tool messages following an assistant message that has no tool_calls', () => {
+      const input: Message[] = [
+        { role: 'assistant', content: 'just text, no tool calls' },
+        { role: 'tool', toolCallId: 'call_orphan', content: 'unexpected result' },
+      ];
+      const output = sanitizeConversationMessages(input);
+      expect(output).toEqual([
+        { role: 'assistant', content: 'just text, no tool calls' },
+      ]);
+    });
+
+    it('drops duplicate tool results for the same toolCallId', () => {
+      const input: Message[] = [
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'call_1', name: 'search', arguments: '{}' }],
+        },
+        { role: 'tool', toolCallId: 'call_1', content: 'first result' },
+        { role: 'tool', toolCallId: 'call_1', content: 'duplicate result' },
+      ];
+      const output = sanitizeConversationMessages(input);
+      expect(output).toHaveLength(2);
+      expect(output[0].role).toBe('assistant');
+      expect(output[1].role).toBe('tool');
+      expect(output[1].content).toBe('first result');
+    });
+
+    it('prunes unfulfilled tool calls from an assistant message when only partial calls completed', () => {
+      const input: Message[] = [
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [
+            { id: 'call_1', name: 'tool1', arguments: '{}' },
+            { id: 'call_2', name: 'tool2', arguments: '{}' },
+          ],
+        },
+        { role: 'tool', toolCallId: 'call_1', content: 'res1' },
+        { role: 'user', content: 'next turn' },
+      ];
+      const output = sanitizeConversationMessages(input);
+      expect(output).toHaveLength(3);
+      expect(output[0].role).toBe('assistant');
+      expect(output[0].toolCalls).toEqual([
+        { id: 'call_1', name: 'tool1', arguments: '{}' },
+      ]);
+      expect(output[1].role).toBe('tool');
+      expect(output[2].role).toBe('user');
+    });
+
+    it('strips toolCalls from assistant when none completed but assistant has text content', () => {
+      const input: Message[] = [
+        {
+          role: 'assistant',
+          content: 'Let me look that up',
+          toolCalls: [{ id: 'call_1', name: 'tool1', arguments: '{}' }],
+        },
+        { role: 'user', content: 'cancelled' },
+      ];
+      const output = sanitizeConversationMessages(input);
+      expect(output).toEqual([
+        { role: 'assistant', content: 'Let me look that up' },
+        { role: 'user', content: 'cancelled' },
+      ]);
+      expect(output[0].toolCalls).toBeUndefined();
+    });
+
+    it('drops empty assistant message when no tool calls completed and content is empty', () => {
+      const input: Message[] = [
+        { role: 'user', content: 'search something' },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'call_1', name: 'tool1', arguments: '{}' }],
+        },
+        { role: 'user', content: 'new prompt' },
+      ];
+      const output = sanitizeConversationMessages(input);
+      expect(output).toEqual([
+        { role: 'user', content: 'search something' },
+        { role: 'user', content: 'new prompt' },
+      ]);
+    });
+  });
+
+  describe('steering and tool-call persistence integrity', () => {
+    it('persists steering messages in correct chronological order without duplicating records', async () => {
+      const ext = makeExt();
+      let iteration = 0;
+      const model = {
+        async generate(_req: { messages: Message[] }) {
+          iteration++;
+          if (iteration === 1) {
+            // First iteration: model issues a tool call
+            return {
+              message: {
+                role: 'assistant' as const,
+                content: 'calling tool',
+                toolCalls: [{ id: 'tc1', name: 'my_tool', arguments: '{}' }],
+              },
+              finishReason: 'tool_calls' as const,
+            };
+          }
+          // Second iteration (after tool + steering): model returns final answer
+          return {
+            message: { role: 'assistant' as const, content: 'done with steering response' },
+            finishReason: 'stop' as const,
+          };
+        },
+      };
+
+      const agent = new Agent({ model: model as never });
+      agent.use(ext);
+      agent.tool({
+        name: 'my_tool',
+        parameters: { type: 'object' },
+        async execute() {
+          // While the tool is executing, inject steering into this turn!
+          agent.steer('keep me posted');
+          return { toolCallId: 'tc1', content: 'tool output' };
+        },
+      });
+
+      await agent.run({
+        message: 'initial prompt',
+        metadata: { session: sessionIdentity('steer-test', '100') },
+      });
+
+      const records = ext.getRecords('steer-test');
+      // Expected records in strict chronological order:
+      // 1. user: 'initial prompt'
+      // 2. assistant: 'calling tool' (toolCalls: [tc1])
+      // 3. tool: 'tool output' (toolCallId: tc1)
+      // 4. user: '[steering] keep me posted'
+      // 5. assistant: 'done with steering response'
+      expect(records).toHaveLength(5);
+      expect(records[0].role).toBe('user');
+      expect(records[0].content).toBe('initial prompt');
+
+      expect(records[1].role).toBe('assistant');
+      expect(records[1].content).toBe('calling tool');
+      expect(records[1].toolCalls).toBeDefined();
+
+      expect(records[2].role).toBe('tool');
+      expect(records[2].toolCallId).toBe('tc1');
+
+      expect(records[3].role).toBe('user');
+      expect(records[3].content).toBe('[steering] keep me posted');
+
+      expect(records[4].role).toBe('assistant');
+      expect(records[4].content).toBe('done with steering response');
+
+      // Verify file on disk matches memory records exactly (no duplicates!)
+      const diskRecords = readJsonl('steer-test');
+      expect(diskRecords).toHaveLength(5);
+      expect(diskRecords.map((r) => r.role)).toEqual([
+        'user',
+        'assistant',
+        'tool',
+        'user',
+        'assistant',
+      ]);
+    });
+
+    it('buildContext filters out corrupted orphan tool records from existing session files', async () => {
+      // Manually simulate a corrupted file with Ronny\'s duplicate tool bug:
+      // Record 1: user
+      // Record 2: assistant (with tool call)
+      // Record 3: tool result
+      // Record 4: user (steering)
+      // Record 5: assistant (text only, no tool calls)
+      // Record 6: DUPLICATE tool result (orphan!)
+      const corruptedRecords: SessionRecord[] = [
+        { role: 'user', content: 'scrape site', ts: '1', recordedAt: new Date().toISOString() },
+        {
+          role: 'assistant',
+          content: 'running scraper',
+          toolCalls: [{ id: 'call_99', name: 'scraper', arguments: '{}' }],
+          ts: '2',
+          recordedAt: new Date().toISOString(),
+        },
+        {
+          role: 'tool',
+          content: 'scrape result',
+          toolCallId: 'call_99',
+          name: 'scraper',
+          ts: '3',
+          recordedAt: new Date().toISOString(),
+        },
+        { role: 'user', content: '[steering] update please', ts: '4', recordedAt: new Date().toISOString() },
+        { role: 'assistant', content: 'will do', ts: '5', recordedAt: new Date().toISOString() },
+        {
+          role: 'tool',
+          content: 'scrape result',
+          toolCallId: 'call_99',
+          name: 'scraper',
+          ts: '6',
+          recordedAt: new Date().toISOString(),
+        },
+      ];
+
+      const fs = await import('node:fs');
+      const filePath = join(tmpDir, 'corrupt_session.jsonl');
+      fs.writeFileSync(filePath, corruptedRecords.map((r) => JSON.stringify(r)).join('\n') + '\n');
+
+      // Create new extension instance that loads the corrupted file
+      const loadedExt = makeExt({ loadOnStartup: true });
+      let seenByModel: Message[] = [];
+      const agent = makeAgent(loadedExt, (msgs) => {
+        seenByModel = msgs;
+      });
+
+      // Run next turn
+      await runTurn(agent, 'what is next?', sessionIdentity('corrupt_session', '7'));
+
+      // The model should NOT see the orphan tool record #6!
+      // In the context passed to the model, every tool message must follow an assistant with toolCalls.
+      for (let i = 0; i < seenByModel.length; i++) {
+        if (seenByModel[i].role === 'tool') {
+          const prev = seenByModel[i - 1];
+          expect(prev).toBeDefined();
+          const isValidPreceding =
+            (prev.role === 'assistant' && prev.toolCalls?.some((tc) => tc.id === seenByModel[i].toolCallId)) ||
+            (prev.role === 'tool');
+          expect(isValidPreceding).toBe(true);
+        }
+      }
+
+      // Specifically, record #6 must have been omitted
+      const toolMsgs = seenByModel.filter((m) => m.role === 'tool');
+      expect(toolMsgs).toHaveLength(1);
+    });
   });
 });

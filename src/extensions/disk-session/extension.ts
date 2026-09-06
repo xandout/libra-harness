@@ -1,6 +1,7 @@
 import { readFileSync, appendFileSync, mkdirSync, readdirSync, writeFileSync, existsSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Extension } from '@xandout/libra-harness';
+import { messageContentToText } from '@xandout/libra-harness';
 import type { Message, MessageContent, Role, ToolCall } from '@xandout/libra-harness';
 
 /**
@@ -139,6 +140,85 @@ const defaultResolver: SessionResolver = {
     return { key: 'default', messageTs: '' };
   },
 };
+
+/**
+ * Sanitizes a message sequence to strictly conform to LLM tool-call schemas:
+ * 1. Every message with role 'tool' MUST directly follow an assistant message
+ *    with a matching tool call id (or follow valid sibling tool messages for that same assistant).
+ *    Any orphan or duplicate tool messages are dropped.
+ * 2. If an assistant message has toolCalls, but some or all tool calls were never
+ *    fulfilled (e.g. session interrupted mid-turn or tool execution halted), its
+ *    toolCalls array is pruned to only the fulfilled tool calls.
+ * 3. If an assistant message has toolCalls but none were fulfilled:
+ *    - If the assistant message has non-empty text content, toolCalls is stripped.
+ *    - If the assistant message has no text content, it is removed entirely.
+ */
+export function sanitizeConversationMessages(messages: Message[]): Message[] {
+  const result: Message[] = [];
+
+  let pendingAssistantIdx = -1;
+  let pendingToolCallIds: Set<string> | null = null;
+  let fulfilledToolCallIds: Set<string> = new Set();
+
+  function finalizePendingAssistant() {
+    if (pendingAssistantIdx === -1 || !pendingToolCallIds) return;
+
+    const assistantMsg = result[pendingAssistantIdx];
+    if (assistantMsg && assistantMsg.toolCalls) {
+      const keptCalls = assistantMsg.toolCalls.filter((tc) => fulfilledToolCallIds.has(tc.id));
+      if (keptCalls.length > 0) {
+        assistantMsg.toolCalls = keptCalls;
+      } else {
+        delete assistantMsg.toolCalls;
+        const text = messageContentToText(assistantMsg.content).trim();
+        if (!text) {
+          result.splice(pendingAssistantIdx, 1);
+        }
+      }
+    }
+
+    pendingAssistantIdx = -1;
+    pendingToolCallIds = null;
+    fulfilledToolCallIds = new Set();
+  }
+
+  for (const msg of messages) {
+    if (msg.role === 'tool') {
+      if (!pendingToolCallIds || !msg.toolCallId || !pendingToolCallIds.has(msg.toolCallId)) {
+        // Orphan tool message with no matching preceding assistant tool call — drop it
+        continue;
+      }
+      if (fulfilledToolCallIds.has(msg.toolCallId)) {
+        // Duplicate tool message for the same tool call id — drop it
+        continue;
+      }
+
+      fulfilledToolCallIds.add(msg.toolCallId);
+      result.push(msg);
+      continue;
+    }
+
+    // Any non-tool message finalizes the preceding assistant's tool-calls
+    finalizePendingAssistant();
+
+    if (msg.role === 'assistant') {
+      if (msg.toolCalls && msg.toolCalls.length > 0) {
+        pendingAssistantIdx = result.length;
+        pendingToolCallIds = new Set(msg.toolCalls.map((tc) => tc.id));
+        fulfilledToolCallIds = new Set();
+        result.push({ ...msg, toolCalls: [...msg.toolCalls] });
+      } else {
+        result.push(msg);
+      }
+    } else {
+      // user or system message
+      result.push(msg);
+    }
+  }
+
+  finalizePendingAssistant();
+  return result;
+}
 
 /**
  * Disk-backed session extension.
@@ -282,12 +362,21 @@ export default function createDiskSessionExtension(
     return true;
   };
 
+
   // Drop trailing user messages that don't have a following assistant
   // response. This happens when a turn was interrupted (crash, halt,
   // kill -9). Including an unanswered user request from a prior session
   // confuses the agent — it sees a request it never responded to.
   function dropIncompleteTrailingTurn(records: SessionRecord[]): SessionRecord[] {
     const result = [...records];
+    while (result.length > 0 && result[result.length - 1].role === 'user') {
+      result.pop();
+    }
+    return result;
+  }
+
+  function dropIncompleteTrailingMessages(messages: Message[]): Message[] {
+    const result = [...messages];
     while (result.length > 0 && result[result.length - 1].role === 'user') {
       result.pop();
     }
@@ -322,57 +411,64 @@ export default function createDiskSessionExtension(
   ): Message[] {
     if (snapshot.length === 0) return [];
 
+    let rawRecords: SessionRecord[];
+
     // DM or top-level message: last N messages, but safe-sliced to not
     // split tool-call sequences.
     if (isDirect || !threadTs) {
       const filtered = snapshot.filter(isConversationMessage);
       const complete = dropIncompleteTrailingTurn(filtered);
-      return sliceAtTurnBoundary(complete, maxContextMessages)
-        .map(toMessage);
-    }
+      rawRecords = sliceAtTurnBoundary(complete, maxContextMessages);
+    } else {
+      // Thread: fork from channel context.
+      const parentIdx = snapshot.findIndex((r) => r.ts === threadTs);
 
-    // Thread: fork from channel context.
-    const parentIdx = snapshot.findIndex((r) => r.ts === threadTs);
+      if (parentIdx === -1) {
+        // Parent not in snapshot (evicted from cache or very old).
+        // Fall back to last N messages.
+        const filtered = snapshot.filter(isConversationMessage);
+        const complete = dropIncompleteTrailingTurn(filtered);
+        rawRecords = sliceAtTurnBoundary(
+          complete,
+          maxContextMessages,
+        );
+      } else {
+        // Top-level messages before the parent (channel context at fork point).
+        const topLevelBefore = snapshot
+          .slice(0, parentIdx)
+          .filter((r) => !r.threadTs && isConversationMessage(r));
+        const slicedTopLevelBefore = sliceAtTurnBoundary(topLevelBefore, channelContextMessages);
 
-    if (parentIdx === -1) {
-      // Parent not in snapshot (evicted from cache or very old).
-      // Fall back to last N messages.
-      return sliceAtTurnBoundary(
-        snapshot.filter(isConversationMessage),
-        maxContextMessages
-      ).map(toMessage);
-    }
+        // All messages in this thread (including the parent).
+        const threadMessages = snapshot
+          .filter(
+            (r) => (r.ts === threadTs || r.threadTs === threadTs) && isConversationMessage(r),
+          );
 
-    // Top-level messages before the parent (channel context at fork point).
-    const topLevelBefore = snapshot
-      .slice(0, parentIdx)
-      .filter((r) => !r.threadTs && isConversationMessage(r));
-    const slicedTopLevelBefore = sliceAtTurnBoundary(topLevelBefore, channelContextMessages);
+        // Recent top-level messages after the last thread reply.
+        const lastThreadTs = threadMessages[threadMessages.length - 1]?.ts ?? threadTs;
+        let lastThreadIdx = parentIdx;
+        for (let i = snapshot.length - 1; i >= 0; i--) {
+          if (snapshot[i].ts === lastThreadTs) {
+            lastThreadIdx = i;
+            break;
+          }
+        }
+        const recentTopLevel = snapshot
+          .slice(lastThreadIdx + 1)
+          .filter((r) => !r.threadTs && isConversationMessage(r));
+        
+        const slicedRecentTopLevel = recentChannelMessages > 0
+          ? sliceAtTurnBoundary(recentTopLevel, recentChannelMessages)
+          : [];
 
-    // All messages in this thread (including the parent).
-    const threadMessages = snapshot
-      .filter(
-        (r) => (r.ts === threadTs || r.threadTs === threadTs) && isConversationMessage(r),
-      );
-
-    // Recent top-level messages after the last thread reply.
-    const lastThreadTs = threadMessages[threadMessages.length - 1]?.ts ?? threadTs;
-    let lastThreadIdx = parentIdx;
-    for (let i = snapshot.length - 1; i >= 0; i--) {
-      if (snapshot[i].ts === lastThreadTs) {
-        lastThreadIdx = i;
-        break;
+        rawRecords = [...slicedTopLevelBefore, ...threadMessages, ...slicedRecentTopLevel];
       }
     }
-    const recentTopLevel = snapshot
-      .slice(lastThreadIdx + 1)
-      .filter((r) => !r.threadTs && isConversationMessage(r));
-    
-    const slicedRecentTopLevel = recentChannelMessages > 0
-      ? sliceAtTurnBoundary(recentTopLevel, recentChannelMessages)
-      : [];
 
-    return [...slicedTopLevelBefore, ...threadMessages, ...slicedRecentTopLevel].map(toMessage);
+    const messages = rawRecords.map(toMessage);
+    const sanitized = sanitizeConversationMessages(messages);
+    return dropIncompleteTrailingMessages(sanitized);
   }
 
   // ── Resolve session identity from turn metadata ───────────────
@@ -435,14 +531,50 @@ export default function createDiskSessionExtension(
         appendToFile(key, [userRecord]);
 
         // Track how many history messages we prepended so afterTurn
-        // knows where new messages start. +1 for the user message
-        // we just added to the log (it's in the snapshot but not in
-        // the history we built — the history was built from the
-        // snapshot BEFORE adding the user record).
+        // knows where new messages start.
         ctx.turn.metadata['_diskSessionHistoryLen'] = history.length;
 
         if (history.length > 0) {
           ctx.turn.messages = [...history, ...ctx.turn.messages];
+        }
+
+        // Track all messages currently in ctx.turn.messages (both history and the
+        // initial user message just written) so beforeLLM only persists new steering messages.
+        const writtenMessages = new Set<Message>(ctx.turn.messages);
+        ctx.turn.metadata['_diskSessionWrittenMessages'] = writtenMessages;
+      });
+
+      // ── beforeLLM: persist any mid-turn steering messages ─────
+      // When turn.steer() is called, agent.ts injects steering messages
+      // into turn.messages with a [steering] prefix. We persist them to disk
+      // right before the LLM runs to respond to them.
+      agent.hook('beforeLLM', 'disk-session', async (ctx) => {
+        const identity = identityFromCtx(ctx);
+        if (!identity) return;
+        const { key, messageTs, threadTs } = identity;
+
+        const written = ctx.turn.metadata['_diskSessionWrittenMessages'] as Set<Message> | undefined;
+        const sessionMeta = ctx.turn.metadata.sessionMeta as Record<string, unknown> | undefined;
+
+        const newSteering: SessionRecord[] = [];
+        for (const msg of ctx.turn.messages) {
+          if (msg.role === 'user' && (!written || !written.has(msg))) {
+            newSteering.push({
+              ...toRecord(msg, messageTs, threadTs),
+              ...(sessionMeta ? { meta: sessionMeta } : {}),
+            });
+            written?.add(msg);
+          }
+        }
+
+        if (newSteering.length > 0) {
+          const records = store.get(key) ?? [];
+          records.push(...newSteering);
+          if (records.length > maxRecords) {
+            records.splice(0, records.length - maxRecords);
+          }
+          store.set(key, records);
+          appendToFile(key, newSteering);
         }
       });
 
@@ -506,11 +638,6 @@ export default function createDiskSessionExtension(
           }
           store.set(key, records);
           appendToFile(key, [record]);
-
-          // Track how many records we've already written so afterTurn
-          // doesn't duplicate them.
-          const written = (ctx.turn.metadata['_diskSessionWritten'] as number) ?? 0;
-          ctx.turn.metadata['_diskSessionWritten'] = written + 1;
         }
       });
 
@@ -546,21 +673,14 @@ export default function createDiskSessionExtension(
         }
         store.set(key, records);
         appendToFile(key, [record]);
-
-        const written = (ctx.turn.metadata['_diskSessionWritten'] as number) ?? 0;
-        ctx.turn.metadata['_diskSessionWritten'] = written + 1;
       });
 
-      // ── afterTurn: append assistant response + tool calls ─────
-      // The user message was already persisted in beforeTurn.
-      // Here we only append the NEW non-user, non-system messages
-      // (assistant responses, tool calls, tool results).
+      // ── afterTurn: finalize session turn ──────────────────────────
       agent.hook('afterTurn', 'disk-session', async (ctx) => {
         const identity = identityFromCtx(ctx);
         if (!identity) return;
         const { key, messageTs, threadTs } = identity;
 
-        const historyLen = (ctx.turn.metadata['_diskSessionHistoryLen'] as number) ?? 0;
         delete ctx.turn.metadata['_diskSessionHistoryLen'];
 
         // ── Compaction: rotate the session file ──────────────────
@@ -603,104 +723,54 @@ export default function createDiskSessionExtension(
           return;
         }
 
-        // Messages: [history...] [system?] [user msg] [assistant] [tool calls...]
-        // The beforeContext hook may have inserted a system message.
-        // Skip it when counting new messages.
-        const systemMsgCount = ctx.turn.messages[historyLen]?.role === 'system' ? 1 : 0;
-        const newStart = historyLen + systemMsgCount;
-        const newMessages = ctx.turn.messages.slice(newStart);
+        // ── Persist any trailing unwritten steering messages ─────
+        // (in case a steering message arrived and the turn halted before beforeLLM ran)
+        const written = ctx.turn.metadata['_diskSessionWrittenMessages'] as Set<Message> | undefined;
+        delete ctx.turn.metadata['_diskSessionWrittenMessages'];
+        const sessionMeta = ctx.turn.metadata.sessionMeta as Record<string, unknown> | undefined;
 
-        // Persist non-user, non-system messages here. The initial user
-        // message was already written in beforeTurn. EXCEPTION: steering
-        // messages are injected mid-turn as user messages with a
-        // [steering] prefix — those are new and must be persisted.
-        let filteredMessages = newMessages.filter((m) => {
-          if (m.role === 'system') return false;
-          if (m.role === 'user') {
-            const text = typeof m.content === 'string'
-              ? m.content
-              : Array.isArray(m.content)
-                ? m.content.filter((p: any) => p.type === 'text').map((p: any) => p.text).join('')
-                : '';
-            return text.startsWith('[steering]');
+        const unwrittenSteering: SessionRecord[] = [];
+        for (const msg of ctx.turn.messages) {
+          if (msg.role === 'user' && (!written || !written.has(msg))) {
+            unwrittenSteering.push({
+              ...toRecord(msg, messageTs, threadTs),
+              ...(sessionMeta ? { meta: sessionMeta } : {}),
+            });
+            written?.add(msg);
           }
-          return true;
-        });
-
-        // ── Skip records already written incrementally ───────────
-        // afterLLM and afterTool hooks append assistant messages and
-        // tool results as they happen. Skip those here to avoid
-        // duplicates. Only the final assistant response (with no tool
-        // calls) may not have been written yet — it's the one that
-        // ends the turn without triggering afterTool.
-        const alreadyWritten = (ctx.turn.metadata['_diskSessionWritten'] as number) ?? 0;
-        delete ctx.turn.metadata['_diskSessionWritten'];
-        if (alreadyWritten > 0) {
-          filteredMessages = filteredMessages.slice(alreadyWritten);
         }
 
-        if (filteredMessages.length === 0) {
-          // All records were already written incrementally by afterLLM
-          // and afterTool. Backfill system prompt in-memory and return.
-          delete ctx.turn.metadata['_diskSessionUsage'];
-          const finalSystemPrompt = ctx.turn.systemPrompt;
-          if (finalSystemPrompt) {
-            const records = store.get(key) ?? [];
-            for (let i = records.length - 1; i >= 0; i--) {
-              if (records[i].role === 'user') {
-                records[i].systemPrompt = finalSystemPrompt;
-                break;
-              }
-            }
+        if (unwrittenSteering.length > 0) {
+          const records = store.get(key) ?? [];
+          records.push(...unwrittenSteering);
+          if (records.length > maxRecords) {
+            records.splice(0, records.length - maxRecords);
           }
-          return;
+          store.set(key, records);
+          appendToFile(key, unwrittenSteering);
         }
 
         // Pull accumulated usage for this turn (set by afterLLM hook).
         const usage = ctx.turn.metadata['_diskSessionUsage'] as SessionRecord['usage'] | undefined;
         delete ctx.turn.metadata['_diskSessionUsage'];
 
-        // Enrichment bag (same convention as beforeTurn): any
-        // extension may have written into `sessionMeta` during the
-        // turn. Persist it opaquely on each new record.
-        const sessionMeta = ctx.turn.metadata.sessionMeta as
-          | Record<string, unknown>
-          | undefined;
-
-        // Convert to records with correlation metadata.
-        const newRecords = filteredMessages.map((msg) => {
-          const record = {
-            ...toRecord(msg, messageTs, threadTs),
-            ...(sessionMeta ? { meta: sessionMeta } : {}),
-          };
-          // Attach usage to the LAST assistant record (the final response).
-          // Intermediate assistant records (tool-call requests) don't get usage.
-          return record;
-        });
-
-        // Attach accumulated usage to the last assistant record.
+        // Attach accumulated usage to the last assistant record in memory.
         if (usage) {
-          let lastAssistantIdx = -1;
-          for (let i = newRecords.length - 1; i >= 0; i--) {
-            if (newRecords[i].role === 'assistant') {
-              lastAssistantIdx = i;
+          const records = store.get(key) ?? [];
+          for (let i = records.length - 1; i >= 0; i--) {
+            if (records[i].role === 'assistant') {
+              records[i].usage = usage;
               break;
             }
           }
-          if (lastAssistantIdx !== -1) {
-            newRecords[lastAssistantIdx].usage = usage;
-          }
         }
-
-        // Append to in-memory log.
-        const records = store.get(key) ?? [];
-        records.push(...newRecords);
 
         // Backfill system prompt on the last user record (in-memory only).
         // The system prompt wasn't available at beforeTurn (beforeContext
         // hooks hadn't run yet), so we update it now.
         const finalSystemPrompt = ctx.turn.systemPrompt;
         if (finalSystemPrompt) {
+          const records = store.get(key) ?? [];
           for (let i = records.length - 1; i >= 0; i--) {
             if (records[i].role === 'user') {
               records[i].systemPrompt = finalSystemPrompt;
@@ -710,13 +780,11 @@ export default function createDiskSessionExtension(
         }
 
         // Trim in-memory cache (file keeps full history).
+        const records = store.get(key) ?? [];
         if (records.length > maxRecords) {
           records.splice(0, records.length - maxRecords);
+          store.set(key, records);
         }
-        store.set(key, records);
-
-        // Append to JSONL file (append-only, never rewritten).
-        appendToFile(key, newRecords);
       });
     },
 
