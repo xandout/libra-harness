@@ -35,7 +35,7 @@ if ! pgrep -x "Xvfb" >/dev/null; then
 fi
 
 if ! pgrep -x "openbox" >/dev/null; then
-  openbox-session &
+  openbox &
 fi
 
 # Start x11vnc for VNC observation

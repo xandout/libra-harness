@@ -25,7 +25,10 @@ RUN apt-get update \
     ca-certificates \
     curl \
     postgresql-client \
-  && rm -rf /var/lib/apt/lists/*
+    python3-xdg \
+  && rm -rf /var/lib/apt/lists/* \
+  && mkdir -p /tmp/.X11-unix \
+  && chmod 1777 /tmp/.X11-unix
 
 # Install Docker CLI (client only — no daemon) from Docker's official repo
 RUN install -m 0755 -d /etc/apt/keyrings \
