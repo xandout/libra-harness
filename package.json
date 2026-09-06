@@ -1,6 +1,6 @@
 {
   "name": "@xandout/libra-harness",
-  "version": "0.1.71",
+  "version": "0.1.72",
   "description": "A small, composable, hookable agent harness. Library-first.",
   "repository": {
     "type": "git",
