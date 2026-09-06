@@ -57,8 +57,14 @@ ENV LC_CWD=/home/node/workspace
 ENV LIBRA_HOME=/home/node/workspace/.libra
 ENV BASH_ENV=/home/node/.bashrc
 
+# Invalidate build cache whenever new commits are pushed to main,
+# or when passing --build-arg CACHE_BUST=$(date +%s)
+ARG CACHE_BUST=1
+ADD https://api.github.com/repos/xandout/libra-harness/git/ref/heads/main /tmp/git-ref.json
+
 # Clone and build the app at image build time
 RUN mkdir -p /app /home/node/workspace \
+  && rm -f /tmp/git-ref.json \
   && git clone https://github.com/xandout/libra-harness.git /app \
   && cd /app \
   && corepack enable \
