@@ -186,6 +186,30 @@ function getActiveTurnId(sessionKey: string, homeDir: string): string | null {
   return null;
 }
 
+async function sendSocketCommand(
+  homeDir: string,
+  sessionKey: string,
+  cmd: { type: 'steer'; text: string } | { type: 'halt'; reason?: string },
+): Promise<boolean> {
+  const safe = sessionKey.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const sockPath = join(homeDir, 'sockets', `${safe}.sock`);
+  if (!existsSync(sockPath)) return false;
+
+  return new Promise<boolean>((resolve) => {
+    const client = require('node:net').createConnection(sockPath);
+    client.once('connect', () => {
+      client.write(JSON.stringify(cmd) + '\n');
+      client.end();
+      resolve(true);
+    });
+    client.once('error', () => resolve(false));
+    setTimeout(() => {
+      try { client.destroy(); } catch {}
+      resolve(false);
+    }, 500);
+  });
+}
+
 function writeTurnCommand(
   homeDir: string,
   turnId: string,
@@ -304,24 +328,26 @@ ${prompt}`;
     });
 
     const steer = (text: string) => {
-      const turnId = getActiveTurnId(sessionKey, libraHome);
-      if (turnId) {
-        writeTurnCommand(libraHome, turnId, { type: 'steer', text });
-        console.log(`[turn] Steer injected into turn ${turnId}: "${text.slice(0, 50)}"`);
-      } else {
-        console.warn(`[turn] Could not find active turnId to steer in ${sessionKey}`);
-      }
+      sendSocketCommand(libraHome, sessionKey, { type: 'steer', text }).then((sent) => {
+        if (sent) {
+          console.log(`[turn] Steer sent via socket for [${sessionKey}]: "${text.slice(0, 50)}"`);
+        } else {
+          const turnId = getActiveTurnId(sessionKey, libraHome);
+          if (turnId) writeTurnCommand(libraHome, turnId, { type: 'steer', text });
+        }
+      });
     };
 
     const halt = (reason?: string) => {
-      const turnId = getActiveTurnId(sessionKey, libraHome);
-      if (turnId) {
-        writeTurnCommand(libraHome, turnId, { type: 'halt', reason: reason || 'halted' });
-        console.log(`[turn] Halt command written for turn ${turnId}`);
-      }
-      try {
-        proc.kill('SIGINT');
-      } catch {}
+      sendSocketCommand(libraHome, sessionKey, { type: 'halt', reason }).then((sent) => {
+        if (sent) {
+          console.log(`[turn] Halt sent via socket for [${sessionKey}]`);
+        } else {
+          const turnId = getActiveTurnId(sessionKey, libraHome);
+          if (turnId) writeTurnCommand(libraHome, turnId, { type: 'halt', reason: reason || 'halted' });
+        }
+      });
+      try { proc.kill('SIGINT'); } catch {}
     };
 
     inFlight.set(sessionKey, { proc, channelId, threadTs, steer, halt });
@@ -511,10 +537,9 @@ app.command('/ronny', async ({ command, ack, respond, client }) => {
     if (halted > 0) {
       await respond({ text: `⏹ Halted ${halted} active \`lc\` turn(s).`, response_type: 'ephemeral' });
     } else {
-      const turnId = getActiveTurnId(sessionKey, libraHome);
-      if (turnId) {
-        writeTurnCommand(libraHome, turnId, { type: 'halt', reason: reason || 'user halted via Slack' });
-        await respond({ text: `Halt command written for turn \`${turnId}\`.`, response_type: 'ephemeral' });
+      const sent = await sendSocketCommand(libraHome, sessionKey, { type: 'halt', reason: reason || 'user halted via Slack' });
+      if (sent) {
+        await respond({ text: `⏹ Halt signal sent to active session \`${sessionKey}\`.`, response_type: 'ephemeral' });
       } else {
         await respond({ text: 'No active turn found to halt.', response_type: 'ephemeral' });
       }
@@ -539,10 +564,9 @@ app.command('/ronny', async ({ command, ack, respond, client }) => {
       }
     }
     if (!steered) {
-      const turnId = getActiveTurnId(sessionKey, libraHome);
-      if (turnId) {
-        writeTurnCommand(libraHome, turnId, { type: 'steer', text: message });
-        await respond({ text: `Steering command written for turn \`${turnId}\`.`, response_type: 'ephemeral' });
+      const sent = await sendSocketCommand(libraHome, sessionKey, { type: 'steer', text: message });
+      if (sent) {
+        await respond({ text: `↪️ Steered active session \`${sessionKey}\` with: "${message}"`, response_type: 'ephemeral' });
       } else {
         await respond({ text: 'No active turn found to steer.', response_type: 'ephemeral' });
       }
@@ -553,12 +577,10 @@ app.command('/ronny', async ({ command, ack, respond, client }) => {
   // 3. Status
   if (text === 'status') {
     const activeList = Array.from(inFlight.keys());
-    const turnId = getActiveTurnId(sessionKey, libraHome);
     const statusMsg = [
       `*Slack-Libra-Code Status*`,
       `• Active Turns: ${activeList.length ? activeList.join(', ') : 'None (idle)'}`,
       `• Target CWD: \`${lcCwd}\``,
-      `• Lock File Turn ID: \`${turnId || 'none'}\``,
     ].join('\n');
     await respond({ text: statusMsg, response_type: 'ephemeral' });
     return;

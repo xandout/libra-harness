@@ -1,7 +1,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { diffLines } from 'diff';
 import type { Extension } from '@xandout/libra-harness';
-import type { TurnJournal } from './turn-journal.js';
+import type { SessionSocketServer } from './session-socket.js';
 
 // ── Types ────────────────────────────────────────────────────────────
 export interface FileChange {
@@ -160,10 +160,10 @@ export function createFileChangeTracker(
             isNew,
           };
           changes.push(change);
-          // Emit a file event to the journal so all consumers (TUI,
-          // stdout, zocode) know which files were touched.
-          const journal = ctx.turn.metadata.__journal as TurnJournal | undefined;
-          journal?.append('file', { file: filePath });
+          // Emit a file event to the socket server so all consumers (TUI,
+          // stdout, Slack) know which files were touched.
+          const socketServer = ctx.turn.metadata.__socketServer as SessionSocketServer | undefined;
+          socketServer?.broadcast({ type: 'file', file: filePath, ts: Date.now() });
           beforeContents.delete(filePath);
         } catch {
           // ignore errors

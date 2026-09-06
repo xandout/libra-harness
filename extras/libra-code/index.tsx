@@ -6,10 +6,12 @@ import { render } from 'ink';
 import React from 'react';
 import { configuredProviders } from '@xandout/libra-harness/extras/models';
 import {
-  LIBRA_HOME, SESSIONS_DIR, TODOS_DIR, TURNS_DIR, TURN_META_DIR, LOCKS_DIR, CONFIG_FILE,
+  LIBRA_HOME, SESSIONS_DIR, SOCKETS_DIR, TODOS_DIR, TURNS_DIR, TURN_META_DIR, LOCKS_DIR, CONFIG_FILE,
   loadConfig, saveConfig, ensureDirs, sessionKeyForCwd, buildAgent,
 } from './agent-setup.js';
-import { TurnJournal, SessionLockManager, type TurnEvent } from './turn-journal.js';
+import {
+  SessionSocketServer, SessionSocketClient, isSessionActive, getSocketPath, type SocketEvent,
+} from './session-socket.js';
 import { TuiApp, type ChatMessage, type ToolActivity, type FileChange, type TodoItem } from './tui.js';
 import type { SessionStats } from './session-stats.js';
 
@@ -168,62 +170,57 @@ async function runWorker(args: string[]) {
 
   ensureDirs();
 
-  // Acquire session lock.
-  const lockManager = new SessionLockManager(LOCKS_DIR);
-  if (!lockManager.acquire(sessionKey, turnId)) {
-    const journal = new TurnJournal(TURNS_DIR, TURN_META_DIR, turnId, prompt);
-    journal.markError('Another agent is already running on this session.');
-    journal.append('done', { reply: 'Error: Another agent is already running on this session.', finishReason: 'error' });
+  const socketPath = getSocketPath(SOCKETS_DIR, sessionKey);
+  const socketServer = new SessionSocketServer(socketPath, sessionKey);
+  try {
+    await socketServer.start();
+  } catch (err) {
     process.exit(1);
   }
 
-  // Build agent — journal extensions are always installed now.
   let built;
   try {
     built = await buildAgent({ thinkingLevel });
   } catch (err) {
-    const journal = new TurnJournal(TURNS_DIR, TURN_META_DIR, turnId, prompt);
-    const msg = err instanceof Error ? err.message : String(err);
-    journal.markError(msg);
-    journal.append('done', { reply: `Error: ${msg}`, finishReason: 'error' });
-    lockManager.release(sessionKey);
+    socketServer.close();
     process.exit(1);
   }
 
   const { agent } = built;
-  const journal = new TurnJournal(TURNS_DIR, TURN_META_DIR, turnId, prompt);
 
   try {
     const handle = agent.run({
       message: prompt,
       metadata: {
         sessionId: sessionKey,
-        __journal: journal,
+        __socketServer: socketServer,
         streamCallbacks: {
           onText: (delta: string) => {
-            journal.append('text', { delta });
+            socketServer.broadcast({ type: 'text', delta, ts: Date.now() });
           },
         },
       },
     });
 
+    socketServer.attachHandle(handle);
     const result = await handle;
 
-    if (result.finishReason === 'halted') {
-      journal.markHalted();
-      journal.append('halt', { reason: 'halted' });
-      journal.append('done', { reply: '', finishReason: 'halted' });
-    } else {
-      const reply = result.message || '';
-      journal.markDone(reply);
-      journal.append('done', { reply, finishReason: result.finishReason });
-    }
+    socketServer.broadcast({
+      type: 'done',
+      reply: result.message || '',
+      finishReason: result.finishReason,
+      ts: Date.now(),
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    journal.markError(msg);
-    journal.append('done', { reply: `Error: ${msg}`, finishReason: 'error' });
+    socketServer.broadcast({
+      type: 'done',
+      reply: `Error: ${msg}`,
+      finishReason: 'error',
+      ts: Date.now(),
+    });
   } finally {
-    lockManager.release(sessionKey);
+    socketServer.close();
     process.exit(0);
   }
 }
@@ -441,37 +438,34 @@ async function runWithTui(
     }
   }
 
+  let socketClient: SessionSocketClient | null = null;
+
+  async function connectSocket(): Promise<SessionSocketClient | null> {
+    const socketPath = getSocketPath(SOCKETS_DIR, sessionKey);
+    const client = new SessionSocketClient(socketPath);
+    try {
+      await client.connect();
+      client.onEvent((ev) => handleJournalEvent(ev));
+      socketClient = client;
+      return client;
+    } catch {
+      return null;
+    }
+  }
+
   // ── Send a prompt — spawns `lc --worker` ──
   function sendPrompt(text: string) {
     if (displayState.isRunning) return;
-
-    // Check/break stale session lock.
-    const lock = lockManager.readLock(sessionKey);
-    if (lock) {
-      try { process.kill(lock.pid, 0); } catch {
-        lockManager.forceBreak(sessionKey);
-      }
-    }
-
-    // Create a journal for this turn.
-    const turnId = TurnJournal.newTurnId();
-    const journal = new TurnJournal(TURNS_DIR, TURN_META_DIR, turnId, text);
-    currentJournal = journal;
 
     displayState.isRunning = true;
     displayState.streamingText = '';
     displayState.messages.push({ role: 'user', content: text, timestamp: Date.now() });
     forceUpdate();
 
-    // Start watching the journal file for events.
-    const journalPath = join(TURNS_DIR, `${turnId}.jsonl`);
-    startWatching(journalPath);
-
     // Spawn `lc --worker` — silent, detached.
     const workerArgs = [
       process.argv[1],
       '--worker',
-      '--turn', turnId,
       '--session', sessionKey,
       '--prompt', text,
     ];
@@ -485,10 +479,19 @@ async function runWithTui(
 
     agentProcess.unref();
 
+    // Connect to socket once it comes up
+    let attempts = 0;
+    const connectInterval = setInterval(async () => {
+      attempts++;
+      const client = await connectSocket();
+      if (client || attempts > 20) {
+        clearInterval(connectInterval);
+      }
+    }, 100);
+
     agentProcess.on('exit', () => {
       setTimeout(() => {
         if (displayState.isRunning) {
-          // Agent crashed without writing done.
           displayState.isRunning = false;
           displayState.messages.push({
             role: 'assistant',
@@ -497,9 +500,8 @@ async function runWithTui(
           });
           displayState.streamingText = '';
           agentProcess = null;
-          currentJournal = null;
-          stopWatching();
-          lockManager.forceBreak(sessionKey);
+          socketClient?.disconnect();
+          socketClient = null;
           forceUpdate();
         }
       }, 500);
@@ -518,23 +520,22 @@ async function runWithTui(
       isRunning={displayState.isRunning}
       onSubmit={(text: string) => { sendPrompt(text); }}
       onSteer={(text: string) => {
-        if (currentJournal) {
-          currentJournal.writeCommand({ type: 'steer', text });
+        if (socketClient) {
+          socketClient.sendCommand({ type: 'steer', text });
         }
       }}
       onHalt={() => {
-        if (currentJournal && !haltPressed) {
+        if (socketClient && !haltPressed) {
           haltPressed = true;
-          currentJournal.writeCommand({ type: 'halt', reason: 'user halted' });
+          socketClient.sendCommand({ type: 'halt', reason: 'user halted' });
           setTimeout(() => { haltPressed = false; }, 3000);
         } else if (agentProcess && haltPressed) {
           try { agentProcess.kill('SIGTERM'); } catch {}
-          lockManager.forceBreak(sessionKey);
           haltPressed = false;
         }
       }}
       onExit={() => {
-        stopWatching();
+        socketClient?.disconnect();
         unmount();
         process.exit(0);
       }}
@@ -544,59 +545,12 @@ async function runWithTui(
   renderFns = { rerender, unmount };
 
   // ── Reattach to a running agent (if one exists for this session) ──
-  // When the TUI restarts, check if an agent process is still running
-  // from a previous TUI session. If so, replay its journal and start
-  // watching for new events.
-  const existingLock = lockManager.readLock(sessionKey);
-  if (existingLock) {
-    let alive = false;
-    try { process.kill(existingLock.pid, 0); alive = true; } catch {}
-    if (alive && existingLock.turnId) {
-      // Agent is still running — reattach.
-      reattaching = true;
-      const turnId = existingLock.turnId;
-      const journalPath = join(TURNS_DIR, `${turnId}.jsonl`);
-
-      // Load the journal to get the prompt and replay events.
-      const journal = TurnJournal.loadFromDisk(TURNS_DIR, TURN_META_DIR, turnId);
-      if (journal) {
-        currentJournal = journal;
-        displayState.isRunning = true;
-
-        // Replay all events so far (tool activity, streamed text, etc).
-        // Chat messages already came from loadSessionHistory, but we
-        // need to restore in-progress tool activity and streaming text.
-        for (const ev of journal.getAll()) {
-          handleJournalEvent(ev);
-        }
-
-        // Start watching for NEW events only. Set the offset to the
-        // current file size so we don't re-process events we just
-        // replayed above.
-        let initialOffset = 0;
-        try {
-          const stat = statSync(journalPath);
-          initialOffset = stat.size;
-        } catch {}
-        startWatching(journalPath, initialOffset);
-
-        // Track the agent process so halt/force-kill works.
-        agentProcess = { pid: existingLock.pid, kill: (sig: string) => {
-          try { process.kill(existingLock.pid, sig as any); return true; } catch { return false; }
-        } } as any as ChildProcess;
-
-        forceUpdate();
-      }
-    } else {
-      // Stale lock — clean it up.
-      lockManager.forceBreak(sessionKey);
-    }
-  }
-
-  // Only replay the latest turn if we're NOT reattaching (otherwise
-  // we'd double-process events from the running turn).
-  if (!reattaching) {
-    replayLatestTurn(TURNS_DIR, TURN_META_DIR, displayState);
+  const socketPath = getSocketPath(SOCKETS_DIR, sessionKey);
+  const active = await isSessionActive(socketPath);
+  if (active) {
+    displayState.isRunning = true;
+    await connectSocket();
+    forceUpdate();
   }
 
   if (initialPrompt && !displayState.isRunning) {
@@ -611,197 +565,81 @@ async function runWithTui(
 // by another process, worker, or TUI), stdout mode reattaches to it instead of
 // starting a new one.
 
-async function reattachStdout(
-  sessionKey: string,
-  lock: { pid: number; turnId: string },
-  steerPrompt?: string,
-  options: { detachOnCtrlC: boolean } = { detachOnCtrlC: true },
-) {
-  const turnId = lock.turnId;
-  const journalPath = join(TURNS_DIR, `${turnId}.jsonl`);
-  const journal = TurnJournal.loadFromDisk(TURNS_DIR, TURN_META_DIR, turnId);
-
-  if (!journal) {
-    process.stderr.write(`Could not load journal for turn ${turnId}.\n`);
-    return;
-  }
-
-  const hint = options.detachOnCtrlC ? '(Ctrl+C to detach)' : '(Ctrl+C to halt agent)';
-  process.stderr.write(`Reattaching to active agent (turn ${turnId}, pid ${lock.pid}) ${hint}…\n`);
-
-  if (steerPrompt) {
-    process.stderr.write(`  ⟦steer: ${steerPrompt}⟧\n`);
-    journal.writeCommand({ type: 'steer', text: steerPrompt });
-  }
-
-  let firstText = true;
-  function printEvent(ev: TurnEvent) {
-    switch (ev.type) {
-      case 'status':
-        break;
-      case 'text':
-        if (firstText) {
-          process.stdout.write('\n');
-          firstText = false;
-        }
-        process.stdout.write(ev.delta || '');
-        break;
-      case 'tool':
-        if (ev.phase === 'start') {
-          const detail = ev.file || '';
-          process.stderr.write(`\n  → ${ev.name}(${detail})\n`);
-        } else if (ev.phase === 'end') {
-          process.stderr.write(`  ✓ ${ev.name}\n`);
-        }
-        break;
-      case 'file':
-        process.stderr.write(`  📝 ${ev.file}\n`);
-        break;
-      case 'steer':
-        process.stderr.write(`\n  ⟦steer: ${ev.text}⟧\n`);
-        break;
-      case 'halt':
-        process.stderr.write('\n  Halted.\n');
-        break;
-      case 'done':
-        break;
-    }
-  }
-
-  // Replay all events recorded so far
-  const initialEvents = journal.getAll();
-  for (const ev of initialEvents) {
-    printEvent(ev);
-  }
-
-  // If already finished, exit immediately
-  if (journal.isFinished || initialEvents.some((e) => e.type === 'done')) {
-    if (!firstText) process.stdout.write('\n');
-    return;
-  }
-
-  let watchTimer: ReturnType<typeof setInterval> | null = null;
-  const cleanup = () => {
-    if (watchTimer) {
-      clearInterval(watchTimer);
-      watchTimer = null;
-    }
-    process.off('SIGINT', onSigInt);
-  };
-
-  // Ctrl+C handler: detaches if detachOnCtrlC, or halts/kills if attached
-  let ctrlCCount = 0;
-  const onSigInt = () => {
-    if (options.detachOnCtrlC) {
-      process.stderr.write('\n  Detached from session (agent still running in background).\n');
-      cleanup();
-      process.exit(0);
-    } else {
-      ctrlCCount++;
-      if (ctrlCCount === 1) {
-        process.stderr.write('\n  ⏹ Halting agent… (Ctrl+C again to force quit)\n');
-        journal.writeCommand({ type: 'halt', reason: 'user interrupted' });
-      } else {
-        process.stderr.write('\n  Force quit.\n');
-        try { process.kill(lock.pid, 'SIGKILL'); } catch {}
-        process.exit(130);
-      }
-    }
-  };
-  process.on('SIGINT', onSigInt);
-
-  // Watch for new events
-  let watchOffset = 0;
-  try {
-    const stat = statSync(journalPath);
-    watchOffset = stat.size;
-  } catch {}
-
-  await new Promise<void>((resolve) => {
-    const finish = () => {
-      cleanup();
-      resolve();
-    };
-
-    watchTimer = setInterval(() => {
-      try {
-        let alive = false;
-        try { process.kill(lock.pid, 0); alive = true; } catch {}
-
-        if (existsSync(journalPath)) {
-          const stat = statSync(journalPath);
-          if (stat.size > watchOffset) {
-            const content = readFileSync(journalPath, 'utf-8');
-            const newContent = content.slice(watchOffset);
-            watchOffset = content.length;
-            for (const line of newContent.split('\n')) {
-              if (!line.trim()) continue;
-              try {
-                const ev = JSON.parse(line) as TurnEvent;
-                printEvent(ev);
-                if (ev.type === 'done') {
-                  finish();
-                  return;
-                }
-              } catch {}
-            }
-          }
-        }
-
-        if (!alive) {
-          finish();
-        }
-      } catch {
-        finish();
-      }
-    }, 100);
-  });
-
-  if (!firstText) {
-    process.stdout.write('\n');
-  }
-}
-
 async function runStdout(
   prompt: string,
   sessionKey: string,
   thinkingLevel?: string,
   options?: { watch?: boolean; attach?: boolean },
 ) {
-  const lockManager = new SessionLockManager(LOCKS_DIR);
-  const existingLock = lockManager.readLock(sessionKey);
-  let alive = false;
-  if (existingLock) {
-    try { process.kill(existingLock.pid, 0); alive = true; } catch {}
-  }
+  const socketPath = getSocketPath(SOCKETS_DIR, sessionKey);
+  const active = await isSessionActive(socketPath);
 
-  if (options?.watch) {
-    if (!existingLock || !alive || !existingLock.turnId) {
-      process.stderr.write('No active session running for this directory.\n');
-      process.exit(1);
+  // If already active, attach/steer via socket
+  if (active) {
+    const client = new SessionSocketClient(socketPath);
+    try {
+      await client.connect();
+    } catch (e) {
+      // Failed to connect, proceed to fresh run
     }
-    await reattachStdout(sessionKey, existingLock, prompt || undefined, { detachOnCtrlC: true });
-    return;
-  }
 
-  if (options?.attach) {
-    if (!existingLock || !alive || !existingLock.turnId) {
-      process.stderr.write('No active session running for this directory.\n');
-      process.exit(1);
+    if (options?.watch || options?.attach || prompt) {
+      if (prompt) {
+        process.stderr.write(`  ⟦steer: ${prompt}⟧\n`);
+        client.sendCommand({ type: 'steer', text: prompt });
+      }
+
+      let firstText = true;
+      const onSigInt = () => {
+        if (options?.watch) {
+          process.stderr.write('\n  Detached from session.\n');
+          client.disconnect();
+          process.exit(0);
+        } else {
+          process.stderr.write('\n  ⏹ Halting agent…\n');
+          client.sendCommand({ type: 'halt', reason: 'user interrupted' });
+        }
+      };
+      process.on('SIGINT', onSigInt);
+
+      await new Promise<void>((resolve) => {
+        client.onEvent((ev) => {
+          switch (ev.type) {
+            case 'text':
+              if (firstText) {
+                process.stdout.write('\n');
+                firstText = false;
+              }
+              process.stdout.write(ev.delta || '');
+              break;
+            case 'tool':
+              if (ev.phase === 'start') {
+                process.stderr.write(`\n  → ${ev.name}(${ev.file || ''})\n`);
+              } else if (ev.phase === 'end') {
+                process.stderr.write(`  ✓ ${ev.name}\n`);
+              }
+              break;
+            case 'file':
+              process.stderr.write(`  📝 ${ev.file}\n`);
+              break;
+            case 'steer':
+              process.stderr.write(`\n  ⟦steer: ${ev.text}⟧\n`);
+              break;
+            case 'halt':
+              process.stderr.write('\n  Halted.\n');
+              break;
+            case 'done':
+              if (!firstText) process.stdout.write('\n');
+              resolve();
+              break;
+          }
+        });
+      });
+
+      process.off('SIGINT', onSigInt);
+      client.disconnect();
+      return;
     }
-    await reattachStdout(sessionKey, existingLock, prompt || undefined, { detachOnCtrlC: false });
-    return;
-  }
-
-  // Neither --watch nor --attach explicitly passed.
-  if (existingLock && alive && existingLock.turnId) {
-    // If prompt is given (lc "steer..."), default to attach (Ctrl+C halts).
-    // If no prompt is given (lc), default to watch (Ctrl+C detaches).
-    const detachOnCtrlC = !prompt;
-    await reattachStdout(sessionKey, existingLock, prompt || undefined, { detachOnCtrlC });
-    return;
-  } else if (existingLock && !alive) {
-    lockManager.forceBreak(sessionKey);
   }
 
   if (!prompt) {
@@ -812,86 +650,43 @@ async function runStdout(
     process.exit(1);
   }
 
-  const turnId = TurnJournal.newTurnId();
-  if (!lockManager.acquire(sessionKey, turnId)) {
-    const recheck = lockManager.readLock(sessionKey);
-    if (recheck && recheck.turnId) {
-      await reattachStdout(sessionKey, recheck, prompt, { detachOnCtrlC: false });
-      return;
-    }
-  }
-
-  const journal = new TurnJournal(TURNS_DIR, TURN_META_DIR, turnId, prompt);
+  const socketServer = new SessionSocketServer(socketPath, sessionKey);
+  await socketServer.start();
 
   let built;
   try {
     built = await buildAgent({ thinkingLevel });
   } catch (err) {
+    socketServer.close();
     const msg = err instanceof Error ? err.message : String(err);
-    journal.markError(msg);
-    journal.append('done', { reply: `Error: ${msg}`, finishReason: 'error' });
-    lockManager.release(sessionKey);
     process.stderr.write(`Error: ${msg}\n`);
     process.exit(1);
   }
 
   const { agent } = built;
-
-  // Subscribe to the journal and print events to stdout/stderr.
   let firstText = true;
-  const unsub = journal.subscribe(0, (ev) => {
-    switch (ev.type) {
-      case 'status':
-        // Don't print status in stdout mode — it's noise without a TUI.
-        break;
-      case 'text':
-        if (firstText) {
-          process.stdout.write('\n');
-          firstText = false;
-        }
-        process.stdout.write(ev.delta || '');
-        break;
-      case 'tool':
-        if (ev.phase === 'start') {
-          const detail = ev.file || '';
-          process.stderr.write(`\n  → ${ev.name}(${detail})\n`);
-        } else if (ev.phase === 'end') {
-          process.stderr.write(`  ✓ ${ev.name}\n`);
-        }
-        break;
-      case 'file':
-        process.stderr.write(`  📝 ${ev.file}\n`);
-        break;
-      case 'steer':
-        process.stderr.write(`\n  ⟦steer: ${ev.text}⟧\n`);
-        break;
-      case 'halt':
-        process.stderr.write('\n  Halted.\n');
-        break;
-      case 'stats':
-        // No stats display in stdout mode.
-        break;
-      case 'done':
-        // Handled after the agent finishes (below).
-        break;
-    }
-  });
 
   try {
     const handle = agent.run({
       message: prompt,
       metadata: {
         sessionId: sessionKey,
-        __journal: journal,
+        __socketServer: socketServer,
         streamCallbacks: {
           onText: (delta: string) => {
-            journal.append('text', { delta });
+            if (firstText) {
+              process.stdout.write('\n');
+              firstText = false;
+            }
+            process.stdout.write(delta);
+            socketServer.broadcast({ type: 'text', delta, ts: Date.now() });
           },
         },
       },
     });
 
-    // Ctrl+C halts the running agent instead of killing the process.
+    socketServer.attachHandle(handle);
+
     let ctrlCCount = 0;
     const onSigInt = () => {
       ctrlCCount++;
@@ -907,20 +702,15 @@ async function runStdout(
 
     const result = await handle;
     process.off('SIGINT', onSigInt);
-    unsub();
 
-    if (result.finishReason === 'halted') {
-      journal.markHalted();
-      journal.append('halt', { reason: 'halted' });
-      journal.append('done', { reply: '', finishReason: 'halted' });
-    } else {
-      const reply = result.message || '';
-      journal.markDone(reply);
-      journal.append('done', { reply, finishReason: result.finishReason });
-    }
+    socketServer.broadcast({
+      type: 'done',
+      reply: result.message || '',
+      finishReason: result.finishReason,
+      ts: Date.now(),
+    });
 
     if (firstText) {
-      // No text was streamed — print the final reply.
       console.log(result.message || '(no response)');
     } else {
       process.stdout.write('\n');
@@ -934,7 +724,7 @@ async function runStdout(
       }
     }
   } finally {
-    lockManager.release(sessionKey);
+    socketServer.close();
   }
 }
 
@@ -988,39 +778,6 @@ function loadSessionHistory(sessionsDir: string, sessionKey: string): ChatMessag
     return messages.slice(-50);
   } catch {}
   return [];
-}
-
-function replayLatestTurn(
-  turnsDir: string,
-  metaDir: string,
-  displayState: { toolActivity: ToolActivity[]; streamingText: string },
-): void {
-  const latestId = TurnJournal.latestTurnId(metaDir);
-  if (!latestId) return;
-
-  const journal = TurnJournal.loadFromDisk(turnsDir, metaDir, latestId);
-  if (!journal) return;
-
-  const meta = journal.getMeta();
-  if (Date.now() - meta.createdAt > 60 * 60 * 1000) return;
-
-  for (const ev of journal.getAll()) {
-    if (ev.type === 'tool' && ev.phase === 'start') {
-      displayState.toolActivity.push({
-        name: ev.name ?? '?',
-        detail: ev.file ?? '',
-        status: 'running',
-        timestamp: ev.ts,
-      });
-    } else if (ev.type === 'tool' && ev.phase === 'end') {
-      for (let i = displayState.toolActivity.length - 1; i >= 0; i--) {
-        if (displayState.toolActivity[i].name === ev.name && displayState.toolActivity[i].status === 'running') {
-          displayState.toolActivity[i].status = 'done';
-          break;
-        }
-      }
-    }
-  }
 }
 
 // ── Entry ────────────────────────────────────────────────────────────

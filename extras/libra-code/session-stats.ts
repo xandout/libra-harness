@@ -52,9 +52,8 @@ export function createSessionStats(
       // Track turns.
       agent.hook('beforeTurn', 'session-stats', async (ctx) => {
         stats.turns += 1;
-        // Write stats to journal if available (worker mode).
-        const journal = ctx.turn.metadata['__journal'] as any;
-        journal?.append('stats', { stats: snapshot(stats) });
+        const socketServer = ctx.turn.metadata['__socketServer'] as any;
+        socketServer?.broadcast({ type: 'stats', stats: snapshot(stats), ts: Date.now() });
       });
 
       // Accumulate token usage from each LLM call.
@@ -71,9 +70,8 @@ export function createSessionStats(
         stats.lastPromptTokens = usage.promptTokens ?? 0;
         stats.lastCompletionTokens = usage.completionTokens ?? 0;
 
-        // Write stats to journal if available (worker mode).
-        const journal = ctx.turn.metadata['__journal'] as any;
-        journal?.append('stats', { stats: snapshot(stats) });
+        const socketServer = ctx.turn.metadata['__socketServer'] as any;
+        socketServer?.broadcast({ type: 'stats', stats: snapshot(stats), ts: Date.now() });
       });
 
       // Track tool calls.
@@ -83,9 +81,8 @@ export function createSessionStats(
         stats.toolCalls += 1;
         if (toolResult.isError) stats.toolErrors += 1;
 
-        // Write stats to journal if available (worker mode).
-        const journal = ctx.turn.metadata['__journal'] as any;
-        journal?.append('stats', { stats: snapshot(stats) });
+        const socketServer = ctx.turn.metadata['__socketServer'] as any;
+        socketServer?.broadcast({ type: 'stats', stats: snapshot(stats), ts: Date.now() });
       });
     },
   };

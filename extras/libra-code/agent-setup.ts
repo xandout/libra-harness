@@ -20,7 +20,7 @@ import { createCodeToolsExtension } from '@xandout/libra-harness/extras/code-too
 import { createStreamingExtension } from '@xandout/libra-harness/extras/streaming';
 import { createFileChangeTracker } from './file-change-tracker.js';
 import { createSessionStats, type SessionStats } from './session-stats.js';
-import { createTurnEventsExtension, createCommandPollingExtension } from './turn-journal.js';
+import { createSocketEventsExtension } from './session-socket.js';
 import type { FileChange } from './tui.js';
 
 // ── Paths ────────────────────────────────────────────────────────────
@@ -28,11 +28,9 @@ import type { FileChange } from './tui.js';
 // where state must live on a mounted volume). Defaults to ~/.libra.
 export const LIBRA_HOME = process.env.LIBRA_HOME || join(homedir(), '.libra');
 export const SESSIONS_DIR = join(LIBRA_HOME, 'sessions');
+export const SOCKETS_DIR = join(LIBRA_HOME, 'sockets');
 export const SHELLS_DIR = join(LIBRA_HOME, 'shells');
 export const TODOS_DIR = join(LIBRA_HOME, 'todos');
-export const TURNS_DIR = join(LIBRA_HOME, 'turns');
-export const TURN_META_DIR = join(LIBRA_HOME, 'turn-meta');
-export const LOCKS_DIR = join(LIBRA_HOME, 'locks');
 export const CONFIG_FILE = join(LIBRA_HOME, 'config.json');
 
 export interface LibraCodeConfig {
@@ -63,11 +61,9 @@ export function saveConfig(config: LibraCodeConfig): void {
 export function ensureDirs(): void {
   mkdirSync(LIBRA_HOME, { recursive: true });
   mkdirSync(SESSIONS_DIR, { recursive: true });
+  mkdirSync(SOCKETS_DIR, { recursive: true });
   mkdirSync(SHELLS_DIR, { recursive: true });
   mkdirSync(TODOS_DIR, { recursive: true });
-  mkdirSync(TURNS_DIR, { recursive: true });
-  mkdirSync(TURN_META_DIR, { recursive: true });
-  mkdirSync(LOCKS_DIR, { recursive: true });
 }
 
 export function sessionKeyForCwd(cwd: string): string {
@@ -362,8 +358,7 @@ export async function buildAgent(opts: BuildAgentOptions = {}): Promise<BuiltAge
     model,
     codeSearchMaxIterations: 10,
   }));
-  agent.use(createTurnEventsExtension());
-  agent.use(createCommandPollingExtension());
+  agent.use(createSocketEventsExtension());
 
   return { agent, fileChanges, sessionStats, todoFile };
 }
