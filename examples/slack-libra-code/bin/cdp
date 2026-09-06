@@ -1,11 +1,41 @@
 #!/usr/bin/env node
 /**
- * Streamlined Chrome CDP Driver for UI automation.
- * Supports native click, type, scroll, wait-for using CDP.
+ * Chrome CDP Driver for Agent Browser Automation.
+ * Supports:
+ *   - Navigation: goto, url, title, reload, back, forward
+ *   - Semantic inspection: ax (accessibility tree), eval
+ *   - Interactions: click, type, press, scroll, wait-for
+ *   - Tab management: tabs, new-tab, switch-tab, close-tab
+ *   - Capture: screenshot
  */
+
+import { writeFileSync } from 'node:fs';
 
 const CDP_PORT = process.env.CHROME_DEBUG_PORT || 18800;
 const CDP_URL = `http://127.0.0.1:${CDP_PORT}`;
+
+const KEY_MAP = {
+  enter: { code: 'Enter', key: 'Enter', keyCode: 13, text: '\r' },
+  return: { code: 'Enter', key: 'Enter', keyCode: 13, text: '\r' },
+  tab: { code: 'Tab', key: 'Tab', keyCode: 9 },
+  escape: { code: 'Escape', key: 'Escape', keyCode: 27 },
+  esc: { code: 'Escape', key: 'Escape', keyCode: 27 },
+  backspace: { code: 'Backspace', key: 'Backspace', keyCode: 8 },
+  delete: { code: 'Delete', key: 'Delete', keyCode: 46 },
+  space: { code: 'Space', key: ' ', keyCode: 32, text: ' ' },
+  arrowup: { code: 'ArrowUp', key: 'ArrowUp', keyCode: 38 },
+  arrowdown: { code: 'ArrowDown', key: 'ArrowDown', keyCode: 40 },
+  arrowleft: { code: 'ArrowLeft', key: 'ArrowLeft', keyCode: 37 },
+  arrowright: { code: 'ArrowRight', key: 'ArrowRight', keyCode: 39 },
+  up: { code: 'ArrowUp', key: 'ArrowUp', keyCode: 38 },
+  down: { code: 'ArrowDown', key: 'ArrowDown', keyCode: 40 },
+  left: { code: 'ArrowLeft', key: 'ArrowLeft', keyCode: 37 },
+  right: { code: 'ArrowRight', key: 'ArrowRight', keyCode: 39 },
+  pageup: { code: 'PageUp', key: 'PageUp', keyCode: 33 },
+  pagedown: { code: 'PageDown', key: 'PageDown', keyCode: 34 },
+  home: { code: 'Home', key: 'Home', keyCode: 36 },
+  end: { code: 'End', key: 'End', keyCode: 35 },
+};
 
 async function fetchJson(url) {
   const res = await fetch(url);
@@ -13,11 +43,19 @@ async function fetchJson(url) {
   return res.json();
 }
 
-async function getPageTarget() {
+async function getPageTargets() {
   const targets = await fetchJson(`${CDP_URL}/json/list`);
-  const page = targets.find((t) => t.type === 'page' && !t.url.startsWith('devtools://'));
-  if (!page) throw new Error('No open page target found.');
-  return page;
+  return targets.filter((t) => t.type === 'page' && !t.url.startsWith('devtools://'));
+}
+
+async function getActivePageTarget(targetId) {
+  const targets = await getPageTargets();
+  if (targets.length === 0) throw new Error('No open page targets found in Chrome.');
+  if (targetId) {
+    const matched = targets.find((t) => t.id === targetId || t.id.startsWith(targetId));
+    if (matched) return matched;
+  }
+  return targets[0];
 }
 
 class CdpClient {
@@ -36,7 +74,7 @@ class CdpClient {
         else resolve(data.result);
       } else if (data.method) {
         if (this.events.has(data.method)) {
-          this.events.get(data.method).forEach(cb => cb(data.params));
+          this.events.get(data.method).forEach((cb) => cb(data.params));
         }
       }
     };
@@ -67,27 +105,148 @@ class CdpClient {
   }
 }
 
+function renderAxTree(nodes, maxDepth = 6) {
+  const nodeMap = new Map();
+  nodes.forEach((n) => nodeMap.set(n.nodeId, n));
+
+  const root = nodes.find((n) => n.role?.value === 'RootWebArea' || n.role?.value === 'WebArea') || nodes[0];
+  if (!root) return '(empty accessibility tree)';
+
+  const lines = [];
+
+  function walk(nodeId, depth) {
+    if (depth > maxDepth) return;
+    const node = nodeMap.get(nodeId);
+    if (!node) return;
+
+    const role = node.role?.value || '';
+    const name = node.name?.value ? String(node.name.value).trim() : '';
+    const value = node.value?.value ? String(node.value.value).trim() : '';
+    const desc = node.description?.value ? String(node.description.value).trim() : '';
+    const isIgnored = node.ignored === true;
+
+    const childIds = node.childIds || [];
+
+    // Filter out uninteresting structural wrappers that have no identity
+    const isGenericWrapper = ['generic', 'none', 'group', 'section', 'StaticText', 'paragraph'].includes(role) && !name && !value && !desc;
+
+    if (!isIgnored && !isGenericWrapper && (name || value || !['generic', 'none'].includes(role))) {
+      const indent = '  '.repeat(depth);
+      let line = `${indent}- ${role}`;
+      if (name) {
+        const cleanName = name.replace(/\s+/g, ' ');
+        const truncated = cleanName.length > 80 ? cleanName.slice(0, 77) + '...' : cleanName;
+        line += ` "${truncated}"`;
+      }
+      if (value) {
+        const cleanVal = value.replace(/\s+/g, ' ');
+        const truncated = cleanVal.length > 50 ? cleanVal.slice(0, 47) + '...' : cleanVal;
+        line += ` [value: "${truncated}"]`;
+      }
+      if (desc && desc !== name) {
+        const cleanDesc = desc.replace(/\s+/g, ' ');
+        const truncated = cleanDesc.length > 50 ? cleanDesc.slice(0, 47) + '...' : cleanDesc;
+        line += ` (${truncated})`;
+      }
+      lines.push(line);
+      childIds.forEach((childId) => walk(childId, depth + 1));
+    } else {
+      // Pass through children at same depth
+      childIds.forEach((childId) => walk(childId, depth));
+    }
+  }
+
+  walk(root.nodeId, 0);
+  return lines.length > 0 ? lines.join('\n') : '(no semantic elements found)';
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const cmd = args[0];
 
-  if (!cmd || cmd === 'help') {
+  if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
     console.log(`Usage: cdp <command> [args]
-Commands:
-  goto <url>
-  title
-  url
-  click <selector>
-  type <selector> <text>
-  scroll [down|up]
-  wait-for <selector>
-  eval <js>`);
-    process.exit(1);
+
+Inspection & Semantic Tree:
+  ax [max_depth]            Dump clean accessibility tree (names, roles, inputs)
+  title                     Print document.title
+  url                       Print current URL
+  eval <js>                 Evaluate JavaScript in the page context
+  screenshot [file.png]     Capture crisp page screenshot via CDP
+
+Navigation:
+  goto <url>                Navigate active tab to URL
+  reload                    Reload active page
+  back                      Go back in history
+  forward                   Go forward in history
+
+Interaction:
+  click <selector>          Click element matching CSS selector or "text=Label"
+  type <selector> <text>    Click element to focus, then type text
+  press <key>               Press key: Enter, Tab, Escape, Backspace, ArrowDown, etc.
+  scroll [up|down] [amount] Scroll page up or down (default: 500px)
+  wait-for <selector>       Wait until element appears in DOM
+
+Tab Management:
+  tabs                      List all open browser tabs
+  new-tab [url]             Open a new tab (default: about:blank)
+  switch-tab <id|index>     Switch active tab by ID or list index
+  close-tab [id]            Close a tab (default: active tab)
+`);
+    process.exit(0);
   }
 
+  // ── Tab management commands (do not require an existing connected page) ──
+  if (cmd === 'tabs') {
+    const targets = await getPageTargets();
+    if (targets.length === 0) {
+      console.log('No open tabs found.');
+      return;
+    }
+    targets.forEach((t, i) => {
+      console.log(`[${i}] ${t.title || '(untitled)'} — ${t.url} (id: ${t.id})`);
+    });
+    return;
+  }
+
+  if (cmd === 'new-tab') {
+    const targetUrl = args[1] || 'about:blank';
+    const target = await fetchJson(`${CDP_URL}/json/new?${encodeURIComponent(targetUrl)}`);
+    console.log(`Opened new tab [id: ${target.id}]: ${target.url}`);
+    return;
+  }
+
+  if (cmd === 'switch-tab') {
+    const arg = args[1];
+    if (!arg) throw new Error('switch-tab requires a tab ID or index (run "cdp tabs" to list)');
+    let targetId = arg;
+    if (/^\d+$/.test(arg)) {
+      const targets = await getPageTargets();
+      const idx = parseInt(arg, 10);
+      if (targets[idx]) targetId = targets[idx].id;
+      else throw new Error(`Tab index ${idx} out of range (0..${targets.length - 1})`);
+    }
+    await fetchJson(`${CDP_URL}/json/activate/${targetId}`);
+    console.log(`Activated tab ${targetId}`);
+    return;
+  }
+
+  if (cmd === 'close-tab') {
+    const arg = args[1];
+    let targetId = arg;
+    if (!targetId) {
+      const active = await getActivePageTarget();
+      targetId = active.id;
+    }
+    await fetchJson(`${CDP_URL}/json/close/${targetId}`);
+    console.log(`Closed tab ${targetId}`);
+    return;
+  }
+
+  // ── Page-level commands: connect WebSocket to active tab ──
   let page;
   try {
-    page = await getPageTarget();
+    page = await getActivePageTarget();
   } catch (err) {
     console.error('Failed to connect to Chrome CDP:', err.message);
     process.exit(1);
@@ -103,15 +262,14 @@ Commands:
       awaitPromise: true,
     });
     if (res.exceptionDetails) {
-      throw new Error(res.exceptionDetails.exception.description || res.exceptionDetails.text);
+      throw new Error(res.exceptionDetails.exception?.description || res.exceptionDetails.text);
     }
     return res.result;
   }
 
   async function getQuad(selector) {
     await client.send('DOM.enable');
-    
-    // Support "text=..." pseudo-selector by converting to XPath
+
     let query = selector;
     if (selector.startsWith('text=')) {
       const text = selector.substring(5).replace(/'/g, "\\'");
@@ -122,17 +280,15 @@ Commands:
     if (nodeIds.searchCount === 0) throw new Error(`Element not found: ${selector}`);
     const results = await client.send('DOM.getSearchResults', { searchId: nodeIds.searchId, fromIndex: 0, toIndex: 1 });
     const nodeId = results.nodeIds[0];
-    
-    // Scroll element into view using JS to ensure it's clickable and not hidden by banners
+
     const { object } = await client.send('DOM.resolveNode', { nodeId });
     if (object && object.objectId) {
       await client.send('Runtime.callFunctionOn', {
         objectId: object.objectId,
-        functionDeclaration: "function() { this.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' }); }",
-        awaitPromise: true
+        functionDeclaration: 'function() { this.scrollIntoView({ behavior: "instant", block: "center", inline: "center" }); }',
+        awaitPromise: true,
       });
-      // Give layout a tiny moment to settle
-      await new Promise(r => setTimeout(r, 50));
+      await new Promise((r) => setTimeout(r, 60));
     }
 
     const { model } = await client.send('DOM.getBoxModel', { nodeId });
@@ -144,88 +300,129 @@ Commands:
       const url = args[1];
       if (!url) throw new Error('goto requires a URL');
       await client.send('Page.enable');
-      let loadWait = new Promise((resolve) => client.on('Page.loadEventFired', resolve));
+      const loadWait = new Promise((resolve) => client.on('Page.loadEventFired', resolve));
       await client.send('Page.navigate', { url });
-      
-      // Wait for load, but with a timeout just in case
-      await Promise.race([
-        loadWait,
-        new Promise(resolve => setTimeout(resolve, 5000))
-      ]);
+      await Promise.race([loadWait, new Promise((resolve) => setTimeout(resolve, 5000))]);
       console.log(`Navigated to ${url}`);
+
+    } else if (cmd === 'ax') {
+      const maxDepth = args[1] ? parseInt(args[1], 10) : 6;
+      await client.send('Accessibility.enable');
+      const { nodes } = await client.send('Accessibility.getFullAXTree', { depth: maxDepth });
+      const rendered = renderAxTree(nodes, maxDepth);
+      console.log(rendered);
+
+    } else if (cmd === 'press') {
+      const keyName = args[1];
+      if (!keyName) throw new Error('press requires a key name (e.g. Enter, Tab, Escape, Backspace, ArrowDown)');
+      const lookup = KEY_MAP[keyName.toLowerCase()] || { code: keyName, key: keyName };
+      await client.send('Input.dispatchKeyEvent', {
+        type: 'rawKeyDown',
+        key: lookup.key,
+        code: lookup.code,
+        windowsVirtualKeyCode: lookup.keyCode,
+        text: lookup.text,
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      await client.send('Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        key: lookup.key,
+        code: lookup.code,
+        windowsVirtualKeyCode: lookup.keyCode,
+      });
+      console.log(`Pressed key: ${lookup.key}`);
+
+    } else if (cmd === 'screenshot') {
+      await client.send('Page.enable');
+      const res = await client.send('Page.captureScreenshot', { format: 'png' });
+      const buffer = Buffer.from(res.data, 'base64');
+      const outPath = args[1] || `/tmp/cdp_screenshot_${Date.now()}.png`;
+      writeFileSync(outPath, buffer);
+      console.log(outPath);
+
+    } else if (cmd === 'reload') {
+      await client.send('Page.enable');
+      await client.send('Page.reload', { ignoreCache: true });
+      console.log('Reloaded page');
+
+    } else if (cmd === 'back' || cmd === 'forward') {
+      await client.send('Page.enable');
+      const hist = await client.send('Page.getNavigationHistory');
+      const targetIdx = cmd === 'back' ? hist.currentIndex - 1 : hist.currentIndex + 1;
+      if (targetIdx < 0 || targetIdx >= hist.entries.length) {
+        throw new Error(`Cannot navigate ${cmd}: no entry at index ${targetIdx}`);
+      }
+      await client.send('Page.navigateToHistoryEntry', { entryId: hist.entries[targetIdx].id });
+      console.log(`Navigated ${cmd} to: ${hist.entries[targetIdx].url}`);
 
     } else if (cmd === 'title') {
       const title = await evalJs('document.title');
       console.log(title.value);
 
     } else if (cmd === 'url') {
-      const url = await evalJs('location.href');
-      console.log(url.value);
+      const currentUrl = await evalJs('location.href');
+      console.log(currentUrl.value);
 
     } else if (cmd === 'click') {
       const selector = args[1];
-      if (!selector) throw new Error('click requires a selector');
-      
+      if (!selector) throw new Error('click requires a selector or "text=..."');
+
       const model = await getQuad(selector);
-      // Quad is [x1, y1, x2, y2, x3, y3, x4, y4] (border or content)
-      // center x = (x1 + x2 + x3 + x4) / 4
       const q = model.content;
       const x = (q[0] + q[2] + q[4] + q[6]) / 4;
       const y = (q[1] + q[3] + q[5] + q[7]) / 4;
 
       await client.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
       await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
-      console.log(`Clicked ${selector} at (${x}, ${y})`);
+      console.log(`Clicked ${selector} at (${Math.round(x)}, ${Math.round(y)})`);
 
     } else if (cmd === 'type') {
       const selector = args[1];
       const text = args.slice(2).join(' ');
       if (!selector || !text) throw new Error('type requires a selector and text');
-      
-      // First click to focus
+
       const model = await getQuad(selector);
       const q = model.content;
       const x = (q[0] + q[2] + q[4] + q[6]) / 4;
       const y = (q[1] + q[3] + q[5] + q[7]) / 4;
       await client.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
       await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
-      
-      // Then type text
+
       for (const char of text) {
         await client.send('Input.dispatchKeyEvent', { type: 'char', text: char });
-        await new Promise(r => setTimeout(r, 10));
+        await new Promise((r) => setTimeout(r, 10));
       }
       console.log(`Typed into ${selector}`);
 
     } else if (cmd === 'scroll') {
       const dir = args[1] === 'up' ? -1 : 1;
-      const amount = dir * 500;
+      const amount = args[2] ? parseInt(args[2], 10) : 500;
       await client.send('Input.synthesizeScrollGesture', {
-        x: 0,
-        y: 0,
+        x: 100,
+        y: 100,
         xDistance: 0,
-        yDistance: amount,
+        yDistance: dir * amount,
         repeatCount: 1,
         repeatDelayMs: 0,
-        interactionMarkerName: 'scroll'
+        interactionMarkerName: 'scroll',
       });
-      console.log(`Scrolled ${dir > 0 ? 'down' : 'up'}`);
+      console.log(`Scrolled ${dir > 0 ? 'down' : 'up'} by ${amount}px`);
 
     } else if (cmd === 'wait-for') {
       const selector = args[1];
       if (!selector) throw new Error('wait-for requires a selector');
-      
+
       let query = selector;
       if (selector.startsWith('text=')) {
         const text = selector.substring(5).replace(/'/g, "\\'");
         query = `//*[contains(text(), '${text}')]`;
       }
-      
+
       const timeout = 10000;
       const start = Date.now();
       let found = false;
       await client.send('DOM.enable');
-      
+
       while (Date.now() - start < timeout) {
         try {
           const nodeIds = await client.send('DOM.performSearch', { query, includeUserAgentShadowDOM: true });
@@ -235,7 +432,7 @@ Commands:
             break;
           }
         } catch (e) {}
-        await new Promise(r => setTimeout(r, 200));
+        await new Promise((r) => setTimeout(r, 200));
       }
       if (!found) {
         throw new Error(`Timeout waiting for ${selector}`);
@@ -245,10 +442,10 @@ Commands:
       const expr = args.slice(1).join(' ');
       if (!expr) throw new Error('eval requires a JS expression');
       const res = await evalJs(expr);
-      console.log(JSON.stringify(res.value, null, 2));
+      console.log(typeof res.value === 'object' ? JSON.stringify(res.value, null, 2) : res.value);
 
     } else {
-      console.error(`Unknown command: ${cmd}`);
+      console.error(`Unknown command: ${cmd}. Run "cdp help" for usage.`);
       process.exit(1);
     }
   } catch (err) {
