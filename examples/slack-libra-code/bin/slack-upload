@@ -70,7 +70,7 @@ try {
     initial_comment: comment || undefined,
   });
   console.log(`Uploaded ${filename} to Slack (${channel}${threadTs ? ' thread ' + threadTs : ''})`);
-} catch (err: any) {
+} catch (err) {
   console.error('Failed to upload file to Slack:', err.message || err);
   process.exit(1);
 }

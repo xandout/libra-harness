@@ -44,7 +44,7 @@ try {
       console.log(`[${msg.user || 'bot'} @ ${msg.ts}]: ${msg.text || ''}`);
     }
   }
-} catch (err: any) {
+} catch (err) {
   console.error('Failed to read Slack conversation:', err.message || err);
   process.exit(1);
 }

@@ -50,7 +50,7 @@ try {
     thread_ts: threadTs || undefined,
   });
   console.log(`Posted message to Slack (${channel}${threadTs ? ' thread ' + threadTs : ''})`);
-} catch (err: any) {
+} catch (err) {
   console.error('Failed to post message to Slack:', err.message || err);
   process.exit(1);
 }
