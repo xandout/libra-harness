@@ -11,6 +11,13 @@ if [ -f "${LC_CWD}/.env" ]; then
   source "${LC_CWD}/.env"
 fi
 
+# Pull latest code and rebuild (fast incremental — skips if already up to date)
+cd /app
+git pull || true
+pnpm install --frozen-lockfile || true
+pnpm build || true
+pnpm --filter @xandout/libra-code build || true
+
 # Ensure Xvfb virtual display is running on :99
 if ! pgrep -x "Xvfb" >/dev/null; then
   rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
@@ -35,25 +42,6 @@ if [ "${BROWSER_AUTOSTART:-false}" = "true" ]; then
   if command -v start-browser >/dev/null 2>&1; then
     start-browser || true
   fi
-fi
-
-# If repo is not yet cloned in /app, clone it
-if [ ! -d "/app/.git" ] && [ ! -f "/app/package.json" ]; then
-  git clone https://github.com/xandout/libra-harness.git /app
-  cd /app
-  pnpm install
-  pnpm build
-  pnpm --filter @xandout/libra-code build
-  cd /app/examples/slack-libra-code
-elif [ -f "/app/package.json" ] && [ -d "/app/examples/slack-libra-code" ]; then
-  cd /app
-  if [ -d "/app/.git" ]; then
-    git pull || true
-  fi
-  pnpm install
-  pnpm build
-  pnpm --filter @xandout/libra-code build
-  cd /app/examples/slack-libra-code
 fi
 
 # Execute CMD

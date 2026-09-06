@@ -55,9 +55,16 @@ ENV TERM=xterm-256color
 ENV TZ=America/New_York
 ENV LC_CWD=/home/node/workspace
 ENV LIBRA_HOME=/home/node/workspace/.libra
+ENV BASH_ENV=/root/.bashrc
 
-# Prepare directory structure
-RUN mkdir -p /app /home/node/workspace
+# Clone and build the app at image build time
+RUN mkdir -p /app /home/node/workspace \
+  && git clone https://github.com/xandout/libra-harness.git /app \
+  && cd /app \
+  && corepack enable \
+  && pnpm install \
+  && pnpm build \
+  && pnpm --filter @xandout/libra-code build
 
 COPY bin/* /usr/local/bin/
 RUN chmod +x /usr/local/bin/*
@@ -65,7 +72,7 @@ RUN chmod +x /usr/local/bin/*
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-WORKDIR /app
+WORKDIR /home/node/workspace
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
-CMD ["pnpm", "start"]
+CMD ["pnpm", "--prefix", "/app/examples/slack-libra-code", "start"]
