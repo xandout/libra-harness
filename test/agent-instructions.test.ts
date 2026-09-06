@@ -8,7 +8,7 @@ import {
   buildSystemPrompt,
   resolveSkillsDirs,
   SYSTEM_PROMPT,
-} from '../extras/libra-code/agent-setup.js';
+} from '../packages/libra-code/agent-setup.js';
 
 describe('agent instructions & skills setup', () => {
   let tmpProjectDir: string;

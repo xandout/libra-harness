@@ -1,0 +1,728 @@
+import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, appendFileSync, openSync, closeSync } from 'node:fs';
+import { join } from 'node:path';
+import { makeToolName } from './shared.js';
+import type { Tool } from '../../../tool.js';
+
+// ── Shell registry ───────────────────────────────────────────────────
+// Lives at the extension level so backgrounded shells survive across
+// turns within the same agent. When a shell is backgrounded (detached),
+// its metadata is persisted to disk so it can be reconnected by a
+// future agent instance (e.g. a later `lc` invocation).
+//
+// Detached shells use a named pipe (FIFO) for stdin so that a future
+// process can write to them. Output goes to a regular file that can
+// be read incrementally (tail-style).
+
+export interface ShellEntry {
+  id: string;
+  process?: ChildProcess;   // undefined for reconnected (cross-process) shells
+  pid: number;
+  output: string;
+  done: boolean;
+  exitCode: number | null;
+  startedAt: number;
+  command: string;
+  cwd: string;
+  outputFile?: string;      // path to detached output file (if backgrounded)
+  inputFifo?: string;       // path to FIFO for stdin (if backgrounded)
+  detached: boolean;        // true if the process was detached from the parent
+  readOffset?: number;      // byte offset for incremental output reads
+}
+
+// ── Persisted shell metadata ─────────────────────────────────────────
+interface ShellMeta {
+  id: string;
+  pid: number;
+  command: string;
+  cwd: string;
+  startedAt: number;
+  outputFile: string;
+  inputFifo: string;
+}
+
+export class ShellRegistry {
+  private shells = new Map<string, ShellEntry>();
+  private counter = 0;
+  private shellsDir: string;
+
+  constructor(shellsDir?: string) {
+    this.shellsDir = shellsDir ?? join(process.cwd(), '.libra-shells');
+  }
+
+  private nextId(): string {
+    return `shell_${++this.counter}`;
+  }
+
+  private metaPath(id: string): string {
+    return join(this.shellsDir, `${id}.json`);
+  }
+
+  /**
+   * Create a foreground shell (pipes connected, parent waits).
+   * If background is true, the process is detached and output goes
+   * to a file. Metadata is persisted to disk so a future process
+   * can reconnect.
+   */
+  async create(command: string, cwd: string, env: Record<string, string>, background: boolean): Promise<ShellEntry> {
+    const id = this.nextId();
+    const shellsDir = this.shellsDir;
+
+    if (background) {
+      // ── Detached: output to file, stdin from FIFO, survives parent exit ──
+      // stdout/stderr → output file (regular file, readable by any process).
+      // stdin ← FIFO (named pipe, writable by any future process).
+      // The process is detached (unref'd) so it survives parent exit.
+      //
+      // A wrapper shell command records the exit code to a file after
+      // the command finishes, so a future process can see whether it
+      // succeeded — without relying on the parent's event handlers.
+      mkdirSync(shellsDir, { recursive: true });
+      const outputFile = join(shellsDir, `${id}.output`);
+      const exitFile = join(shellsDir, `${id}.exit`);
+      const inputFifo = join(shellsDir, `${id}.in`);
+      const metaFile = this.metaPath(id);
+
+      // Create the output file so it exists even if the command produces no output.
+      writeFileSync(outputFile, '');
+
+      // Create the FIFO for stdin reattachment.
+      // mkfifo is POSIX — works on macOS and Linux.
+      // Use execFileSync so it's synchronous — we need the FIFO to
+      // exist before we spawn the command that reads from it.
+      try {
+        if (existsSync(inputFifo)) unlinkSync(inputFifo);
+        execFileSync('mkfifo', [inputFifo], { stdio: 'ignore' });
+      } catch {
+        // If mkfifo fails, fall back to /dev/null for stdin.
+        // The shell will still run, but write_to_process won't work
+        // across sessions.
+      }
+
+      // Open file descriptors for stdout/stderr redirection.
+      const outFd = openSync(outputFile, 'a');
+      const errFd = outFd;
+
+      // Stdin: if the FIFO exists, use the `exec 3<>"$fifo"` trick.
+      // Opening a FIFO read-write doesn't block (the opener is both
+      // reader and writer), unlike opening read-only which blocks
+      // until a writer is present. The command then reads stdin
+      // from fd 3. This means:
+      // - Commands that don't read stdin (echo, ls) work fine — fd 3
+      //   is open but they never read from it.
+      // - Commands that read stdin (cat, repl) block on read, not
+      //   open — they wait for data on fd 3.
+      // - Any future process can write to the FIFO and the data
+      //   appears on fd 3, reaching the command's stdin.
+      // - In-memory writes (same session) also go through the FIFO
+      //   via write_to_process's FIFO path.
+      const fifoReady = existsSync(inputFifo);
+      const nullFd = openSync('/dev/null', 'r');
+
+      // Build the wrapper command.
+      // If FIFO exists: exec 3<>"$fifo"; command <&3; echo $? > exit
+      // If not:          command < /dev/null; echo $? > exit
+      const fullCommand = fifoReady
+        ? `exec 3<>"${inputFifo}"; ${command} <&3; echo $? > "${exitFile}" 2>/dev/null`
+        : `${command} < /dev/null; echo $? > "${exitFile}" 2>/dev/null`;
+
+      const child = spawn(fullCommand, {
+        shell: '/bin/bash',
+        cwd,
+        env: { ...process.env, ...env },
+        stdio: [nullFd, outFd, errFd],
+        detached: true,
+      });
+
+      closeSync(outFd);
+      try { closeSync(nullFd); } catch {}
+
+      const entry: ShellEntry = {
+        id,
+        process: child,
+        pid: child.pid ?? -1,
+        output: '',
+        done: false,
+        exitCode: null,
+        startedAt: Date.now(),
+        command,
+        cwd,
+        outputFile,
+        inputFifo: existsSync(inputFifo) ? inputFifo : undefined,
+        detached: true,
+        readOffset: 0,
+      };
+
+      // While the parent is alive, track exit for in-memory queries.
+      child.on('exit', (code) => {
+        entry.done = true;
+        entry.exitCode = code;
+      });
+      child.on('error', (err) => {
+        try { appendFileSync(outputFile, `\nError: ${err.message}\n`); } catch {}
+        entry.done = true;
+        entry.exitCode = -1;
+      });
+
+      child.unref();
+
+      const meta: ShellMeta = {
+        id,
+        pid: child.pid ?? -1,
+        command,
+        cwd,
+        startedAt: entry.startedAt,
+        outputFile,
+        inputFifo: inputFifo,
+      };
+      try { writeFileSync(metaFile, JSON.stringify(meta, null, 2)); } catch {}
+
+      this.shells.set(id, entry);
+      return entry;
+    }
+
+    // ── Foreground: pipes connected, parent owns the process ──
+    const child = spawn(command, {
+      shell: '/bin/bash',
+      cwd,
+      env: { ...process.env, ...env },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    const entry: ShellEntry = {
+      id,
+      process: child,
+      pid: child.pid ?? -1,
+      output: '',
+      done: false,
+      exitCode: null,
+      startedAt: Date.now(),
+      command,
+      cwd,
+      detached: false,
+    };
+
+    child.stdout?.on('data', (data: Buffer) => {
+      entry.output += data.toString();
+    });
+    child.stderr?.on('data', (data: Buffer) => {
+      entry.output += data.toString();
+    });
+    child.on('exit', (code) => {
+      entry.done = true;
+      entry.exitCode = code;
+    });
+    child.on('error', (err) => {
+      entry.output += `\nError: ${err.message}\n`;
+      entry.done = true;
+      entry.exitCode = -1;
+    });
+
+    this.shells.set(id, entry);
+    return entry;
+  }
+
+  /**
+   * Get a shell by ID. If it's not in the in-memory map, try to
+   * reconnect from persisted metadata on disk.
+   */
+  get(id: string): ShellEntry | undefined {
+    const cached = this.shells.get(id);
+    if (cached) return cached;
+
+    // Try to reconnect from disk.
+    const metaFile = this.metaPath(id);
+    if (!existsSync(metaFile)) return undefined;
+
+    try {
+      const meta = JSON.parse(readFileSync(metaFile, 'utf-8')) as ShellMeta;
+      const outputFile = meta.outputFile;
+      const exitFile = join(this.shellsDir, `${id}.exit`);
+
+      // Check if the process is still alive (signal 0 = probe).
+      let alive = false;
+      try {
+        process.kill(meta.pid, 0);
+        alive = true;
+      } catch {
+        alive = false;
+      }
+
+      // Read accumulated output from file.
+      let output = '';
+      if (existsSync(outputFile)) {
+        output = readFileSync(outputFile, 'utf-8');
+      }
+
+      // Check if exit code was recorded.
+      let exitCode: number | null = null;
+      let done = false;
+      if (existsSync(exitFile)) {
+        exitCode = Number(readFileSync(exitFile, 'utf-8').trim());
+        done = true;
+      } else if (!alive) {
+        // Process died without recording exit code.
+        done = true;
+        exitCode = -1;
+      }
+
+      const entry: ShellEntry = {
+        id,
+        pid: meta.pid,
+        output,
+        done,
+        exitCode,
+        startedAt: meta.startedAt,
+        command: meta.command,
+        cwd: meta.cwd,
+        outputFile,
+        inputFifo: meta.inputFifo,
+        detached: true,
+        readOffset: output.length,
+        // No process handle — but we can write to the FIFO and kill by PID.
+      };
+
+      this.shells.set(id, entry);
+      return entry;
+    } catch {
+      return undefined;
+    }
+  }
+
+  delete(id: string): boolean {
+    const removed = this.shells.delete(id);
+
+    // Clean up disk artifacts for detached shells.
+    const metaFile = this.metaPath(id);
+    const outputFile = join(this.shellsDir, `${id}.output`);
+    const exitFile = join(this.shellsDir, `${id}.exit`);
+    const inputFifo = join(this.shellsDir, `${id}.in`);
+    for (const f of [metaFile, outputFile, exitFile, inputFifo]) {
+      try { unlinkSync(f); } catch {}
+    }
+
+    return removed;
+  }
+
+  /** Kill all in-memory backgrounded shells. Called on extension close. */
+  close(): void {
+    for (const [id, entry] of this.shells) {
+      if (!entry.done && entry.process) {
+        try {
+          entry.process.kill('SIGKILL');
+        } catch {
+          // already dead
+        }
+      }
+      // Detached shells survive — that's the point.
+      // Only clean up disk artifacts for non-detached shells.
+      if (!entry.detached) {
+        this.delete(id);
+      }
+      this.shells.delete(id);
+    }
+  }
+}
+
+// ── Tool factories that accept a registry ────────────────────────────
+export type ShellToolFactory = (cfg: { toolPrefix: string; registry: ShellRegistry }) => Tool;
+
+// ── exec ─────────────────────────────────────────────────────────────
+export const execTool: ShellToolFactory = (cfg) => ({
+  name: makeToolName(cfg.toolPrefix, 'exec'),
+  description:
+    'Execute a shell command. By default, runs the command and waits for it to complete, ' +
+    'returning stdout and stderr. Set timeout (ms) to limit execution time — if the command ' +
+    'is still running when the timeout elapses, it is detached and backgrounded with a shell_id ' +
+    'so you can retrieve output later with get_output. ' +
+    'Set timeout to 0 to background immediately. ' +
+    'Backgrounded shells are detached from the agent process and survive process exit — ' +
+    'any future agent turn can observe output (get_output), send input (write_to_process), ' +
+    'or kill (kill_shell) by shell_id. All backgrounded shells use a named pipe (FIFO) for ' +
+    'stdin, so write_to_process works across sessions and process restarts. ' +
+    'Prefer backgrounding (timeout=0) for any command that might run long, block on input, ' +
+    'or need to survive across agent turns — this avoids blocking the agent and ensures ' +
+    'the process can be adopted by any future turn. ' +
+    'Commands run in the current working directory. Do not use this for file operations — ' +
+    'use the dedicated file tools instead.',
+  parameters: {
+    type: 'object',
+    properties: {
+      command: {
+        type: 'string',
+        description: 'The shell command to execute.',
+      },
+      timeout: {
+        type: 'integer',
+        description: 'Timeout in milliseconds. Default: 30000 (30s). Set to 0 to background immediately.',
+      },
+      cwd: {
+        type: 'string',
+        description: 'Working directory for the command. Default: current working directory.',
+      },
+      env: {
+        type: 'object',
+        description: 'Additional environment variables (merged with process.env).',
+      },
+    },
+    required: ['command'],
+  },
+  async execute(args, context) {
+    const command = String(args.command ?? '');
+    if (!command) {
+      return { toolCallId: '', content: 'Error: command is required' };
+    }
+
+    const timeout = Number(args.timeout ?? 30000);
+    const cwd = String(args.cwd ?? process.cwd());
+    const extraEnv = (args.env ?? {}) as Record<string, string>;
+
+    // Background immediately — detach the process.
+    if (timeout === 0) {
+      const entry = await cfg.registry.create(command, cwd, extraEnv, true);
+      return {
+        toolCallId: '',
+        content: `Backgrounded: ${entry.id} (pid ${entry.pid})\nUse get_output with shell_id "${entry.id}" to read output, or kill_shell to terminate.`,
+      };
+    }
+
+    // Foreground — wait for completion or timeout.
+    const entry = await cfg.registry.create(command, cwd, extraEnv, false);
+
+    const elapsed = await new Promise<number>((resolve) => {
+      const start = Date.now();
+      
+      const onAbort = () => {
+        clearInterval(check);
+        try { entry.process?.kill('SIGKILL'); } catch {}
+        cfg.registry.delete(entry.id);
+        resolve(Date.now() - start);
+      };
+
+      if (context?.signal?.aborted) {
+        onAbort();
+        return;
+      }
+      
+      if (context?.signal) {
+        context.signal.addEventListener('abort', onAbort, { once: true });
+      }
+
+      const check = setInterval(() => {
+        if (entry.done) {
+          clearInterval(check);
+          if (context?.signal) {
+            context.signal.removeEventListener('abort', onAbort);
+          }
+          resolve(Date.now() - start);
+        } else if (Date.now() - start >= timeout) {
+          clearInterval(check);
+          if (context?.signal) {
+            context.signal.removeEventListener('abort', onAbort);
+          }
+          resolve(Date.now() - start);
+        }
+      }, 50);
+    });
+
+    if (context?.signal?.aborted) {
+      return {
+        toolCallId: '',
+        content: `Halted by user. Process was killed.`,
+        isError: true,
+      };
+    }
+
+    if (entry.done) {
+      const output = entry.output || '(no output)';
+      const truncated = output.length > 50000
+        ? output.slice(0, 50000) + '\n[output truncated]'
+        : output;
+      cfg.registry.delete(entry.id);
+      return {
+        toolCallId: '',
+        content: `Exit code: ${entry.exitCode}\n${truncated}`,
+      };
+    }
+
+    // Timed out — re-spawn as detached so it survives.
+    // Kill the foreground process first.
+    try { entry.process?.kill('SIGKILL'); } catch {}
+    cfg.registry.delete(entry.id);
+
+    // Re-create as detached, capturing output from the start.
+    const bgEntry = await cfg.registry.create(command, cwd, extraEnv, true);
+    return {
+      toolCallId: '',
+      content: `Timed out after ${elapsed}ms. Detached and backgrounded as ${bgEntry.id} (pid ${bgEntry.pid}).\nUse get_output with shell_id "${bgEntry.id}" to read output, or kill_shell to terminate.`,
+    };
+  },
+});
+
+// ── get_output ───────────────────────────────────────────────────────
+export const getOutputTool: ShellToolFactory = (cfg) => ({
+  name: makeToolName(cfg.toolPrefix, 'get_output'),
+  description:
+    'Read output from a backgrounded shell process. Returns accumulated stdout and stderr. ' +
+    'If the process has exited, includes the exit code and the shell is cleaned up. ' +
+    'Works across sessions — if the shell was started in a previous invocation, it is ' +
+    'reconnected from persisted metadata. Use the shell_id returned by exec. ' +
+    'On first call, returns all output so far. On subsequent calls, returns only new output ' +
+    'since the last read (incremental tailing).',
+  parameters: {
+    type: 'object',
+    properties: {
+      shell_id: {
+        type: 'string',
+        description: 'The shell ID returned by exec when the command was backgrounded.',
+      },
+    },
+    required: ['shell_id'],
+  },
+  async execute(args) {
+    const shellId = String(args.shell_id ?? '');
+    if (!shellId) {
+      return { toolCallId: '', content: 'Error: shell_id is required' };
+    }
+
+    // get() auto-reconnects from disk if the shell isn't in memory.
+    const entry = cfg.registry.get(shellId);
+    if (!entry) {
+      return { toolCallId: '', content: `Error: no shell with id "${shellId}"` };
+    }
+
+    // For detached shells, read from the output file.
+    // Use readOffset for incremental reads — first call returns all
+    // output so far, subsequent calls return only new bytes.
+    // When the process is done, always return all unread output.
+    let output = entry.output;
+    let isNew = false;
+    if (entry.detached && entry.outputFile && existsSync(entry.outputFile)) {
+      try {
+        const fullOutput = readFileSync(entry.outputFile, 'utf-8');
+        const offset = entry.readOffset ?? 0;
+        if (fullOutput.length > offset) {
+          // New output available — return only the new portion.
+          output = fullOutput.slice(offset);
+          entry.readOffset = fullOutput.length;
+          entry.output = fullOutput;
+          isNew = true;
+        } else if (entry.done) {
+          // Process is done but no new output — return empty string
+          // (the exit message will be appended below).
+          output = '';
+          isNew = true;
+        } else if (offset > 0) {
+          // No new output since last read.
+          output = '';
+          isNew = true;
+        } else {
+          // First read — return everything.
+          output = fullOutput;
+          entry.readOffset = fullOutput.length;
+          entry.output = fullOutput;
+          isNew = true;
+        }
+      } catch {}
+    }
+
+    const truncated = output.length > 50000
+      ? output.slice(0, 50000) + '\n[output truncated]'
+      : output;
+
+    if (entry.done) {
+      cfg.registry.delete(shellId);
+      return {
+        toolCallId: '',
+        content: `Process exited (code: ${entry.exitCode}).\n${truncated}`,
+      };
+    }
+
+    if (isNew && output === '') {
+      return {
+        toolCallId: '',
+        content: `Still running (pid ${entry.pid}). No new output since last read.`,
+      };
+    }
+
+    return {
+      toolCallId: '',
+      content: `Still running (pid ${entry.pid}).\n${truncated}`,
+    };
+  },
+});
+
+// ── kill_shell ───────────────────────────────────────────────────────
+export const killShellTool: ShellToolFactory = (cfg) => ({
+  name: makeToolName(cfg.toolPrefix, 'kill_shell'),
+  description:
+    'Kill a backgrounded shell process by its shell_id. Sends SIGKILL. ' +
+    'Returns the final accumulated output. Works across sessions.',
+  parameters: {
+    type: 'object',
+    properties: {
+      shell_id: {
+        type: 'string',
+        description: 'The shell ID returned by exec.',
+      },
+    },
+    required: ['shell_id'],
+  },
+  async execute(args) {
+    const shellId = String(args.shell_id ?? '');
+    if (!shellId) {
+      return { toolCallId: '', content: 'Error: shell_id is required' };
+    }
+
+    const entry = cfg.registry.get(shellId);
+    if (!entry) {
+      return { toolCallId: '', content: `Error: no shell with id "${shellId}"` };
+    }
+
+    // Kill the entire process group (negative PID) so detached children
+    // (e.g. node subprocesses spawned inside a bash loop) are also killed.
+    // Detached shells run with their own process group (detached:true in spawn),
+    // so killing just entry.pid would orphan any children it spawned.
+    try {
+      process.kill(-entry.pid, 'SIGKILL');
+    } catch {
+      // Group already dead — fall back to direct PID kill.
+      try { process.kill(entry.pid, 'SIGKILL'); } catch { /* already dead */ }
+    }
+
+    // Give it a moment to flush output.
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Re-read output file for detached shells.
+    let output = entry.output;
+    if (entry.detached && entry.outputFile && existsSync(entry.outputFile)) {
+      try { output = readFileSync(entry.outputFile, 'utf-8'); } catch {}
+    }
+
+    const truncated = output.length > 50000
+      ? output.slice(0, 50000) + '\n[output truncated]'
+      : output;
+
+    cfg.registry.delete(shellId);
+    return {
+      toolCallId: '',
+      content: `Killed ${shellId} (pid ${entry.pid}).\n${truncated}`,
+    };
+  },
+});
+
+// ── write_to_process ─────────────────────────────────────────────────
+export const writeToProcessTool: ShellToolFactory = (cfg) => ({
+  name: makeToolName(cfg.toolPrefix, 'write_to_process'),
+  description:
+    'Write input to the stdin of a backgrounded interactive shell process. ' +
+    'Use this for shells running TUI programs, REPLs, or commands that wait for input. ' +
+    'For a simple Enter keypress, send "\\n". ' +
+    'Works across sessions — reconnected shells write to a named pipe (FIFO) ' +
+    'that the detached process reads from.',
+  parameters: {
+    type: 'object',
+    properties: {
+      shell_id: {
+        type: 'string',
+        description: 'The shell ID returned by exec.',
+      },
+      input: {
+        type: 'string',
+        description: 'The text to write to the process stdin.',
+      },
+    },
+    required: ['shell_id', 'input'],
+  },
+  async execute(args) {
+    const shellId = String(args.shell_id ?? '');
+    const input = String(args.input ?? '');
+    if (!shellId) {
+      return { toolCallId: '', content: 'Error: shell_id is required' };
+    }
+    if (!input) {
+      return { toolCallId: '', content: 'Error: input is required' };
+    }
+
+    const entry = cfg.registry.get(shellId);
+    if (!entry) {
+      return { toolCallId: '', content: `Error: no shell with id "${shellId}"` };
+    }
+
+    if (entry.done) {
+      return { toolCallId: '', content: `Error: process ${shellId} has already exited` };
+    }
+
+    // For reconnected shells, check if the PID is still alive.
+    if (!entry.process) {
+      try { process.kill(entry.pid, 0); } catch {
+        entry.done = true;
+        entry.exitCode = -1;
+        return { toolCallId: '', content: `Error: process ${shellId} has already exited` };
+      }
+    }
+
+    // Write to the FIFO. Both in-memory and reconnected shells read
+    // stdin from the FIFO (via the `exec 3<>"$fifo"` trick in the
+    // wrapper command). We use a subprocess to write so we don't
+    // block the event loop — opening a FIFO for writing blocks until
+    // a reader is present, and the detached shell is the reader.
+    if (entry.inputFifo && existsSync(entry.inputFifo)) {
+      const { spawn } = await import('node:child_process');
+      return new Promise((resolve) => {
+        // Use a heredoc to safely pass the input to printf, which
+        // writes to the FIFO. This handles special characters.
+        const writer = spawn('sh', ['-c', `printf %s "$1" >> "${entry.inputFifo}"`, 'write_to_process', input], { stdio: 'ignore' });
+        writer.on('exit', (code) => {
+          if (code === 0) {
+            resolve({
+              toolCallId: '',
+              content: `Wrote ${input.length} bytes to ${shellId}`,
+            });
+          } else {
+            resolve({
+              toolCallId: '',
+              content: `Error writing to ${shellId}: exit code ${code}`,
+              isError: true,
+            });
+          }
+        });
+        writer.on('error', (err) => {
+          resolve({
+            toolCallId: '',
+            content: `Error writing to ${shellId}: ${err.message}`,
+            isError: true,
+          });
+        });
+      });
+    }
+
+    // No FIFO — fall back to in-memory pipe if available (legacy path
+    // for shells backgrounded before FIFO support, or if mkfifo failed).
+    if (entry.process && entry.process.stdin && !entry.process.stdin.destroyed) {
+      const stdin = entry.process.stdin;
+      return new Promise((resolve) => {
+        stdin.write(input, (err) => {
+          if (err) {
+            resolve({
+              toolCallId: '',
+              content: `Error writing to ${shellId}: ${err.message}`,
+              isError: true,
+            });
+          } else {
+            resolve({
+              toolCallId: '',
+              content: `Wrote ${input.length} bytes to ${shellId}`,
+            });
+          }
+        });
+      });
+    }
+
+    return {
+      toolCallId: '',
+      content: `Error: shell ${shellId} has no writable stdin (no FIFO and no process handle)`,
+      isError: true,
+    };
+  },
+});

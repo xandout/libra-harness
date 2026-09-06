@@ -1,7 +1,7 @@
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Agent, type Model, type ModelRequest, type ModelResponse, type ToolCall } from '../src/index.js';
-import { createOpenAICompatibleServer } from '../src/extras/openai-provider/index.js';
+import { createOpenAICompatibleServer } from '../src/openai-provider/index.js';
 
 class RecordingModel implements Model {
   readonly requests: ModelRequest[] = [];

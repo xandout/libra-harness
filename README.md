@@ -14,7 +14,7 @@ pnpm add @xandout/libra-harness
 
 ```typescript
 import { Agent } from '@xandout/libra-harness'
-import { resolveModel } from '@xandout/libra-harness/extras/models'
+import { resolveModel } from '@xandout/libra-harness/models'
 
 // Resolve a model from environment variables (DEEPSEEK_API_KEY, OPENAI_API_KEY, etc.)
 const model = await resolveModel('deepseek/deepseek-v4-flash')
@@ -140,8 +140,8 @@ agent.use(loggingExtension)
 Libra ships with a set of optional extensions under `@xandout/libra-harness/extras`. Each is importable via its own subpath — import only what you need:
 
 ```typescript
-import { createLoggerExtension } from '@xandout/libra-harness/extras/logger'
-import { createDiskSessionExtension } from '@xandout/libra-harness/extras/disk-session'
+import { createLoggerExtension } from '@xandout/libra-harness/extensions/logger'
+import { createDiskSessionExtension } from '@xandout/libra-harness/extensions/disk-session'
 
 agent.use(createLoggerExtension())
 agent.use(createDiskSessionExtension({ dir: './sessions' }))
@@ -149,37 +149,37 @@ agent.use(createDiskSessionExtension({ dir: './sessions' }))
 
 | Extension | Import | Description |
 |-----------|--------|-------------|
-| logger | `@xandout/libra-harness/extras/logger` | Logs each lifecycle stage |
-| streaming | `@xandout/libra-harness/extras/streaming` | Streams text/reasoning/tool-input deltas |
-| otel | `@xandout/libra-harness/extras/otel` | OpenTelemetry tracing (JSONL or OTLP export) |
-| weather-tool | `@xandout/libra-harness/extras/weather-tool` | Registers a `get_weather` tool |
-| structured-output | `@xandout/libra-harness/extras/structured-output` | Validates LLM output against a JSON schema |
-| mcp | `@xandout/libra-harness/extras/mcp` | Connects to MCP servers, registers tools |
-| skills | `@xandout/libra-harness/extras/skills` | Loads Agent Skills from directories |
-| filesystem | `@xandout/libra-harness/extras/filesystem` | File read/write/list tools |
-| scripts | `@xandout/libra-harness/extras/scripts` | Runs shell scripts in pipeline stages |
-| keyword-extractor | `@xandout/libra-harness/extras/keyword-extractor` | Extracts keywords from messages (local NLP) |
-| token-stats | `@xandout/libra-harness/extras/token-stats` | Tracks token usage per turn |
-| tool-buffer | `@xandout/libra-harness/extras/tool-buffer` | Buffers and replays tool results |
-| auto-steer | `@xandout/libra-harness/extras/auto-steer` | Auto-injects steering messages based on conditions |
-| emoji | `@xandout/libra-harness/extras/emoji` | Decorates responses with an emoji prefix |
-| timestamp | `@xandout/libra-harness/extras/timestamp` | Records start/finish timestamps in metadata |
-| disk-session | `@xandout/libra-harness/extras/disk-session` | Disk-backed session history per session ID |
-| mem-session | `@xandout/libra-harness/extras/mem-session` | In-memory session history per session ID |
-| memory | `@xandout/libra-harness/extras/memory` | Long-term memory with LLM-based extraction |
+| logger | `@xandout/libra-harness/extensions/logger` | Logs each lifecycle stage |
+| streaming | `@xandout/libra-harness/extensions/streaming` | Streams text/reasoning/tool-input deltas |
+| otel | `@xandout/libra-harness/extensions/otel` | OpenTelemetry tracing (JSONL or OTLP export) |
+| weather-tool | `@xandout/libra-harness/extensions/weather-tool` | Registers a `get_weather` tool |
+| structured-output | `@xandout/libra-harness/extensions/structured-output` | Validates LLM output against a JSON schema |
+| mcp | `@xandout/libra-harness/extensions/mcp` | Connects to MCP servers, registers tools |
+| skills | `@xandout/libra-harness/extensions/skills` | Loads Agent Skills from directories |
+| filesystem | `@xandout/libra-harness/extensions/filesystem` | File read/write/list tools |
+| scripts | `@xandout/libra-harness/extensions/scripts` | Runs shell scripts in pipeline stages |
+| keyword-extractor | `@xandout/libra-harness/extensions/keyword-extractor` | Extracts keywords from messages (local NLP) |
+| token-stats | `@xandout/libra-harness/extensions/token-stats` | Tracks token usage per turn |
+| tool-buffer | `@xandout/libra-harness/extensions/tool-buffer` | Buffers and replays tool results |
+| auto-steer | `@xandout/libra-harness/extensions/auto-steer` | Auto-injects steering messages based on conditions |
+| emoji | `@xandout/libra-harness/extensions/emoji` | Decorates responses with an emoji prefix |
+| timestamp | `@xandout/libra-harness/extensions/timestamp` | Records start/finish timestamps in metadata |
+| disk-session | `@xandout/libra-harness/extensions/disk-session` | Disk-backed session history per session ID |
+| mem-session | `@xandout/libra-harness/extensions/mem-session` | In-memory session history per session ID |
+| memory | `@xandout/libra-harness/extensions/memory` | Long-term memory with LLM-based extraction |
 
 **Priority** controls hook execution order within each lifecycle stage (higher = runs first, ties keep registration order). Set `priority` on any extension whose hooks must run before or after another extension's hooks.
 
-See [`src/extras/README.md`](src/extras/README.md) for full API docs.
+See [`src/extensions/README.md`](src/extensions/README.md) for full API docs.
 
 ### Extension loader
 
 For larger setups, `loadExtensions` accepts a mix of factory functions, `Extension` objects, and directory paths. It passes a shared config object to each factory, sorts by priority, and handles cleanup:
 
 ```typescript
-import { loadExtensions, installExtensions, closeExtensions } from '@xandout/libra-harness/extras'
-import { createLoggerExtension } from '@xandout/libra-harness/extras/logger'
-import { createMcpExtension } from '@xandout/libra-harness/extras/mcp'
+import { loadExtensions, installExtensions, closeExtensions } from '@xandout/libra-harness/extensions'
+import { createLoggerExtension } from '@xandout/libra-harness/extensions/logger'
+import { createMcpExtension } from '@xandout/libra-harness/extensions/mcp'
 
 const loaded = await loadExtensions(
   [
@@ -201,10 +201,10 @@ await closeExtensions(loaded)     // calls close() on extensions that have one (
 
 ### Native resolver
 
-The easiest way to get a model is `resolveModel` from `@xandout/libra-harness/extras/models`. It reads API keys from environment variables and loads the appropriate AI SDK provider package dynamically:
+The easiest way to get a model is `resolveModel` from `@xandout/libra-harness/models`. It reads API keys from environment variables and loads the appropriate AI SDK provider package dynamically:
 
 ```typescript
-import { resolveModel } from '@xandout/libra-harness/extras/models'
+import { resolveModel } from '@xandout/libra-harness/models'
 
 // Reads DEEPSEEK_API_KEY from env, loads @ai-sdk/deepseek
 const model = await resolveModel('deepseek/deepseek-v4-flash')
@@ -244,7 +244,7 @@ const model = new AISdkModel(openai('gpt-4.1-mini'))
 Route requests to different models based on input content — e.g. send images to a vision model:
 
 ```typescript
-import { createRoutingModel, hasImageInput } from '@xandout/libra-harness/extras/models'
+import { createRoutingModel, hasImageInput } from '@xandout/libra-harness/models'
 
 const model = createRoutingModel({
   default: await resolveModel('deepseek/deepseek-v4-flash'),
@@ -274,8 +274,8 @@ Expose Libra agents as OpenAI-compatible models. Any framework that supports a c
 
 ```typescript
 import { Agent } from '@xandout/libra-harness'
-import { resolveModel } from '@xandout/libra-harness/extras/models'
-import { createOpenAICompatibleServer } from '@xandout/libra-harness/extras/openai-provider'
+import { resolveModel } from '@xandout/libra-harness/models'
+import { createOpenAICompatibleServer } from '@xandout/libra-harness/openai-provider'
 
 const model = await resolveModel('deepseek/deepseek-v4-flash')
 

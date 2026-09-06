@@ -9,7 +9,7 @@ The server itself is a library export — `createOpenAICompatibleServer` from `l
 
 ```typescript
 import { Agent } from '@xandout/libra-harness';
-import { createOpenAICompatibleServer } from '@xandout/libra-harness/extras/openai-provider';
+import { createOpenAICompatibleServer } from '@xandout/libra-harness/openai-provider';
 
 const server = createOpenAICompatibleServer({
   agents: {

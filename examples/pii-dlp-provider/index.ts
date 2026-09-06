@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { Agent } from '@xandout/libra-harness';
-import { createOpenAICompatibleServer } from '@xandout/libra-harness/extras/openai-provider';
+import { createOpenAICompatibleServer } from '@xandout/libra-harness/openai-provider';
 import { createPiiSwapExtension, createPiiDetector, restorePlaceholders, type PiiLogEntry } from './pii-swap.ts';
 import { createCsvLookupTool, getKnownNames } from './csv-tool.ts';
 

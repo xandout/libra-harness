@@ -1,12 +1,12 @@
 import 'node:process';
 import { readFileSync } from 'node:fs';
 import { Agent, type Extension } from '@xandout/libra-harness';
-import { resolveModel } from '@xandout/libra-harness/extras/models';
-import { createLoggerExtension } from '@xandout/libra-harness/extras/logger';
-import { createMemSessionExtension } from '@xandout/libra-harness/extras/mem-session';
-import { createWeatherToolExtension } from '@xandout/libra-harness/extras/weather-tool';
-import { createEmojiExtension } from '@xandout/libra-harness/extras/emoji';
-import { timestampExtension } from '@xandout/libra-harness/extras/timestamp';
+import { resolveModel } from '@xandout/libra-harness/models';
+import { createLoggerExtension } from '@xandout/libra-harness/extensions/logger';
+import { createMemSessionExtension } from '@xandout/libra-harness/extensions/mem-session';
+import { createWeatherToolExtension } from '@xandout/libra-harness/extensions/weather-tool';
+import { createEmojiExtension } from '@xandout/libra-harness/extensions/emoji';
+import { timestampExtension } from '@xandout/libra-harness/extensions/timestamp';
 
 // Load .env if present (no dependency needed).
 try {

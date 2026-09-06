@@ -1,0 +1,672 @@
+#!/usr/bin/env node
+/**
+ * Chrome CDP Driver for Agent Browser Automation.
+ * Supports:
+ *   - Semantic inspection: ax (accessibility tree with [@ref] tags, default depth: 8)
+ *   - Targeted interactions: click, type, press, scroll, wait-for
+ *       Target by:
+ *         - AX Ref tag:       cdp click @3 (or cdp click 3)
+ *         - Role + Name:      cdp click "button:Search" or cdp click "role=button name=Search"
+ *         - Text (exact/sub): cdp click "text=Search" (exact match prioritized over substring)
+ *         - CSS selector:     cdp click "#subBtn" or cdp click "input[type=submit]"
+ *   - Navigation: goto, url, title, reload, back, forward
+ *   - Tab management: tabs, new-tab, switch-tab, close-tab
+ *   - Capture: screenshot (or shot)
+ */
+
+import { writeFileSync, readFileSync, existsSync } from 'node:fs';
+
+const CDP_PORT = process.env.CHROME_DEBUG_PORT || 18800;
+const CDP_URL = `http://127.0.0.1:${CDP_PORT}`;
+const REFS_FILE = '/tmp/cdp_ax_refs.json';
+
+const KEY_MAP = {
+  enter: { code: 'Enter', key: 'Enter', keyCode: 13, text: '\r' },
+  return: { code: 'Enter', key: 'Enter', keyCode: 13, text: '\r' },
+  tab: { code: 'Tab', key: 'Tab', keyCode: 9 },
+  escape: { code: 'Escape', key: 'Escape', keyCode: 27 },
+  esc: { code: 'Escape', key: 'Escape', keyCode: 27 },
+  backspace: { code: 'Backspace', key: 'Backspace', keyCode: 8 },
+  delete: { code: 'Delete', key: 'Delete', keyCode: 46 },
+  space: { code: 'Space', key: ' ', keyCode: 32, text: ' ' },
+  arrowup: { code: 'ArrowUp', key: 'ArrowUp', keyCode: 38 },
+  arrowdown: { code: 'ArrowDown', key: 'ArrowDown', keyCode: 40 },
+  arrowleft: { code: 'ArrowLeft', key: 'ArrowLeft', keyCode: 37 },
+  arrowright: { code: 'ArrowRight', key: 'ArrowRight', keyCode: 39 },
+  up: { code: 'ArrowUp', key: 'ArrowUp', keyCode: 38 },
+  down: { code: 'ArrowDown', key: 'ArrowDown', keyCode: 40 },
+  left: { code: 'ArrowLeft', key: 'ArrowLeft', keyCode: 37 },
+  right: { code: 'ArrowRight', key: 'ArrowRight', keyCode: 39 },
+  pageup: { code: 'PageUp', key: 'PageUp', keyCode: 33 },
+  pagedown: { code: 'PageDown', key: 'PageDown', keyCode: 34 },
+  home: { code: 'Home', key: 'Home', keyCode: 36 },
+  end: { code: 'End', key: 'End', keyCode: 35 },
+};
+
+const INTERACTIVE_ROLES = new Set([
+  'button',
+  'link',
+  'textbox',
+  'searchbox',
+  'combobox',
+  'checkbox',
+  'radio',
+  'tab',
+  'menuitem',
+  'menuitemcheckbox',
+  'menuitemradio',
+  'switch',
+  'spinbutton',
+  'slider',
+  'option',
+  'treeitem',
+]);
+
+async function fetchJson(url, options = {}) {
+  const res = await fetch(url, options);
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+  return res.json();
+}
+
+async function getPageTargets() {
+  const targets = await fetchJson(`${CDP_URL}/json/list`);
+  return targets.filter((t) => t.type === 'page' && !t.url.startsWith('devtools://'));
+}
+
+async function getActivePageTarget(targetId) {
+  const targets = await getPageTargets();
+  if (targets.length === 0) throw new Error('No open page targets found in Chrome.');
+  if (targetId) {
+    const matched = targets.find((t) => t.id === targetId || t.id.startsWith(targetId));
+    if (matched) return matched;
+  }
+  return targets[0];
+}
+
+class CdpClient {
+  constructor(webSocketDebuggerUrl) {
+    this.ws = new WebSocket(webSocketDebuggerUrl);
+    this.id = 1;
+    this.callbacks = new Map();
+    this.events = new Map();
+
+    this.ws.onmessage = (msg) => {
+      const data = JSON.parse(msg.data);
+      if (data.id && this.callbacks.has(data.id)) {
+        const { resolve, reject } = this.callbacks.get(data.id);
+        this.callbacks.delete(data.id);
+        if (data.error) reject(new Error(data.error.message));
+        else resolve(data.result);
+      } else if (data.method) {
+        if (this.events.has(data.method)) {
+          this.events.get(data.method).forEach((cb) => cb(data.params));
+        }
+      }
+    };
+  }
+
+  async connect() {
+    return new Promise((resolve, reject) => {
+      this.ws.onopen = resolve;
+      this.ws.onerror = reject;
+    });
+  }
+
+  async close() {
+    this.ws.close();
+  }
+
+  async send(method, params = {}) {
+    return new Promise((resolve, reject) => {
+      const id = this.id++;
+      this.callbacks.set(id, { resolve, reject });
+      this.ws.send(JSON.stringify({ id, method, params }));
+    });
+  }
+
+  on(method, cb) {
+    if (!this.events.has(method)) this.events.set(method, []);
+    this.events.get(method).push(cb);
+  }
+}
+
+function renderAxTree(nodes, maxDepth = 8) {
+  const nodeMap = new Map();
+  nodes.forEach((n) => nodeMap.set(n.nodeId, n));
+
+  const root = nodes.find((n) => n.role?.value === 'RootWebArea' || n.role?.value === 'WebArea') || nodes[0];
+  if (!root) return '(empty accessibility tree)';
+
+  const lines = [];
+  const refs = {};
+  let refCounter = 0;
+
+  function walk(nodeId, depth) {
+    if (depth > maxDepth) return;
+    const node = nodeMap.get(nodeId);
+    if (!node) return;
+
+    const role = node.role?.value || '';
+    const name = node.name?.value ? String(node.name.value).trim() : '';
+    const value = node.value?.value ? String(node.value.value).trim() : '';
+    const desc = node.description?.value ? String(node.description.value).trim() : '';
+    const isIgnored = node.ignored === true;
+    const backendDOMNodeId = node.backendDOMNodeId;
+
+    const childIds = node.childIds || [];
+
+    // Filter out uninteresting structural wrappers that have no identity
+    const isGenericWrapper =
+      ['generic', 'none', 'group', 'section', 'StaticText', 'paragraph'].includes(role) && !name && !value && !desc;
+
+    if (!isIgnored && !isGenericWrapper && (name || value || !['generic', 'none'].includes(role))) {
+      const indent = '  '.repeat(depth);
+      let line = `${indent}- ${role}`;
+
+      if (name) {
+        const cleanName = name.replace(/\s+/g, ' ');
+        const truncated = cleanName.length > 90 ? cleanName.slice(0, 87) + '...' : cleanName;
+        line += ` "${truncated}"`;
+      }
+      if (value) {
+        const cleanVal = value.replace(/\s+/g, ' ');
+        const truncated = cleanVal.length > 50 ? cleanVal.slice(0, 47) + '...' : cleanVal;
+        line += ` [value: "${truncated}"]`;
+      }
+      if (desc && desc !== name) {
+        const cleanDesc = desc.replace(/\s+/g, ' ');
+        const truncated = cleanDesc.length > 50 ? cleanDesc.slice(0, 47) + '...' : cleanDesc;
+        line += ` (${truncated})`;
+      }
+
+      // Assign an interactive reference tag [@1], [@2] for clickable / input controls
+      const isInteractive = INTERACTIVE_ROLES.has(role) || (name && ['button', 'link'].includes(role));
+      if (isInteractive && backendDOMNodeId) {
+        const refId = ++refCounter;
+        line += ` [@${refId}]`;
+        refs[String(refId)] = {
+          ref: refId,
+          role,
+          name,
+          value,
+          backendDOMNodeId,
+        };
+      }
+
+      lines.push(line);
+      childIds.forEach((childId) => walk(childId, depth + 1));
+    } else {
+      // Pass through children at same depth
+      childIds.forEach((childId) => walk(childId, depth));
+    }
+  }
+
+  walk(root.nodeId, 0);
+
+  // Persist refs for subsequent click / type commands
+  try {
+    writeFileSync(REFS_FILE, JSON.stringify(refs, null, 2), 'utf-8');
+  } catch {}
+
+  return lines.length > 0 ? lines.join('\n') : '(no semantic elements found)';
+}
+
+function loadSavedRefs() {
+  try {
+    if (existsSync(REFS_FILE)) {
+      return JSON.parse(readFileSync(REFS_FILE, 'utf-8'));
+    }
+  } catch {}
+  return {};
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  let cmd = args[0];
+
+  // Aliases
+  if (cmd === 'shot') cmd = 'screenshot';
+  if (cmd === 'ls-tabs' || cmd === 'list-tabs') cmd = 'tabs';
+  if (cmd === 'new') cmd = 'new-tab';
+
+  if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
+    console.log(`Usage: cdp <command> [args]
+
+Inspection & Semantic Tree:
+  ax [max_depth]            Dump clean accessibility tree with [@ref] tags (default depth: 8)
+  title                     Print document.title
+  url                       Print current URL
+  eval <js>                 Evaluate JavaScript in the page context
+  screenshot [file.png]     Capture crisp page screenshot via CDP (alias: shot)
+
+Interaction:
+  click <target>            Click an element. Target can be:
+                              - AX Ref tag:       cdp click @3   (or: cdp click 3)
+                              - Role + Name:      cdp click "button:Search" or "role=button name=Search"
+                              - Accessible Text:  cdp click "text=Search" (exact match first!)
+                              - CSS Selector:     cdp click "#subBtn" or "input[type=submit]"
+  type <target> <text>      Focus element and type text (supports @ref, role:name, text=, CSS)
+  press <key>               Press key: Enter, Tab, Escape, Backspace, ArrowDown, etc.
+  scroll [up|down] [amount] Scroll page up or down (default: 500px)
+  wait-for <target>         Wait until element appears in DOM
+
+Navigation:
+  goto <url>                Navigate active tab to URL
+  reload                    Reload active page
+  back                      Go back in history
+  forward                   Go forward in history
+
+Tab Management:
+  tabs                      List all open browser tabs (alias: ls-tabs)
+  new-tab [url]             Open a new tab (alias: new; default: about:blank)
+  switch-tab <id|index>     Switch active tab by ID or list index (0, 1, ...)
+  close-tab [id]            Close a tab (default: active tab)
+`);
+    process.exit(0);
+  }
+
+  // ── Tab management commands (do not require an existing connected page) ──
+  if (cmd === 'tabs') {
+    const targets = await getPageTargets();
+    if (targets.length === 0) {
+      console.log('No open tabs found.');
+      return;
+    }
+    targets.forEach((t, i) => {
+      console.log(`[${i}] ${t.title || '(untitled)'} — ${t.url} (id: ${t.id})`);
+    });
+    return;
+  }
+
+  if (cmd === 'new-tab') {
+    const targetUrl = args[1] || 'about:blank';
+    // Chrome requires PUT for /json/new
+    const target = await fetchJson(`${CDP_URL}/json/new?${encodeURIComponent(targetUrl)}`, { method: 'PUT' });
+    console.log(`Opened new tab [id: ${target.id}]: ${target.url}`);
+    return;
+  }
+
+  if (cmd === 'switch-tab') {
+    const arg = args[1];
+    if (!arg) throw new Error('switch-tab requires a tab ID or index (run "cdp tabs" to list)');
+    let targetId = arg;
+    if (/^\d+$/.test(arg)) {
+      const targets = await getPageTargets();
+      const idx = parseInt(arg, 10);
+      if (targets[idx]) targetId = targets[idx].id;
+      else throw new Error(`Tab index ${idx} out of range (0..${targets.length - 1})`);
+    }
+    await fetchJson(`${CDP_URL}/json/activate/${targetId}`, { method: 'PUT' }).catch(async () => {
+      await fetchJson(`${CDP_URL}/json/activate/${targetId}`);
+    });
+    console.log(`Activated tab ${targetId}`);
+    return;
+  }
+
+  if (cmd === 'close-tab') {
+    const arg = args[1];
+    let targetId = arg;
+    if (!targetId) {
+      const active = await getActivePageTarget();
+      targetId = active.id;
+    }
+    await fetchJson(`${CDP_URL}/json/close/${targetId}`, { method: 'PUT' }).catch(async () => {
+      await fetchJson(`${CDP_URL}/json/close/${targetId}`);
+    });
+    console.log(`Closed tab ${targetId}`);
+    return;
+  }
+
+  // ── Page-level commands: connect WebSocket to active tab ──
+  let page;
+  try {
+    page = await getActivePageTarget();
+  } catch (err) {
+    console.error('Failed to connect to Chrome CDP:', err.message);
+    process.exit(1);
+  }
+
+  const client = new CdpClient(page.webSocketDebuggerUrl);
+  await client.connect();
+
+  async function evalJs(expression, returnByValue = true) {
+    const res = await client.send('Runtime.evaluate', {
+      expression,
+      returnByValue,
+      awaitPromise: true,
+    });
+    if (res.exceptionDetails) {
+      throw new Error(res.exceptionDetails.exception?.description || res.exceptionDetails.text);
+    }
+    return res.result;
+  }
+
+  /**
+   * Resolve an element target to exact viewport coordinates.
+   * Supports:
+   *   1. Ref tags from cdp ax: "@1", "@2", "1", "2"
+   *   2. Role + Name: "button:Search", "link:Searches", "role=button name=Search"
+   *   3. Accessible Text: "text=Search" (EXACT match prioritized over substring!)
+   *   4. CSS selector: "#subBtn", "input[type=submit]", ".btn"
+   */
+  async function getElementPoint(target) {
+    const trimmed = String(target).trim();
+
+    // ── Method 1: Check if target is a Ref tag (@1 or 1) from cdp ax ──
+    const refMatch = trimmed.match(/^@?(\d+)$/);
+    if (refMatch) {
+      const refId = refMatch[1];
+      const refs = loadSavedRefs();
+      const refEntry = refs[refId];
+      if (refEntry && refEntry.backendDOMNodeId) {
+        try {
+          const { object } = await client.send('DOM.resolveNode', { backendNodeId: refEntry.backendDOMNodeId });
+          if (object && object.objectId) {
+            const callRes = await client.send('Runtime.callFunctionOn', {
+              objectId: object.objectId,
+              functionDeclaration: `function() {
+                this.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
+                if (typeof this.focus === 'function') this.focus();
+                const r = this.getBoundingClientRect();
+                return {
+                  x: r.left + r.width / 2,
+                  y: r.top + r.height / 2,
+                  tagName: this.tagName.toLowerCase(),
+                  id: this.id || '',
+                  name: this.getAttribute('name') || '',
+                  ref: ${refId},
+                  matchedRole: ${JSON.stringify(refEntry.role || '')},
+                  matchedName: ${JSON.stringify(refEntry.name || '')}
+                };
+              }`,
+              returnByValue: true,
+            });
+            if (callRes && callRes.result && callRes.result.value) {
+              return callRes.result.value;
+            }
+          }
+        } catch (err) {
+          // If DOM.resolveNode fails (e.g. node stale), fall through to role/name resolution
+        }
+      }
+    }
+
+    // ── Method 2, 3, 4: In-page element locator ──
+    const locatorScript = `(() => {
+      let el = null;
+      const raw = ${JSON.stringify(trimmed)};
+
+      const getAccessibleText = (elem) => {
+        if (!elem) return '';
+        // For submit and button inputs, visible text is in the value attribute
+        if (elem.tagName.toLowerCase() === 'input' && ['submit', 'button', 'reset'].includes(elem.type)) {
+          return (elem.value || '').trim();
+        }
+        const ariaLabel = elem.getAttribute('aria-label');
+        if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim();
+        const text = (elem.innerText || elem.textContent || '').trim();
+        if (text) return text;
+        return (elem.getAttribute('placeholder') || elem.getAttribute('title') || '').trim();
+      };
+
+      // Check for role=... name=... or role:name
+      let targetRole = null;
+      let targetName = null;
+      const roleNameMatch = raw.match(/^role=([a-zA-Z]+)\\s+name=(.+)$/i);
+      const colonMatch = raw.match(/^([a-zA-Z]+):(.+)$/);
+
+      if (roleNameMatch) {
+        targetRole = roleNameMatch[1].toLowerCase();
+        targetName = roleNameMatch[2].trim().toLowerCase();
+      } else if (colonMatch && colonMatch[1].toLowerCase() !== 'text') {
+        targetRole = colonMatch[1].toLowerCase();
+        targetName = colonMatch[2].trim().toLowerCase();
+      }
+
+      if (targetRole && targetName) {
+        // Find elements matching role and accessible name
+        let candidates = [];
+        if (targetRole === 'button') {
+          candidates = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"], [role="button"]'));
+        } else if (targetRole === 'link') {
+          candidates = Array.from(document.querySelectorAll('a, [role="link"]'));
+        } else if (targetRole === 'textbox' || targetRole === 'input') {
+          candidates = Array.from(document.querySelectorAll('input:not([type="submit"]):not([type="button"]):not([type="checkbox"]):not([type="radio"]), textarea, [role="textbox"]'));
+        } else if (targetRole === 'checkbox') {
+          candidates = Array.from(document.querySelectorAll('input[type="checkbox"], [role="checkbox"]'));
+        } else if (targetRole === 'combobox' || targetRole === 'select') {
+          candidates = Array.from(document.querySelectorAll('select, [role="combobox"]'));
+        } else {
+          candidates = Array.from(document.querySelectorAll('[role="' + targetRole + '"], ' + targetRole));
+        }
+
+        // Exact name match first
+        el = candidates.find(e => getAccessibleText(e).toLowerCase() === targetName);
+        // Partial name match fallback
+        if (!el) {
+          el = candidates.find(e => getAccessibleText(e).toLowerCase().includes(targetName));
+        }
+      } else if (raw.startsWith('text=')) {
+        const target = raw.slice(5).trim().toLowerCase();
+        const interactives = Array.from(document.querySelectorAll(
+          'a, button, input, select, textarea, [role="button"], [role="link"], [role="checkbox"], [role="menuitem"], [role="tab"], label'
+        ));
+
+        // PASS 1: Exact text match on interactive elements (e.g. "Search" === "Search")
+        el = interactives.find(e => getAccessibleText(e).toLowerCase() === target);
+
+        // PASS 2: Exact text match on any element
+        if (!el) {
+          const all = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, p, span, li, td, th, div'));
+          el = all.find(e => getAccessibleText(e).toLowerCase() === target);
+        }
+
+        // PASS 3: Partial text match on interactive elements (only if no exact match found!)
+        if (!el) {
+          el = interactives.find(e => getAccessibleText(e).toLowerCase().includes(target));
+        }
+
+        // PASS 4: Partial text match on any element
+        if (!el) {
+          const all = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, p, span, li, td, th, div'));
+          el = all.find(e => getAccessibleText(e).toLowerCase().includes(target));
+        }
+
+        // If matched element is a <label for="...">, redirect to actual input element
+        if (el && el.tagName.toLowerCase() === 'label' && el.htmlFor) {
+          const inputEl = document.getElementById(el.htmlFor);
+          if (inputEl) el = inputEl;
+        }
+      } else {
+        // Standard CSS selector
+        el = document.querySelector(raw);
+      }
+
+      if (!el) {
+        return { error: 'Element not found matching target: ' + raw };
+      }
+
+      el.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
+      if (typeof el.focus === 'function') {
+        el.focus();
+      }
+
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) {
+        return { error: 'Element is hidden or has 0 dimensions: ' + raw };
+      }
+
+      return {
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+        tagName: el.tagName.toLowerCase(),
+        id: el.id || '',
+        name: el.getAttribute('name') || '',
+        type: el.getAttribute('type') || '',
+        text: getAccessibleText(el),
+      };
+    })()`;
+
+    const res = await evalJs(locatorScript, true);
+    if (!res || !res.value) throw new Error(`Failed to locate target: ${target}`);
+    if (res.value.error) throw new Error(res.value.error);
+    return res.value;
+  }
+
+  try {
+    if (cmd === 'goto') {
+      const url = args[1];
+      if (!url) throw new Error('goto requires a URL');
+      await client.send('Page.enable');
+      const loadWait = new Promise((resolve) => client.on('Page.loadEventFired', resolve));
+      await client.send('Page.navigate', { url });
+      await Promise.race([loadWait, new Promise((resolve) => setTimeout(resolve, 5000))]);
+      console.log(`Navigated to ${url}`);
+
+    } else if (cmd === 'ax') {
+      const maxDepth = args[1] ? parseInt(args[1], 10) : 8;
+      await client.send('Accessibility.enable');
+      const { nodes } = await client.send('Accessibility.getFullAXTree', { depth: maxDepth });
+      const rendered = renderAxTree(nodes, maxDepth);
+      console.log(rendered);
+
+    } else if (cmd === 'press') {
+      const keyName = args[1];
+      if (!keyName) throw new Error('press requires a key name (e.g. Enter, Tab, Escape, Backspace, ArrowDown)');
+      const lookup = KEY_MAP[keyName.toLowerCase()] || { code: keyName, key: keyName };
+      await client.send('Input.dispatchKeyEvent', {
+        type: 'rawKeyDown',
+        key: lookup.key,
+        code: lookup.code,
+        windowsVirtualKeyCode: lookup.keyCode,
+        text: lookup.text,
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      await client.send('Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        key: lookup.key,
+        code: lookup.code,
+        windowsVirtualKeyCode: lookup.keyCode,
+      });
+      console.log(`Pressed key: ${lookup.key}`);
+
+    } else if (cmd === 'screenshot') {
+      await client.send('Page.enable');
+      const res = await client.send('Page.captureScreenshot', { format: 'png' });
+      const buffer = Buffer.from(res.data, 'base64');
+      const outPath = args[1] || `/tmp/cdp_screenshot_${Date.now()}.png`;
+      writeFileSync(outPath, buffer);
+      console.log(outPath);
+
+    } else if (cmd === 'reload') {
+      await client.send('Page.enable');
+      await client.send('Page.reload', { ignoreCache: true });
+      console.log('Reloaded page');
+
+    } else if (cmd === 'back' || cmd === 'forward') {
+      await client.send('Page.enable');
+      const hist = await client.send('Page.getNavigationHistory');
+      const targetIdx = cmd === 'back' ? hist.currentIndex - 1 : hist.currentIndex + 1;
+      if (targetIdx < 0 || targetIdx >= hist.entries.length) {
+        throw new Error(`Cannot navigate ${cmd}: no entry at index ${targetIdx}`);
+      }
+      await client.send('Page.navigateToHistoryEntry', { entryId: hist.entries[targetIdx].id });
+      console.log(`Navigated ${cmd} to: ${hist.entries[targetIdx].url}`);
+
+    } else if (cmd === 'title') {
+      const title = await evalJs('document.title');
+      console.log(title.value);
+
+    } else if (cmd === 'url') {
+      const currentUrl = await evalJs('location.href');
+      console.log(currentUrl.value);
+
+    } else if (cmd === 'click') {
+      const target = args[1];
+      if (!target) throw new Error('click requires a target (e.g. @3, "button:Search", "text=Search", or "#subBtn")');
+
+      const point = await getElementPoint(target);
+      const x = point.x;
+      const y = point.y;
+
+      await client.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+      await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+      const info = point.ref ? `[@${point.ref} ${point.matchedRole || point.tagName}: ${point.matchedName || point.text || ''}]` : `[${point.tagName}${point.id ? '#' + point.id : ''}]`;
+      console.log(`Clicked ${target} at (${Math.round(x)}, ${Math.round(y)}) ${info}`);
+
+    } else if (cmd === 'type') {
+      const target = args[1];
+      const text = args.slice(2).join(' ');
+      if (!target || !text) throw new Error('type requires a target and text (e.g. cdp type @4 28601)');
+
+      const point = await getElementPoint(target);
+      const x = point.x;
+      const y = point.y;
+
+      // Click center to focus
+      await client.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+      await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Dispatch keystrokes
+      for (const char of text) {
+        await client.send('Input.dispatchKeyEvent', { type: 'char', text: char });
+        await new Promise((r) => setTimeout(r, 15));
+      }
+      const info = point.ref ? `[@${point.ref} ${point.matchedRole || point.tagName}]` : `[${point.tagName}${point.id ? '#' + point.id : ''}]`;
+      console.log(`Typed into ${target} ${info}`);
+
+    } else if (cmd === 'scroll') {
+      const dir = args[1] === 'up' ? -1 : 1;
+      const amount = args[2] ? parseInt(args[2], 10) : 500;
+      await client.send('Input.synthesizeScrollGesture', {
+        x: 100,
+        y: 100,
+        xDistance: 0,
+        yDistance: dir * amount,
+        repeatCount: 1,
+        repeatDelayMs: 0,
+        interactionMarkerName: 'scroll',
+      });
+      console.log(`Scrolled ${dir > 0 ? 'down' : 'up'} by ${amount}px`);
+
+    } else if (cmd === 'wait-for') {
+      const target = args[1];
+      if (!target) throw new Error('wait-for requires a target');
+
+      const timeout = 10000;
+      const start = Date.now();
+      let found = false;
+
+      while (Date.now() - start < timeout) {
+        try {
+          await getElementPoint(target);
+          found = true;
+          console.log(`Found ${target}`);
+          break;
+        } catch (e) {}
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      if (!found) {
+        throw new Error(`Timeout waiting for ${target}`);
+      }
+
+    } else if (cmd === 'eval') {
+      const expr = args.slice(1).join(' ');
+      if (!expr) throw new Error('eval requires a JS expression');
+      const res = await evalJs(expr);
+      console.log(typeof res.value === 'object' ? JSON.stringify(res.value, null, 2) : res.value);
+
+    } else {
+      console.error(`Unknown command: ${cmd}. Run "cdp help" for usage.`);
+      process.exit(1);
+    }
+  } catch (err) {
+    console.error('Error:', err.message);
+    process.exit(1);
+  } finally {
+    await client.close();
+  }
+}
+
+main();

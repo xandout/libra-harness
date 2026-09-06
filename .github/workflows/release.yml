@@ -105,13 +105,13 @@ jobs:
             p1.version = ver;
             fs.writeFileSync('package.json', JSON.stringify(p1, null, 2) + '\n');
 
-            const p2 = JSON.parse(fs.readFileSync('extras/libra-code/package.json', 'utf-8'));
+            const p2 = JSON.parse(fs.readFileSync('packages/libra-code/package.json', 'utf-8'));
             p2.version = ver;
             p2.dependencies['@xandout/libra-harness'] = 'link:../..';
-            fs.writeFileSync('extras/libra-code/package.json', JSON.stringify(p2, null, 2) + '\n');
+            fs.writeFileSync('packages/libra-code/package.json', JSON.stringify(p2, null, 2) + '\n');
           "
 
-          git add package.json extras/libra-code/package.json
+          git add package.json packages/libra-code/package.json
           if ! git diff --staged --quiet; then
             git commit -m "chore: release v${VERSION}"
           fi
@@ -124,7 +124,7 @@ jobs:
         run: |
           pnpm build
           npm pack
-          cd extras/libra-code
+          cd packages/libra-code
           pnpm build
           # Temporarily swap link dep to versioned range for the tarball manifest only,
           # then restore link:../.. so the working tree stays lockfile-compatible.
@@ -175,7 +175,7 @@ jobs:
 
       - name: Publish libra-code to GitHub Packages (INSTANT)
         run: |
-          cd extras/libra-code
+          cd packages/libra-code
           VERSION="${{ env.VERSION }}"
           node -e "
             const fs = require('fs');
@@ -231,7 +231,7 @@ jobs:
 
       - name: Build and publish libra-code to public npm
         run: |
-          cd extras/libra-code
+          cd packages/libra-code
           pnpm build
           VERSION="${{ env.VERSION }}"
           node -e "

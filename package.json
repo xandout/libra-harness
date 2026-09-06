@@ -14,101 +14,125 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./extras": {
-      "types": "./dist/extras/extension-loader.d.ts",
-      "import": "./dist/extras/extension-loader.js"
+    "./extensions": {
+      "types": "./dist/extensions/index.d.ts",
+      "import": "./dist/extensions/index.js"
     },
-    "./extras/extension-loader": {
-      "types": "./dist/extras/extension-loader.d.ts",
-      "import": "./dist/extras/extension-loader.js"
+    "./extensions/loader": {
+      "types": "./dist/extensions/loader.d.ts",
+      "import": "./dist/extensions/loader.js"
     },
-    "./extras/models": {
-      "types": "./dist/extras/models/index.d.ts",
-      "import": "./dist/extras/models/index.js"
+    "./models": {
+      "types": "./dist/models/index.d.ts",
+      "import": "./dist/models/index.js"
     },
-    "./extras/models/ai-sdk-resolver": {
-      "types": "./dist/extras/models/ai-sdk-resolver.d.ts",
-      "import": "./dist/extras/models/ai-sdk-resolver.js"
+    "./models/ai-sdk-resolver": {
+      "types": "./dist/models/ai-sdk-resolver.d.ts",
+      "import": "./dist/models/ai-sdk-resolver.js"
     },
-    "./extras/models/routing-model": {
-      "types": "./dist/extras/models/routing-model.d.ts",
-      "import": "./dist/extras/models/routing-model.js"
+    "./models/routing-model": {
+      "types": "./dist/models/routing-model.d.ts",
+      "import": "./dist/models/routing-model.js"
     },
-    "./extras/openai-provider": {
-      "types": "./dist/extras/openai-provider/index.d.ts",
-      "import": "./dist/extras/openai-provider/index.js"
+    "./openai-provider": {
+      "types": "./dist/openai-provider/index.d.ts",
+      "import": "./dist/openai-provider/index.js"
     },
-    "./extras/logger": {
-      "types": "./dist/extras/extensions/logger/index.d.ts",
-      "import": "./dist/extras/extensions/logger/index.js"
+    "./extensions/logger": {
+      "types": "./dist/extensions/logger/index.d.ts",
+      "import": "./dist/extensions/logger/index.js"
     },
-    "./extras/disk-session": {
-      "types": "./dist/extras/extensions/disk-session/index.d.ts",
-      "import": "./dist/extras/extensions/disk-session/index.js"
+    "./extensions/disk-session": {
+      "types": "./dist/extensions/disk-session/index.d.ts",
+      "import": "./dist/extensions/disk-session/index.js"
     },
-    "./extras/mem-session": {
-      "types": "./dist/extras/extensions/mem-session/index.d.ts",
-      "import": "./dist/extras/extensions/mem-session/index.js"
+    "./extensions/mem-session": {
+      "types": "./dist/extensions/mem-session/index.d.ts",
+      "import": "./dist/extensions/mem-session/index.js"
     },
-    "./extras/timestamp": {
-      "types": "./dist/extras/extensions/timestamp/index.d.ts",
-      "import": "./dist/extras/extensions/timestamp/index.js"
+    "./extensions/timestamp": {
+      "types": "./dist/extensions/timestamp/index.d.ts",
+      "import": "./dist/extensions/timestamp/index.js"
     },
-    "./extras/emoji": {
-      "types": "./dist/extras/extensions/emoji/index.d.ts",
-      "import": "./dist/extras/extensions/emoji/index.js"
+    "./extensions/emoji": {
+      "types": "./dist/extensions/emoji/index.d.ts",
+      "import": "./dist/extensions/emoji/index.js"
     },
-    "./extras/weather-tool": {
-      "types": "./dist/extras/extensions/weather-tool/index.d.ts",
-      "import": "./dist/extras/extensions/weather-tool/index.js"
+    "./extensions/weather-tool": {
+      "types": "./dist/extensions/weather-tool/index.d.ts",
+      "import": "./dist/extensions/weather-tool/index.js"
     },
-    "./extras/code-tools": {
-      "types": "./dist/extras/extensions/code-tools/index.d.ts",
-      "import": "./dist/extras/extensions/code-tools/index.js"
+    "./extensions/code-tools": {
+      "types": "./dist/extensions/code-tools/index.d.ts",
+      "import": "./dist/extensions/code-tools/index.js"
     },
-    "./extras/streaming": {
-      "types": "./dist/extras/extensions/streaming/index.d.ts",
-      "import": "./dist/extras/extensions/streaming/index.js"
+    "./extensions/streaming": {
+      "types": "./dist/extensions/streaming/index.d.ts",
+      "import": "./dist/extensions/streaming/index.js"
     },
-    "./extras/structured-output": {
-      "types": "./dist/extras/extensions/structured-output/index.d.ts",
-      "import": "./dist/extras/extensions/structured-output/index.js"
+    "./extensions/structured-output": {
+      "types": "./dist/extensions/structured-output/index.d.ts",
+      "import": "./dist/extensions/structured-output/index.js"
     },
-    "./extras/mcp": {
-      "types": "./dist/extras/extensions/mcp/index.d.ts",
-      "import": "./dist/extras/extensions/mcp/index.js"
+    "./extensions/mcp": {
+      "types": "./dist/extensions/mcp/index.d.ts",
+      "import": "./dist/extensions/mcp/index.js"
     },
-    "./extras/skills": {
-      "types": "./dist/extras/extensions/skills/index.d.ts",
-      "import": "./dist/extras/extensions/skills/index.js"
+    "./extensions/skills": {
+      "types": "./dist/extensions/skills/index.d.ts",
+      "import": "./dist/extensions/skills/index.js"
     },
-    "./extras/auto-steer": {
-      "types": "./dist/extras/extensions/auto-steer/index.d.ts",
-      "import": "./dist/extras/extensions/auto-steer/index.js"
+    "./extensions/auto-steer": {
+      "types": "./dist/extensions/auto-steer/index.d.ts",
+      "import": "./dist/extensions/auto-steer/index.js"
     },
-    "./extras/filesystem": {
-      "types": "./dist/extras/extensions/filesystem/index.d.ts",
-      "import": "./dist/extras/extensions/filesystem/index.js"
+    "./extensions/filesystem": {
+      "types": "./dist/extensions/filesystem/index.d.ts",
+      "import": "./dist/extensions/filesystem/index.js"
     },
-    "./extras/keyword-extractor": {
-      "types": "./dist/extras/extensions/keyword-extractor/index.d.ts",
-      "import": "./dist/extras/extensions/keyword-extractor/index.js"
+    "./extensions/keyword-extractor": {
+      "types": "./dist/extensions/keyword-extractor/index.d.ts",
+      "import": "./dist/extensions/keyword-extractor/index.js"
     },
-    "./extras/otel": {
-      "types": "./dist/extras/extensions/otel/index.d.ts",
-      "import": "./dist/extras/extensions/otel/index.js"
+    "./extensions/otel": {
+      "types": "./dist/extensions/otel/index.d.ts",
+      "import": "./dist/extensions/otel/index.js"
     },
-    "./extras/tool-buffer": {
-      "types": "./dist/extras/extensions/tool-buffer/index.d.ts",
-      "import": "./dist/extras/extensions/tool-buffer/index.js"
+    "./extensions/tool-buffer": {
+      "types": "./dist/extensions/tool-buffer/index.d.ts",
+      "import": "./dist/extensions/tool-buffer/index.js"
     },
-    "./extras/token-stats": {
-      "types": "./dist/extras/extensions/token-stats/index.d.ts",
-      "import": "./dist/extras/extensions/token-stats/index.js"
+    "./extensions/token-stats": {
+      "types": "./dist/extensions/token-stats/index.d.ts",
+      "import": "./dist/extensions/token-stats/index.js"
     },
-    "./extras/scripts": {
-      "types": "./dist/extras/extensions/scripts/index.d.ts",
-      "import": "./dist/extras/extensions/scripts/index.js"
+    "./extensions/scripts": {
+      "types": "./dist/extensions/scripts/index.d.ts",
+      "import": "./dist/extensions/scripts/index.js"
+    },
+    "./skills": {
+      "types": "./dist/extensions/skills/index.d.ts",
+      "import": "./dist/extensions/skills/index.js"
+    },
+    "./code-tools": {
+      "types": "./dist/extensions/code-tools/index.d.ts",
+      "import": "./dist/extensions/code-tools/index.js"
+    },
+    "./disk-session": {
+      "types": "./dist/extensions/disk-session/index.d.ts",
+      "import": "./dist/extensions/disk-session/index.js"
+    },
+    "./streaming": {
+      "types": "./dist/extensions/streaming/index.d.ts",
+      "import": "./dist/extensions/streaming/index.js"
+    },
+    "./mcp": {
+      "types": "./dist/extensions/mcp/index.d.ts",
+      "import": "./dist/extensions/mcp/index.js"
+    },
+    "./logger": {
+      "types": "./dist/extensions/logger/index.d.ts",
+      "import": "./dist/extensions/logger/index.js"
     }
   },
   "files": [
@@ -119,7 +143,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc && for d in src/extras/extensions/*/; do name=$(basename \"$d\") && cp \"$d\"extension.json dist/extras/extensions/\"$name\"/; done",
+    "build": "tsc && for d in src/extensions/*/; do name=$(basename \"$d\") && if [ -f \"$d\"extension.json ]; then cp \"$d\"extension.json dist/extensions/\"$name\"/; fi; done",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

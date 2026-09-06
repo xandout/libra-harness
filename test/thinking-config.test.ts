@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { resolveThinkingConfig } from '../extras/libra-code/agent-setup.js';
+import { resolveThinkingConfig } from '../packages/libra-code/agent-setup.js';
 
 describe('resolveThinkingConfig', () => {
   const originalEnv = process.env;

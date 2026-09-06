@@ -13,7 +13,7 @@ import {
   type ExtractorInput,
   type MemoryExtractor,
   type MemoryRetriever,
-} from '../src/extras/extensions/memory/index.js';
+} from '../src/extensions/memory/index.js';
 
 // ─────────────────────────────────────────────────────────────────────
 // Test helpers

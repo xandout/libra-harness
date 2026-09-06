@@ -16,8 +16,8 @@ import {
   type Model,
   type ModelRequest,
   type ModelResponse,
-} from '@xandout/libra-harness/extras/models';
-import { AISdkModel } from '@xandout/libra-harness';
+} from '../src/models/index.js';
+import { AISdkModel } from '../src/index.js';
 
 // ── Helpers ─────────────────────────────────────────────────────────
 

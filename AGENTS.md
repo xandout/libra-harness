@@ -817,7 +817,7 @@ Other examples:
 
 ### Extras
 
-`src/extras/` contains the extension loader and built-in extensions:
+`src/extensions/` contains the extension loader and built-in extensions:
 - `extension-loader.ts` — `loadExtensions`, `installExtensions`, `closeExtensions`, `sharedExtensionsDir`
 - `extensions/logger/` — lifecycle logging (priority 100)
 - `extensions/streaming/` — delta streaming via `onDelta` (priority 100)
@@ -830,7 +830,7 @@ Other examples:
 - `extensions/session/` — in-memory session history (priority -100)
 - `extensions/scripts/` — durable on-disk script registry; agent-authored JS runs in a sandboxed QuickJS WASM runtime; input inline or via allowed disk paths (priority 50)
 
-Each extension is importable via `libra/extras/<name>` and documented in `src/extras/README.md`.
+Each extension is importable via `libra/extras/<name>` and documented in `src/extensions/README.md`.
 
 ---
 

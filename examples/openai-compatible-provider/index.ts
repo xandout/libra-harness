@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { Agent } from '@xandout/libra-harness';
-import { createRoutingModel, hasImageInput, resolveModel } from '@xandout/libra-harness/extras/models';
-import { createOpenAICompatibleServer } from '@xandout/libra-harness/extras/openai-provider';
+import { createRoutingModel, hasImageInput, resolveModel } from '@xandout/libra-harness/models';
+import { createOpenAICompatibleServer } from '@xandout/libra-harness/openai-provider';
 
 try {
   const env = readFileSync(new URL('./.env', import.meta.url), 'utf-8');
