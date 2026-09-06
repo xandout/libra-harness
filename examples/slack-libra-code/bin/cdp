@@ -3,10 +3,10 @@
  * Chrome CDP Driver for Agent Browser Automation.
  * Supports:
  *   - Navigation: goto, url, title, reload, back, forward
- *   - Semantic inspection: ax (accessibility tree), eval
+ *   - Semantic inspection: ax (accessibility tree, default depth 8), eval
  *   - Interactions: click, type, press, scroll, wait-for
  *   - Tab management: tabs, new-tab, switch-tab, close-tab
- *   - Capture: screenshot
+ *   - Capture: screenshot (or shot)
  */
 
 import { writeFileSync } from 'node:fs';
@@ -37,8 +37,8 @@ const KEY_MAP = {
   end: { code: 'End', key: 'End', keyCode: 35 },
 };
 
-async function fetchJson(url) {
-  const res = await fetch(url);
+async function fetchJson(url, options = {}) {
+  const res = await fetch(url, options);
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
   return res.json();
 }
@@ -105,7 +105,7 @@ class CdpClient {
   }
 }
 
-function renderAxTree(nodes, maxDepth = 6) {
+function renderAxTree(nodes, maxDepth = 8) {
   const nodeMap = new Map();
   nodes.forEach((n) => nodeMap.set(n.nodeId, n));
 
@@ -135,7 +135,7 @@ function renderAxTree(nodes, maxDepth = 6) {
       let line = `${indent}- ${role}`;
       if (name) {
         const cleanName = name.replace(/\s+/g, ' ');
-        const truncated = cleanName.length > 80 ? cleanName.slice(0, 77) + '...' : cleanName;
+        const truncated = cleanName.length > 90 ? cleanName.slice(0, 87) + '...' : cleanName;
         line += ` "${truncated}"`;
       }
       if (value) {
@@ -162,17 +162,22 @@ function renderAxTree(nodes, maxDepth = 6) {
 
 async function main() {
   const args = process.argv.slice(2);
-  const cmd = args[0];
+  let cmd = args[0];
+
+  // Aliases
+  if (cmd === 'shot') cmd = 'screenshot';
+  if (cmd === 'ls-tabs' || cmd === 'list-tabs') cmd = 'tabs';
+  if (cmd === 'new') cmd = 'new-tab';
 
   if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
     console.log(`Usage: cdp <command> [args]
 
 Inspection & Semantic Tree:
-  ax [max_depth]            Dump clean accessibility tree (names, roles, inputs)
+  ax [max_depth]            Dump clean accessibility tree (roles, labels, inputs; default depth: 8)
   title                     Print document.title
   url                       Print current URL
   eval <js>                 Evaluate JavaScript in the page context
-  screenshot [file.png]     Capture crisp page screenshot via CDP
+  screenshot [file.png]     Capture crisp page screenshot via CDP (alias: shot)
 
 Navigation:
   goto <url>                Navigate active tab to URL
@@ -181,8 +186,8 @@ Navigation:
   forward                   Go forward in history
 
 Interaction:
-  click <selector>          Click element matching CSS selector or "text=Label"
-  type <selector> <text>    Click element to focus, then type text
+  click <selector|"text=.."> Click element by CSS selector or accessible text (e.g. text=Submit)
+  type <selector|"text=.."> <text> Focus element and type text
   press <key>               Press key: Enter, Tab, Escape, Backspace, ArrowDown, etc.
   scroll [up|down] [amount] Scroll page up or down (default: 500px)
   wait-for <selector>       Wait until element appears in DOM
@@ -190,7 +195,7 @@ Interaction:
 Tab Management:
   tabs                      List all open browser tabs
   new-tab [url]             Open a new tab (default: about:blank)
-  switch-tab <id|index>     Switch active tab by ID or list index
+  switch-tab <id|index>     Switch active tab by ID or list index (0, 1, ...)
   close-tab [id]            Close a tab (default: active tab)
 `);
     process.exit(0);
@@ -211,7 +216,8 @@ Tab Management:
 
   if (cmd === 'new-tab') {
     const targetUrl = args[1] || 'about:blank';
-    const target = await fetchJson(`${CDP_URL}/json/new?${encodeURIComponent(targetUrl)}`);
+    // Chrome requires PUT for /json/new
+    const target = await fetchJson(`${CDP_URL}/json/new?${encodeURIComponent(targetUrl)}`, { method: 'PUT' });
     console.log(`Opened new tab [id: ${target.id}]: ${target.url}`);
     return;
   }
@@ -226,7 +232,10 @@ Tab Management:
       if (targets[idx]) targetId = targets[idx].id;
       else throw new Error(`Tab index ${idx} out of range (0..${targets.length - 1})`);
     }
-    await fetchJson(`${CDP_URL}/json/activate/${targetId}`);
+    await fetchJson(`${CDP_URL}/json/activate/${targetId}`, { method: 'PUT' }).catch(async () => {
+      // Fallback to GET if PUT rejected
+      await fetchJson(`${CDP_URL}/json/activate/${targetId}`);
+    });
     console.log(`Activated tab ${targetId}`);
     return;
   }
@@ -238,7 +247,9 @@ Tab Management:
       const active = await getActivePageTarget();
       targetId = active.id;
     }
-    await fetchJson(`${CDP_URL}/json/close/${targetId}`);
+    await fetchJson(`${CDP_URL}/json/close/${targetId}`, { method: 'PUT' }).catch(async () => {
+      await fetchJson(`${CDP_URL}/json/close/${targetId}`);
+    });
     console.log(`Closed tab ${targetId}`);
     return;
   }
@@ -267,32 +278,73 @@ Tab Management:
     return res.result;
   }
 
-  async function getQuad(selector) {
-    await client.send('DOM.enable');
+  /**
+   * Locate element in the live DOM, scroll it into view, focus it,
+   * and return its center viewport coordinates for native mouse interaction.
+   * Completely bypasses fragile CDP DOM-domain nodeIds.
+   */
+  async function getElementPoint(selector) {
+    const expr = `(() => {
+      let el = null;
+      const raw = ${JSON.stringify(selector)};
 
-    let query = selector;
-    if (selector.startsWith('text=')) {
-      const text = selector.substring(5).replace(/'/g, "\\'");
-      query = `//*[contains(text(), '${text}')]`;
-    }
+      if (raw.startsWith('text=')) {
+        const target = raw.slice(5).trim().toLowerCase();
+        // Priority 1: Interactive elements and form controls
+        const interactives = Array.from(document.querySelectorAll(
+          'a, button, input, select, textarea, [role="button"], [role="link"], [role="checkbox"], [role="menuitem"], [role="tab"], label'
+        ));
+        // Exact text match first
+        el = interactives.find(e => (e.innerText || e.textContent || '').trim().toLowerCase() === target);
+        // Partial text match on interactive
+        if (!el) {
+          el = interactives.find(e => (e.innerText || e.textContent || '').trim().toLowerCase().includes(target));
+        }
+        // Priority 2: Any element in document
+        if (!el) {
+          const all = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, p, span, li, td, th, div'));
+          el = all.find(e => (e.innerText || e.textContent || '').trim().toLowerCase() === target);
+          if (!el) {
+            el = all.find(e => (e.innerText || e.textContent || '').trim().toLowerCase().includes(target));
+          }
+        }
+        // If element is a <label for="...">, target the actual form control
+        if (el && el.tagName.toLowerCase() === 'label' && el.htmlFor) {
+          const inputEl = document.getElementById(el.htmlFor);
+          if (inputEl) el = inputEl;
+        }
+      } else {
+        el = document.querySelector(raw);
+      }
 
-    const nodeIds = await client.send('DOM.performSearch', { query, includeUserAgentShadowDOM: true });
-    if (nodeIds.searchCount === 0) throw new Error(`Element not found: ${selector}`);
-    const results = await client.send('DOM.getSearchResults', { searchId: nodeIds.searchId, fromIndex: 0, toIndex: 1 });
-    const nodeId = results.nodeIds[0];
+      if (!el) {
+        return { error: 'Element not found: ' + raw };
+      }
 
-    const { object } = await client.send('DOM.resolveNode', { nodeId });
-    if (object && object.objectId) {
-      await client.send('Runtime.callFunctionOn', {
-        objectId: object.objectId,
-        functionDeclaration: 'function() { this.scrollIntoView({ behavior: "instant", block: "center", inline: "center" }); }',
-        awaitPromise: true,
-      });
-      await new Promise((r) => setTimeout(r, 60));
-    }
+      el.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
+      if (typeof el.focus === 'function') {
+        el.focus();
+      }
 
-    const { model } = await client.send('DOM.getBoxModel', { nodeId });
-    return model;
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) {
+        return { error: 'Element is hidden or has 0 dimensions: ' + raw };
+      }
+
+      return {
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+        tagName: el.tagName.toLowerCase(),
+        id: el.id || '',
+        name: el.getAttribute('name') || '',
+        type: el.getAttribute('type') || '',
+      };
+    })()`;
+
+    const res = await evalJs(expr, true);
+    if (!res || !res.value) throw new Error(`Failed to inspect element: ${selector}`);
+    if (res.value.error) throw new Error(res.value.error);
+    return res.value;
   }
 
   try {
@@ -306,7 +358,7 @@ Tab Management:
       console.log(`Navigated to ${url}`);
 
     } else if (cmd === 'ax') {
-      const maxDepth = args[1] ? parseInt(args[1], 10) : 6;
+      const maxDepth = args[1] ? parseInt(args[1], 10) : 8;
       await client.send('Accessibility.enable');
       const { nodes } = await client.send('Accessibility.getFullAXTree', { depth: maxDepth });
       const rendered = renderAxTree(nodes, maxDepth);
@@ -367,32 +419,34 @@ Tab Management:
       const selector = args[1];
       if (!selector) throw new Error('click requires a selector or "text=..."');
 
-      const model = await getQuad(selector);
-      const q = model.content;
-      const x = (q[0] + q[2] + q[4] + q[6]) / 4;
-      const y = (q[1] + q[3] + q[5] + q[7]) / 4;
+      const point = await getElementPoint(selector);
+      const x = point.x;
+      const y = point.y;
 
       await client.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
       await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
-      console.log(`Clicked ${selector} at (${Math.round(x)}, ${Math.round(y)})`);
+      console.log(`Clicked ${selector} at (${Math.round(x)}, ${Math.round(y)}) [${point.tagName}${point.id ? '#' + point.id : ''}]`);
 
     } else if (cmd === 'type') {
       const selector = args[1];
       const text = args.slice(2).join(' ');
       if (!selector || !text) throw new Error('type requires a selector and text');
 
-      const model = await getQuad(selector);
-      const q = model.content;
-      const x = (q[0] + q[2] + q[4] + q[6]) / 4;
-      const y = (q[1] + q[3] + q[5] + q[7]) / 4;
+      const point = await getElementPoint(selector);
+      const x = point.x;
+      const y = point.y;
+
+      // Click center to focus
       await client.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
       await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+      await new Promise((r) => setTimeout(r, 50));
 
+      // Dispatch native keystrokes
       for (const char of text) {
         await client.send('Input.dispatchKeyEvent', { type: 'char', text: char });
-        await new Promise((r) => setTimeout(r, 10));
+        await new Promise((r) => setTimeout(r, 15));
       }
-      console.log(`Typed into ${selector}`);
+      console.log(`Typed into ${selector} [${point.tagName}${point.id ? '#' + point.id : ''}]`);
 
     } else if (cmd === 'scroll') {
       const dir = args[1] === 'up' ? -1 : 1;
@@ -412,27 +466,18 @@ Tab Management:
       const selector = args[1];
       if (!selector) throw new Error('wait-for requires a selector');
 
-      let query = selector;
-      if (selector.startsWith('text=')) {
-        const text = selector.substring(5).replace(/'/g, "\\'");
-        query = `//*[contains(text(), '${text}')]`;
-      }
-
       const timeout = 10000;
       const start = Date.now();
       let found = false;
-      await client.send('DOM.enable');
 
       while (Date.now() - start < timeout) {
         try {
-          const nodeIds = await client.send('DOM.performSearch', { query, includeUserAgentShadowDOM: true });
-          if (nodeIds.searchCount > 0) {
-            console.log(`Found ${selector}`);
-            found = true;
-            break;
-          }
+          await getElementPoint(selector);
+          found = true;
+          console.log(`Found ${selector}`);
+          break;
         } catch (e) {}
-        await new Promise((r) => setTimeout(r, 200));
+        await new Promise((r) => setTimeout(r, 250));
       }
       if (!found) {
         throw new Error(`Timeout waiting for ${selector}`);
