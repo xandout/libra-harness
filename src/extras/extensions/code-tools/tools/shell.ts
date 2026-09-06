@@ -579,11 +579,15 @@ export const killShellTool: ShellToolFactory = (cfg) => ({
       return { toolCallId: '', content: `Error: no shell with id "${shellId}"` };
     }
 
-    // Kill via PID (works for both in-memory and reconnected shells).
+    // Kill the entire process group (negative PID) so detached children
+    // (e.g. node subprocesses spawned inside a bash loop) are also killed.
+    // Detached shells run with their own process group (detached:true in spawn),
+    // so killing just entry.pid would orphan any children it spawned.
     try {
-      process.kill(entry.pid, 'SIGKILL');
+      process.kill(-entry.pid, 'SIGKILL');
     } catch {
-      // already dead
+      // Group already dead — fall back to direct PID kill.
+      try { process.kill(entry.pid, 'SIGKILL'); } catch { /* already dead */ }
     }
 
     // Give it a moment to flush output.
