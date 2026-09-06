@@ -28,20 +28,54 @@ The `cdp` utility communicates directly with Chrome's DevTools Protocol WebSocke
 Instead of dumping megabytes of DOM or guessing CSS selectors, inspect the page using the accessibility tree:
 
 ```bash
-# Dump the semantic tree (roles, labels, inputs)
+# Dump the semantic tree (default depth: 8)
 cdp ax
 
-# Inspect deeper if needed (default depth: 6)
+# Inspect deeper if needed
 cdp ax 10
 ```
 
-The output gives you exact roles and labels:
+The output gives you exact roles, labels, and **reference tags (`[@ref]`)**:
 ```text
-- RootWebArea "GitHub"
-  - link "Sign in"
-  - textbox "Search GitHub" [value: ""]
-  - button "Search"
+- RootWebArea "NCLBGC Search"
+  - link "Skip to main content" [@1]
+  - link "Searches" [@2]
+  - heading "Verify License"
+  - form
+    - combobox "Classification Type" [@3]
+    - textbox "Zip" [value: ""] [@4]
+    - checkbox "Include like sounding names" [@5]
+    - button "Search" [@6]
 ```
+
+### Interacting with Elements (4 Targeting Modes)
+
+1. **Target by Ref Tag (Fastest & Most Reliable):**
+   ```bash
+   cdp click @6              # Click button "Search"
+   cdp click 6               # "@" is optional
+   cdp type @4 "28601"       # Type into textbox "Zip"
+   ```
+   *Immune to substring collisions and avoids CSS selector guessing completely.*
+
+2. **Target by Role + Name:**
+   ```bash
+   cdp click "button:Search"
+   cdp click "link:Searches"
+   cdp click "role=button name=Search"
+   cdp type "textbox:Zip" "28601"
+   ```
+
+3. **Target by Accessible Text:**
+   ```bash
+   cdp click "text=Search"   # Exact match prioritized over substring
+   ```
+
+4. **Target by Standard CSS Selector:**
+   ```bash
+   cdp click "#subBtn"
+   cdp click "input[type='submit']"
+   ```
 
 ### Navigation & Tab Management
 ```bash
@@ -60,24 +94,17 @@ cdp new-tab "https://..." # Open a new tab
 cdp close-tab             # Close the active tab
 ```
 
-### Interacting with Elements
+### Keyboard & Scrolling
 ```bash
-# Click by text or selector
-cdp click "text=Submit"
-cdp click "button.primary"
-cdp click "#login-button"
-
-# Typing and keyboard control
-cdp type "input[name='q']" "search query"
 cdp press Enter           # Submit search or form
-cdp press Tab             # Move focus
+cdp press Tab             # Move focus to next control
 cdp press Escape          # Dismiss modals or popups
-
-# Scrolling
 cdp scroll down 500       # Scroll down 500px
 cdp scroll up 300         # Scroll up 300px
+```
 
-# Waiting and evaluation
+### Waiting and Evaluation
+```bash
 cdp wait-for ".results-loaded"
 cdp eval "document.title"
 ```

@@ -2,17 +2,23 @@
 /**
  * Chrome CDP Driver for Agent Browser Automation.
  * Supports:
+ *   - Semantic inspection: ax (accessibility tree with [@ref] tags, default depth: 8)
+ *   - Targeted interactions: click, type, press, scroll, wait-for
+ *       Target by:
+ *         - AX Ref tag:       cdp click @3 (or cdp click 3)
+ *         - Role + Name:      cdp click "button:Search" or cdp click "role=button name=Search"
+ *         - Text (exact/sub): cdp click "text=Search" (exact match prioritized over substring)
+ *         - CSS selector:     cdp click "#subBtn" or cdp click "input[type=submit]"
  *   - Navigation: goto, url, title, reload, back, forward
- *   - Semantic inspection: ax (accessibility tree, default depth 8), eval
- *   - Interactions: click, type, press, scroll, wait-for
  *   - Tab management: tabs, new-tab, switch-tab, close-tab
  *   - Capture: screenshot (or shot)
  */
 
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 
 const CDP_PORT = process.env.CHROME_DEBUG_PORT || 18800;
 const CDP_URL = `http://127.0.0.1:${CDP_PORT}`;
+const REFS_FILE = '/tmp/cdp_ax_refs.json';
 
 const KEY_MAP = {
   enter: { code: 'Enter', key: 'Enter', keyCode: 13, text: '\r' },
@@ -36,6 +42,25 @@ const KEY_MAP = {
   home: { code: 'Home', key: 'Home', keyCode: 36 },
   end: { code: 'End', key: 'End', keyCode: 35 },
 };
+
+const INTERACTIVE_ROLES = new Set([
+  'button',
+  'link',
+  'textbox',
+  'searchbox',
+  'combobox',
+  'checkbox',
+  'radio',
+  'tab',
+  'menuitem',
+  'menuitemcheckbox',
+  'menuitemradio',
+  'switch',
+  'spinbutton',
+  'slider',
+  'option',
+  'treeitem',
+]);
 
 async function fetchJson(url, options = {}) {
   const res = await fetch(url, options);
@@ -113,6 +138,8 @@ function renderAxTree(nodes, maxDepth = 8) {
   if (!root) return '(empty accessibility tree)';
 
   const lines = [];
+  const refs = {};
+  let refCounter = 0;
 
   function walk(nodeId, depth) {
     if (depth > maxDepth) return;
@@ -124,15 +151,18 @@ function renderAxTree(nodes, maxDepth = 8) {
     const value = node.value?.value ? String(node.value.value).trim() : '';
     const desc = node.description?.value ? String(node.description.value).trim() : '';
     const isIgnored = node.ignored === true;
+    const backendDOMNodeId = node.backendDOMNodeId;
 
     const childIds = node.childIds || [];
 
     // Filter out uninteresting structural wrappers that have no identity
-    const isGenericWrapper = ['generic', 'none', 'group', 'section', 'StaticText', 'paragraph'].includes(role) && !name && !value && !desc;
+    const isGenericWrapper =
+      ['generic', 'none', 'group', 'section', 'StaticText', 'paragraph'].includes(role) && !name && !value && !desc;
 
     if (!isIgnored && !isGenericWrapper && (name || value || !['generic', 'none'].includes(role))) {
       const indent = '  '.repeat(depth);
       let line = `${indent}- ${role}`;
+
       if (name) {
         const cleanName = name.replace(/\s+/g, ' ');
         const truncated = cleanName.length > 90 ? cleanName.slice(0, 87) + '...' : cleanName;
@@ -148,6 +178,21 @@ function renderAxTree(nodes, maxDepth = 8) {
         const truncated = cleanDesc.length > 50 ? cleanDesc.slice(0, 47) + '...' : cleanDesc;
         line += ` (${truncated})`;
       }
+
+      // Assign an interactive reference tag [@1], [@2] for clickable / input controls
+      const isInteractive = INTERACTIVE_ROLES.has(role) || (name && ['button', 'link'].includes(role));
+      if (isInteractive && backendDOMNodeId) {
+        const refId = ++refCounter;
+        line += ` [@${refId}]`;
+        refs[String(refId)] = {
+          ref: refId,
+          role,
+          name,
+          value,
+          backendDOMNodeId,
+        };
+      }
+
       lines.push(line);
       childIds.forEach((childId) => walk(childId, depth + 1));
     } else {
@@ -157,7 +202,22 @@ function renderAxTree(nodes, maxDepth = 8) {
   }
 
   walk(root.nodeId, 0);
+
+  // Persist refs for subsequent click / type commands
+  try {
+    writeFileSync(REFS_FILE, JSON.stringify(refs, null, 2), 'utf-8');
+  } catch {}
+
   return lines.length > 0 ? lines.join('\n') : '(no semantic elements found)';
+}
+
+function loadSavedRefs() {
+  try {
+    if (existsSync(REFS_FILE)) {
+      return JSON.parse(readFileSync(REFS_FILE, 'utf-8'));
+    }
+  } catch {}
+  return {};
 }
 
 async function main() {
@@ -173,11 +233,22 @@ async function main() {
     console.log(`Usage: cdp <command> [args]
 
 Inspection & Semantic Tree:
-  ax [max_depth]            Dump clean accessibility tree (roles, labels, inputs; default depth: 8)
+  ax [max_depth]            Dump clean accessibility tree with [@ref] tags (default depth: 8)
   title                     Print document.title
   url                       Print current URL
   eval <js>                 Evaluate JavaScript in the page context
   screenshot [file.png]     Capture crisp page screenshot via CDP (alias: shot)
+
+Interaction:
+  click <target>            Click an element. Target can be:
+                              - AX Ref tag:       cdp click @3   (or: cdp click 3)
+                              - Role + Name:      cdp click "button:Search" or "role=button name=Search"
+                              - Accessible Text:  cdp click "text=Search" (exact match first!)
+                              - CSS Selector:     cdp click "#subBtn" or "input[type=submit]"
+  type <target> <text>      Focus element and type text (supports @ref, role:name, text=, CSS)
+  press <key>               Press key: Enter, Tab, Escape, Backspace, ArrowDown, etc.
+  scroll [up|down] [amount] Scroll page up or down (default: 500px)
+  wait-for <target>         Wait until element appears in DOM
 
 Navigation:
   goto <url>                Navigate active tab to URL
@@ -185,16 +256,9 @@ Navigation:
   back                      Go back in history
   forward                   Go forward in history
 
-Interaction:
-  click <selector|"text=.."> Click element by CSS selector or accessible text (e.g. text=Submit)
-  type <selector|"text=.."> <text> Focus element and type text
-  press <key>               Press key: Enter, Tab, Escape, Backspace, ArrowDown, etc.
-  scroll [up|down] [amount] Scroll page up or down (default: 500px)
-  wait-for <selector>       Wait until element appears in DOM
-
 Tab Management:
-  tabs                      List all open browser tabs
-  new-tab [url]             Open a new tab (default: about:blank)
+  tabs                      List all open browser tabs (alias: ls-tabs)
+  new-tab [url]             Open a new tab (alias: new; default: about:blank)
   switch-tab <id|index>     Switch active tab by ID or list index (0, 1, ...)
   close-tab [id]            Close a tab (default: active tab)
 `);
@@ -233,7 +297,6 @@ Tab Management:
       else throw new Error(`Tab index ${idx} out of range (0..${targets.length - 1})`);
     }
     await fetchJson(`${CDP_URL}/json/activate/${targetId}`, { method: 'PUT' }).catch(async () => {
-      // Fallback to GET if PUT rejected
       await fetchJson(`${CDP_URL}/json/activate/${targetId}`);
     });
     console.log(`Activated tab ${targetId}`);
@@ -279,46 +342,148 @@ Tab Management:
   }
 
   /**
-   * Locate element in the live DOM, scroll it into view, focus it,
-   * and return its center viewport coordinates for native mouse interaction.
-   * Completely bypasses fragile CDP DOM-domain nodeIds.
+   * Resolve an element target to exact viewport coordinates.
+   * Supports:
+   *   1. Ref tags from cdp ax: "@1", "@2", "1", "2"
+   *   2. Role + Name: "button:Search", "link:Searches", "role=button name=Search"
+   *   3. Accessible Text: "text=Search" (EXACT match prioritized over substring!)
+   *   4. CSS selector: "#subBtn", "input[type=submit]", ".btn"
    */
-  async function getElementPoint(selector) {
-    const expr = `(() => {
-      let el = null;
-      const raw = ${JSON.stringify(selector)};
+  async function getElementPoint(target) {
+    const trimmed = String(target).trim();
 
-      if (raw.startsWith('text=')) {
+    // ── Method 1: Check if target is a Ref tag (@1 or 1) from cdp ax ──
+    const refMatch = trimmed.match(/^@?(\d+)$/);
+    if (refMatch) {
+      const refId = refMatch[1];
+      const refs = loadSavedRefs();
+      const refEntry = refs[refId];
+      if (refEntry && refEntry.backendDOMNodeId) {
+        try {
+          const { object } = await client.send('DOM.resolveNode', { backendNodeId: refEntry.backendDOMNodeId });
+          if (object && object.objectId) {
+            const callRes = await client.send('Runtime.callFunctionOn', {
+              objectId: object.objectId,
+              functionDeclaration: `function() {
+                this.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
+                if (typeof this.focus === 'function') this.focus();
+                const r = this.getBoundingClientRect();
+                return {
+                  x: r.left + r.width / 2,
+                  y: r.top + r.height / 2,
+                  tagName: this.tagName.toLowerCase(),
+                  id: this.id || '',
+                  name: this.getAttribute('name') || '',
+                  ref: ${refId},
+                  matchedRole: ${JSON.stringify(refEntry.role || '')},
+                  matchedName: ${JSON.stringify(refEntry.name || '')}
+                };
+              }`,
+              returnByValue: true,
+            });
+            if (callRes && callRes.result && callRes.result.value) {
+              return callRes.result.value;
+            }
+          }
+        } catch (err) {
+          // If DOM.resolveNode fails (e.g. node stale), fall through to role/name resolution
+        }
+      }
+    }
+
+    // ── Method 2, 3, 4: In-page element locator ──
+    const locatorScript = `(() => {
+      let el = null;
+      const raw = ${JSON.stringify(trimmed)};
+
+      const getAccessibleText = (elem) => {
+        if (!elem) return '';
+        // For submit and button inputs, visible text is in the value attribute
+        if (elem.tagName.toLowerCase() === 'input' && ['submit', 'button', 'reset'].includes(elem.type)) {
+          return (elem.value || '').trim();
+        }
+        const ariaLabel = elem.getAttribute('aria-label');
+        if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim();
+        const text = (elem.innerText || elem.textContent || '').trim();
+        if (text) return text;
+        return (elem.getAttribute('placeholder') || elem.getAttribute('title') || '').trim();
+      };
+
+      // Check for role=... name=... or role:name
+      let targetRole = null;
+      let targetName = null;
+      const roleNameMatch = raw.match(/^role=([a-zA-Z]+)\\s+name=(.+)$/i);
+      const colonMatch = raw.match(/^([a-zA-Z]+):(.+)$/);
+
+      if (roleNameMatch) {
+        targetRole = roleNameMatch[1].toLowerCase();
+        targetName = roleNameMatch[2].trim().toLowerCase();
+      } else if (colonMatch && colonMatch[1].toLowerCase() !== 'text') {
+        targetRole = colonMatch[1].toLowerCase();
+        targetName = colonMatch[2].trim().toLowerCase();
+      }
+
+      if (targetRole && targetName) {
+        // Find elements matching role and accessible name
+        let candidates = [];
+        if (targetRole === 'button') {
+          candidates = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"], [role="button"]'));
+        } else if (targetRole === 'link') {
+          candidates = Array.from(document.querySelectorAll('a, [role="link"]'));
+        } else if (targetRole === 'textbox' || targetRole === 'input') {
+          candidates = Array.from(document.querySelectorAll('input:not([type="submit"]):not([type="button"]):not([type="checkbox"]):not([type="radio"]), textarea, [role="textbox"]'));
+        } else if (targetRole === 'checkbox') {
+          candidates = Array.from(document.querySelectorAll('input[type="checkbox"], [role="checkbox"]'));
+        } else if (targetRole === 'combobox' || targetRole === 'select') {
+          candidates = Array.from(document.querySelectorAll('select, [role="combobox"]'));
+        } else {
+          candidates = Array.from(document.querySelectorAll('[role="' + targetRole + '"], ' + targetRole));
+        }
+
+        // Exact name match first
+        el = candidates.find(e => getAccessibleText(e).toLowerCase() === targetName);
+        // Partial name match fallback
+        if (!el) {
+          el = candidates.find(e => getAccessibleText(e).toLowerCase().includes(targetName));
+        }
+      } else if (raw.startsWith('text=')) {
         const target = raw.slice(5).trim().toLowerCase();
-        // Priority 1: Interactive elements and form controls
         const interactives = Array.from(document.querySelectorAll(
           'a, button, input, select, textarea, [role="button"], [role="link"], [role="checkbox"], [role="menuitem"], [role="tab"], label'
         ));
-        // Exact text match first
-        el = interactives.find(e => (e.innerText || e.textContent || '').trim().toLowerCase() === target);
-        // Partial text match on interactive
-        if (!el) {
-          el = interactives.find(e => (e.innerText || e.textContent || '').trim().toLowerCase().includes(target));
-        }
-        // Priority 2: Any element in document
+
+        // PASS 1: Exact text match on interactive elements (e.g. "Search" === "Search")
+        el = interactives.find(e => getAccessibleText(e).toLowerCase() === target);
+
+        // PASS 2: Exact text match on any element
         if (!el) {
           const all = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, p, span, li, td, th, div'));
-          el = all.find(e => (e.innerText || e.textContent || '').trim().toLowerCase() === target);
-          if (!el) {
-            el = all.find(e => (e.innerText || e.textContent || '').trim().toLowerCase().includes(target));
-          }
+          el = all.find(e => getAccessibleText(e).toLowerCase() === target);
         }
-        // If element is a <label for="...">, target the actual form control
+
+        // PASS 3: Partial text match on interactive elements (only if no exact match found!)
+        if (!el) {
+          el = interactives.find(e => getAccessibleText(e).toLowerCase().includes(target));
+        }
+
+        // PASS 4: Partial text match on any element
+        if (!el) {
+          const all = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, p, span, li, td, th, div'));
+          el = all.find(e => getAccessibleText(e).toLowerCase().includes(target));
+        }
+
+        // If matched element is a <label for="...">, redirect to actual input element
         if (el && el.tagName.toLowerCase() === 'label' && el.htmlFor) {
           const inputEl = document.getElementById(el.htmlFor);
           if (inputEl) el = inputEl;
         }
       } else {
+        // Standard CSS selector
         el = document.querySelector(raw);
       }
 
       if (!el) {
-        return { error: 'Element not found: ' + raw };
+        return { error: 'Element not found matching target: ' + raw };
       }
 
       el.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
@@ -338,11 +503,12 @@ Tab Management:
         id: el.id || '',
         name: el.getAttribute('name') || '',
         type: el.getAttribute('type') || '',
+        text: getAccessibleText(el),
       };
     })()`;
 
-    const res = await evalJs(expr, true);
-    if (!res || !res.value) throw new Error(`Failed to inspect element: ${selector}`);
+    const res = await evalJs(locatorScript, true);
+    if (!res || !res.value) throw new Error(`Failed to locate target: ${target}`);
     if (res.value.error) throw new Error(res.value.error);
     return res.value;
   }
@@ -416,23 +582,24 @@ Tab Management:
       console.log(currentUrl.value);
 
     } else if (cmd === 'click') {
-      const selector = args[1];
-      if (!selector) throw new Error('click requires a selector or "text=..."');
+      const target = args[1];
+      if (!target) throw new Error('click requires a target (e.g. @3, "button:Search", "text=Search", or "#subBtn")');
 
-      const point = await getElementPoint(selector);
+      const point = await getElementPoint(target);
       const x = point.x;
       const y = point.y;
 
       await client.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
       await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
-      console.log(`Clicked ${selector} at (${Math.round(x)}, ${Math.round(y)}) [${point.tagName}${point.id ? '#' + point.id : ''}]`);
+      const info = point.ref ? `[@${point.ref} ${point.matchedRole || point.tagName}: ${point.matchedName || point.text || ''}]` : `[${point.tagName}${point.id ? '#' + point.id : ''}]`;
+      console.log(`Clicked ${target} at (${Math.round(x)}, ${Math.round(y)}) ${info}`);
 
     } else if (cmd === 'type') {
-      const selector = args[1];
+      const target = args[1];
       const text = args.slice(2).join(' ');
-      if (!selector || !text) throw new Error('type requires a selector and text');
+      if (!target || !text) throw new Error('type requires a target and text (e.g. cdp type @4 28601)');
 
-      const point = await getElementPoint(selector);
+      const point = await getElementPoint(target);
       const x = point.x;
       const y = point.y;
 
@@ -441,12 +608,13 @@ Tab Management:
       await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
       await new Promise((r) => setTimeout(r, 50));
 
-      // Dispatch native keystrokes
+      // Dispatch keystrokes
       for (const char of text) {
         await client.send('Input.dispatchKeyEvent', { type: 'char', text: char });
         await new Promise((r) => setTimeout(r, 15));
       }
-      console.log(`Typed into ${selector} [${point.tagName}${point.id ? '#' + point.id : ''}]`);
+      const info = point.ref ? `[@${point.ref} ${point.matchedRole || point.tagName}]` : `[${point.tagName}${point.id ? '#' + point.id : ''}]`;
+      console.log(`Typed into ${target} ${info}`);
 
     } else if (cmd === 'scroll') {
       const dir = args[1] === 'up' ? -1 : 1;
@@ -463,8 +631,8 @@ Tab Management:
       console.log(`Scrolled ${dir > 0 ? 'down' : 'up'} by ${amount}px`);
 
     } else if (cmd === 'wait-for') {
-      const selector = args[1];
-      if (!selector) throw new Error('wait-for requires a selector');
+      const target = args[1];
+      if (!target) throw new Error('wait-for requires a target');
 
       const timeout = 10000;
       const start = Date.now();
@@ -472,15 +640,15 @@ Tab Management:
 
       while (Date.now() - start < timeout) {
         try {
-          await getElementPoint(selector);
+          await getElementPoint(target);
           found = true;
-          console.log(`Found ${selector}`);
+          console.log(`Found ${target}`);
           break;
         } catch (e) {}
         await new Promise((r) => setTimeout(r, 250));
       }
       if (!found) {
-        throw new Error(`Timeout waiting for ${selector}`);
+        throw new Error(`Timeout waiting for ${target}`);
       }
 
     } else if (cmd === 'eval') {
