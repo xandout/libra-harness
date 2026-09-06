@@ -11,12 +11,6 @@ if [ -f "${LC_CWD}/.env" ]; then
   source "${LC_CWD}/.env"
 fi
 
-# Pull latest code and rebuild (fast incremental — skips if already up to date)
-cd /app
-git pull || true
-pnpm install --frozen-lockfile || true
-pnpm build || true
-pnpm --filter @xandout/libra-code build || true
 
 # Clean up stale Chrome locks from previous container runs
 CHROME_PROFILE_DIR="${CHROME_PROFILE_DIR:-/home/node/chrome-profile}"

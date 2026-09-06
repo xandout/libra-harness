@@ -7,7 +7,6 @@ This environment provides a persistent headless/virtual desktop workspace equipp
 ## Workspace Boundary & Tool Paths
 - **Your Workspace**: `/home/node/workspace` (all files, scripts, searches, and commands must stay here).
 - **System Tools**: Standard tools (`cdp`, `start-browser`, `screenshot`, `slack-upload`, `slack-post`, `lc`) are installed in `/usr/local/bin`. Run them directly by name.
-- **Harness Internals**: Never explore, cd into, or inspect `/app`.
 
 ---
 

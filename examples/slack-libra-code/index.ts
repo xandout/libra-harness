@@ -343,8 +343,7 @@ async function executeLc(
       'Workspace & Execution Boundary:',
       '- Your assigned workspace is /home/node/workspace. All file operations and shell commands must remain within /home/node/workspace.',
       '- All helper tools (cdp, start-browser, screenshot, etc.) are standard system commands in /usr/local/bin. You do not need to look for them elsewhere.',
-      '- Never navigate to, inspect, or modify system application code or harness internals (/app).',
-      '',
+
       'Browser Best Practices:',
       '1. After navigating (`cdp goto <url>`), run `cdp ax`. Each interactive control gets an explicit [@ref] tag (e.g. `- button "Search" [@5]`, `- textbox "Zip" [@3]`).',
       '2. Target elements directly by their ref: `cdp click @5` or `cdp type @3 28601`. This is 100% immune to substring collisions and CSS selector guessing!',

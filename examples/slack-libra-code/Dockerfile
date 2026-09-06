@@ -1,3 +1,30 @@
+# ── Stage 1: Build & Package ─────────────────────────────────────────
+FROM node:24-bookworm AS builder
+
+WORKDIR /src
+
+ARG CACHE_BUST=1
+ADD https://api.github.com/repos/xandout/libra-harness/git/ref/heads/main /tmp/git-ref.json
+
+RUN echo "build cache-bust: $CACHE_BUST" \
+  && rm -f /tmp/git-ref.json \
+  && git clone https://github.com/xandout/libra-harness.git /src \
+  && corepack enable \
+  && pnpm install \
+  && pnpm build \
+  && pnpm --filter @xandout/libra-code build \
+  && pnpm pack \
+  && cd extras/libra-code && pnpm pack \
+  && mkdir -p /packages \
+  && mv /src/*.tgz /packages/ \
+  && mv /src/extras/libra-code/*.tgz /packages/
+
+# Prepare the Slack runner host in /opt/slack-libra-code
+WORKDIR /opt/slack-libra-code
+RUN cp -r /src/examples/slack-libra-code/* ./ \
+  && pnpm install --prod
+
+# ── Stage 2: Runtime Image ──────────────────────────────────────────
 FROM node:24-bookworm
 
 USER root
@@ -51,6 +78,27 @@ RUN install -m 0755 -d /etc/apt/keyrings \
 # Enable Corepack for pnpm
 RUN corepack enable
 
+# Copy packaged tarballs from builder and install @xandout/libra-code globally
+COPY --from=builder /packages /tmp/packages
+RUN npm install -g /tmp/packages/*.tgz \
+  && rm -rf /tmp/packages
+
+# Copy Slack runner host from builder
+COPY --from=builder /opt/slack-libra-code /opt/slack-libra-code
+
+# Copy helper tools and entrypoint
+COPY bin/* /usr/local/bin/
+RUN chmod +x /usr/local/bin/*
+
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Setup workspace and directories
+RUN mkdir -p /home/node/workspace \
+  && git config --system --add safe.directory '*' \
+  && touch /home/node/.bashrc \
+  && chown -R node:node /opt/slack-libra-code /home/node
+
 # Default environment
 ENV HOME=/home/node
 ENV DISPLAY=:99
@@ -60,35 +108,8 @@ ENV LC_CWD=/home/node/workspace
 ENV LIBRA_HOME=/home/node/workspace/.libra
 ENV BASH_ENV=/home/node/.bashrc
 
-# Invalidate build cache whenever new commits are pushed to main,
-# or when passing --build-arg CACHE_BUST=$(date +%s)
-ARG CACHE_BUST=1
-ADD https://api.github.com/repos/xandout/libra-harness/git/ref/heads/main /tmp/git-ref.json
-
-# Clone and build the app at image build time
-RUN echo "build cache-bust: $CACHE_BUST" \
-  && mkdir -p /app /home/node/workspace \
-  && rm -f /tmp/git-ref.json \
-  && git clone https://github.com/xandout/libra-harness.git /app \
-  && cd /app \
-  && corepack enable \
-  && pnpm install \
-  && pnpm build \
-  && pnpm --filter @xandout/libra-code build \
-  && ln -sf /app/extras/libra-code/dist/index.js /usr/local/bin/lc \
-  && chmod +x /app/extras/libra-code/dist/index.js \
-  && git config --system --add safe.directory '*' \
-  && touch /home/node/.bashrc \
-  && chown -R node:node /app /home/node
-
-COPY bin/* /usr/local/bin/
-RUN chmod +x /usr/local/bin/*
-
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
-
 USER node
 WORKDIR /home/node/workspace
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
-CMD ["pnpm", "--prefix", "/app/examples/slack-libra-code", "start"]
+CMD ["node", "/opt/slack-libra-code/node_modules/tsx/dist/cli.mjs", "/opt/slack-libra-code/index.ts"]
