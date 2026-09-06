@@ -13,6 +13,7 @@ fi
 
 # Ensure Xvfb virtual display is running on :99
 if ! pgrep -x "Xvfb" >/dev/null; then
+  rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
   Xvfb :99 -screen 0 1920x1080x24 -ac &
   export DISPLAY=:99
 fi

@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, appendFileSync, existsSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
+import net from 'node:net';
 import { App } from '@slack/bolt';
 import type { WebClient } from '@slack/web-api';
 
@@ -196,7 +197,7 @@ async function sendSocketCommand(
   if (!existsSync(sockPath)) return false;
 
   return new Promise<boolean>((resolve) => {
-    const client = require('node:net').createConnection(sockPath);
+    const client = net.createConnection(sockPath);
     client.once('connect', () => {
       client.write(JSON.stringify(cmd) + '\n');
       client.end();
