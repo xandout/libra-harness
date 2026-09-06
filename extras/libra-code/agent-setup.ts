@@ -10,7 +10,7 @@
  */
 
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { Agent } from '@xandout/libra-harness';
 import { resolveModel } from '@xandout/libra-harness/extras/models';
@@ -18,6 +18,7 @@ import type { ResolveModelOptions } from '@xandout/libra-harness/extras/models';
 import { createDiskSessionExtension } from '@xandout/libra-harness/extras/disk-session';
 import { createCodeToolsExtension } from '@xandout/libra-harness/extras/code-tools';
 import { createStreamingExtension } from '@xandout/libra-harness/extras/streaming';
+import { createSkillExtension } from '@xandout/libra-harness/extras/skills';
 import { createFileChangeTracker } from './file-change-tracker.js';
 import { createSessionStats, type SessionStats } from './session-stats.js';
 import { createSocketEventsExtension } from './session-socket.js';
@@ -82,40 +83,84 @@ Principles:
 - Keep responses concise and focused on results.
 - Do not push to git or commit secrets unless explicitly requested.`;
 
-/**
- * Load project-specific instructions from AGENTS.md in the given directory.
- * Returns the raw content, or undefined if no AGENTS.md exists.
- */
-export function loadAgentsMd(dir: string): string | undefined {
-  const path = join(dir, 'AGENTS.md');
-  if (!existsSync(path)) return undefined;
-  try {
-    const content = readFileSync(path, 'utf-8').trim();
-    return content || undefined;
-  } catch {
-    return undefined;
-  }
+export interface InstructionFile {
+  filename: string;
+  path: string;
+  content: string;
 }
 
 /**
- * Build the full system prompt.
+ * Look for instruction files in a directory in standard precedence order:
+ * 1. SYSTEM.md
+ * 2. AGENTS.md
+ * 3. .libra/SYSTEM.md
+ * 4. .libra/AGENTS.md
+ */
+export function loadInstructionFile(dir: string): InstructionFile | undefined {
+  const candidates = ['SYSTEM.md', 'AGENTS.md', join('.libra', 'SYSTEM.md'), join('.libra', 'AGENTS.md')];
+  for (const rel of candidates) {
+    const fullPath = join(dir, rel);
+    if (existsSync(fullPath)) {
+      try {
+        const content = readFileSync(fullPath, 'utf-8').trim();
+        if (content) {
+          return { filename: rel, path: fullPath, content };
+        }
+      } catch {}
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Backwards-compatibility helper: load project-specific instructions from
+ * SYSTEM.md or AGENTS.md in the given directory.
+ */
+export function loadAgentsMd(dir: string): string | undefined {
+  return loadInstructionFile(dir)?.content;
+}
+
+export function getLibraHome(): string {
+  return process.env.LIBRA_HOME || LIBRA_HOME;
+}
+
+/**
+ * Build the full system prompt with layered instructions:
  *
- * Precedence (highest wins):
- *   1. config.systemPrompt — user-set custom prompt (lc config set systemPrompt)
- *   2. SYSTEM_PROMPT — the built-in default
+ * Layering (lowest to highest specificity):
+ *   1. Base Persona: config.systemPrompt (user override) or default SYSTEM_PROMPT.
+ *   2. User-level instructions: ~/.libra/SYSTEM.md (or AGENTS.md) if present.
+ *   3. Project-level instructions: <projectDir>/SYSTEM.md (or AGENTS.md, .libra/SYSTEM.md) if present.
+ *   4. Environment-injected instructions: LIBRA_EXTRA_SYSTEM if present.
  *
- * Then AGENTS.md from the project root is appended (if present), so
- * project-specific instructions are always visible to the model.
+ * User and project instruction files are never modified or overwritten by lc updates.
  */
 export function buildSystemPrompt(projectDir?: string): string {
   const config = loadConfig();
   const base = config.systemPrompt?.trim() || SYSTEM_PROMPT;
-  const agentsMd = loadAgentsMd(projectDir ?? process.cwd());
+  const project = resolve(projectDir ?? process.cwd());
+  const globalHome = resolve(getLibraHome());
+
+  // 1. Global user-level instructions (from LIBRA_HOME / ~/.libra)
+  let globalInstructions: InstructionFile | undefined;
+  if (globalHome && globalHome !== project) {
+    globalInstructions = loadInstructionFile(globalHome);
+  }
+
+  // 2. Project-level instructions (from projectDir / cwd)
+  const projectInstructions = loadInstructionFile(project);
+
+  // 3. Optional extra system from environment
   const extraSystem = process.env.LIBRA_EXTRA_SYSTEM?.trim();
 
   let prompt = base;
-  if (agentsMd) {
-    prompt += `\n\n══════════════════════════════════════════════════════════════════════\nPROJECT INSTRUCTIONS (AGENTS.md)\n══════════════════════════════════════════════════════════════════════\n${agentsMd}`;
+  if (globalInstructions) {
+    prompt += `\n\n══════════════════════════════════════════════════════════════════════\nUSER INSTRUCTIONS (${globalInstructions.filename})\n══════════════════════════════════════════════════════════════════════\n${globalInstructions.content}`;
+  }
+  if (projectInstructions) {
+    if (!globalInstructions || globalInstructions.path !== projectInstructions.path) {
+      prompt += `\n\n══════════════════════════════════════════════════════════════════════\nPROJECT INSTRUCTIONS (${projectInstructions.filename})\n══════════════════════════════════════════════════════════════════════\n${projectInstructions.content}`;
+    }
   }
   if (extraSystem) {
     prompt += `\n\n${extraSystem}`;
@@ -312,6 +357,41 @@ function buildProviders(): ResolveModelOptions['providers'] {
 }
 
 /**
+ * Resolve directories to search for Agent Skills following industry conventions.
+ * Searches:
+ * - LIBRA_SKILLS_DIR (colon-separated env var)
+ * - /opt/skills (system-wide container path)
+ * - ~/.libra/skills (or $LIBRA_HOME/skills)
+ * - <projectDir>/.libra/skills
+ * - <projectDir>/skills
+ */
+export function resolveSkillsDirs(projectDir: string = process.cwd()): string[] {
+  const candidates: string[] = [];
+  const home = resolve(getLibraHome());
+
+  if (process.env.LIBRA_SKILLS_DIR) {
+    for (const d of process.env.LIBRA_SKILLS_DIR.split(':')) {
+      if (d.trim()) candidates.push(resolve(d.trim()));
+    }
+  }
+
+  candidates.push('/opt/skills');
+  candidates.push(join(home, 'skills'));
+  const userHomeSkills = join(homedir(), '.libra', 'skills');
+  if (home !== resolve(userHomeSkills)) {
+    candidates.push(userHomeSkills);
+  }
+  candidates.push(join(projectDir, '.libra', 'skills'));
+  candidates.push(join(projectDir, 'skills'));
+
+  const existing = candidates.filter((d) => existsSync(d));
+  if (existing.length > 0) {
+    return [...new Set([...existing, join(projectDir, 'skills'), join(home, 'skills')])];
+  }
+  return [...new Set([join(projectDir, 'skills'), join(home, 'skills')])];
+}
+
+/**
  * Build the agent with all extensions. This is the single construction
  * path used by both CLI mode and --worker mode.
  */
@@ -362,6 +442,19 @@ export async function buildAgent(opts: BuildAgentOptions = {}): Promise<BuiltAge
     codeSearchMaxIterations: 10,
   }));
   agent.use(createSocketEventsExtension());
+
+  // Agent skills extension — progressive disclosure for tools and workflow instructions
+  const skillsDirs = resolveSkillsDirs(cwd);
+  const preloadSkills = process.env.LIBRA_PRELOAD_SKILLS
+    ? process.env.LIBRA_PRELOAD_SKILLS.split(',').map((s) => s.trim()).filter(Boolean)
+    : undefined;
+  const skillsExt = createSkillExtension({
+    skillsDirs,
+    preloadSkills,
+  });
+  if (skillsExt) {
+    agent.use(skillsExt);
+  }
 
   return { agent, fileChanges, sessionStats, todoFile };
 }

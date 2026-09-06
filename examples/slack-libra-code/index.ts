@@ -315,42 +315,8 @@ async function executeLc(
       : (existsSync(binDir) ? `${binDir}:${existingPath}` : existingPath);
 
     const fullArgs = [...resolvedLc.args, '--session', sessionKey, prompt];
-    const slackToolsSystem = [
-      'Available shell tools (use these to interact with Slack and the browser):',
-      '- start-browser: Ensure headed Chrome is running on display :99 with persistent profile and remote debugging (cleans locks automatically)',
-      '- cdp <command> [args]: Control Chrome via Chrome DevTools Protocol',
-      '    cdp ax [max_depth]         - Dump the accessibility tree with [@ref] tags. ALWAYS USE THIS FIRST!',
-      '    cdp click <target>         - Click an element. Best targets: @ref (e.g. cdp click @3), role:name (e.g. cdp click "button:Search"), or exact text (cdp click "text=Search")',
-      '    cdp type <target> <text>   - Focus element and type text (e.g. cdp type @2 28601 or cdp type "textbox:Zip" 28601)',
-      '    cdp press <key>            - Press a key: Enter, Tab, Escape, Backspace, ArrowDown, etc.',
-      '    cdp goto <url>             - Navigate to a URL',
-      '    cdp scroll [up|down] [px]  - Scroll page (default: 500px)',
-      '    cdp wait-for <target>      - Wait until element exists in DOM',
-      '    cdp eval <js>              - Evaluate JavaScript expression in page',
-      '    cdp screenshot [file.png]  - Direct high-res page screenshot via CDP',
-      '    cdp tabs                   - List all open browser tabs',
-      '    cdp switch-tab <id|index>  - Switch active tab',
-      '    cdp new-tab [url]          - Open a new tab',
-      '    cdp close-tab [id]         - Close tab',
-      '    cdp reload                 - Reload active page',
-      '    cdp back / cdp forward     - History navigation',
-      '- screenshot [output.png] [url]: Take a screenshot of virtual display :99 or a URL',
-      '- slack-upload <file> [comment]: Upload a file or image to this Slack thread',
-      '- slack-screenshot [url] [comment]: Screenshot and upload directly to this Slack thread in one step',
-      '- slack-post <message>: Post a progress update or message to this Slack thread',
-      '- slack-read: Read recent messages from this channel/thread',
-      '',
-      'Workspace & Execution Boundary:',
-      '- Your assigned workspace is /home/node/workspace. All file operations and shell commands must remain within /home/node/workspace.',
-      '- All helper tools (cdp, start-browser, screenshot, etc.) are standard system commands in /usr/local/bin. You do not need to look for them elsewhere.',
-
-      'Browser Best Practices:',
-      '1. After navigating (`cdp goto <url>`), run `cdp ax`. Each interactive control gets an explicit [@ref] tag (e.g. `- button "Search" [@5]`, `- textbox "Zip" [@3]`).',
-      '2. Target elements directly by their ref: `cdp click @5` or `cdp type @3 28601`. This is 100% immune to substring collisions and CSS selector guessing!',
-      '3. Alternatively target by role+name: `cdp click "button:Search"` or `cdp click "link:Searches"`.',
-      '4. If using `text=...`, exact matches take priority over partial matches (e.g. `text=Search` matches button "Search" before link "Searches").',
-      '5. For tasks with multiple steps, use `slack-post` to send brief updates so the user is informed of progress.',
-    ].join('\n');
+    const defaultSkillsDir = resolve(new URL('./skills', import.meta.url).pathname);
+    const skillsDir = process.env.LIBRA_SKILLS_DIR || (existsSync('/opt/skills') ? '/opt/skills' : defaultSkillsDir);
 
     const proc = spawn(resolvedLc.command, fullArgs, {
       cwd: lcCwd,
@@ -359,7 +325,7 @@ async function executeLc(
         PATH: augmentedPath,
         LC_CWD: lcCwd,
         LIBRA_HOME: libraHome,
-        LIBRA_EXTRA_SYSTEM: slackToolsSystem,
+        LIBRA_SKILLS_DIR: skillsDir,
         SLACK_BOT_TOKEN: botToken,
         SLACK_CHANNEL_ID: channelId,
         SLACK_THREAD_TS: threadTs || '',

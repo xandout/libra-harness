@@ -93,11 +93,12 @@ RUN chmod +x /usr/local/bin/*
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# Setup workspace and directories
-RUN mkdir -p /home/node/workspace \
+# Setup workspace, skills, and directories
+RUN mkdir -p /home/node/workspace /opt/skills \
+  && if [ -d /opt/slack-libra-code/skills ]; then cp -r /opt/slack-libra-code/skills/* /opt/skills/; fi \
   && git config --system --add safe.directory '*' \
   && touch /home/node/.bashrc \
-  && chown -R node:node /opt/slack-libra-code /home/node
+  && chown -R node:node /opt/slack-libra-code /opt/skills /home/node
 
 # Default environment
 ENV HOME=/home/node
@@ -106,6 +107,7 @@ ENV TERM=xterm-256color
 ENV TZ=America/New_York
 ENV LC_CWD=/home/node/workspace
 ENV LIBRA_HOME=/home/node/workspace/.libra
+ENV LIBRA_SKILLS_DIR=/opt/skills
 ENV BASH_ENV=/home/node/.bashrc
 
 USER node
