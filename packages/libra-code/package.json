@@ -1,6 +1,6 @@
 {
   "name": "@xandout/libra-code",
-  "version": "0.1.79",
+  "version": "0.1.80",
   "description": "A code agent CLI powered by libra-harness. Install globally with: npm install -g @xandout/libra-code",
   "type": "module",
   "bin": {
@@ -21,7 +21,7 @@
     "@ai-sdk/deepseek": "^3.0.36",
     "@ai-sdk/google": "^4.0.39",
     "@ai-sdk/openai": "^4.0.36",
-    "@xandout/libra-harness": "workspace:*",
+    "@xandout/libra-harness": "link:../..",
     "diff": "^5.2.2",
     "ink": "^5.2.1",
     "ink-scroll-view": "^0.3.7",
