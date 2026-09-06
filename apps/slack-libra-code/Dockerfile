@@ -13,11 +13,16 @@ RUN echo "build cache-bust: $CACHE_BUST" \
   && pnpm install \
   && pnpm build \
   && pnpm --filter @xandout/libra-code build \
-  && pnpm pack \
-  && cd packages/libra-code && pnpm pack \
+  && node -e ' \
+       const fs = require("fs"); \
+       const p = JSON.parse(fs.readFileSync("packages/libra-code/package.json")); \
+       const h = JSON.parse(fs.readFileSync("package.json")); \
+       p.dependencies["@xandout/libra-harness"] = h.version; \
+       fs.writeFileSync("packages/libra-code/package.json", JSON.stringify(p, null, 2)); \
+     ' \
   && mkdir -p /packages \
-  && mv /src/*.tgz /packages/ \
-  && mv /src/packages/libra-code/*.tgz /packages/
+  && pnpm pack --pack-destination /packages \
+  && cd packages/libra-code && pnpm pack --pack-destination /packages
 
 # Prepare the Slack runner host in /opt/slack-libra-code and skills in /opt/skills
 WORKDIR /src
