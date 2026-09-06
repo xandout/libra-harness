@@ -68,7 +68,16 @@ function resolveLcCommand(source?: string): ResolvedCommand {
     };
   }
 
-  // 2. Explicit path (or default relative path if no source specified)
+  // 2. System binary (preferred in container environment)
+  if (!source && existsSync('/usr/local/bin/lc')) {
+    return {
+      command: '/usr/local/bin/lc',
+      args: [],
+      description: 'System binary (/usr/local/bin/lc)',
+    };
+  }
+
+  // 3. Explicit path (or default relative path if no source specified)
   const defaultLocalDir = resolve(new URL('../../extras/libra-code', import.meta.url).pathname);
   const candidatePath = source ? resolve(process.cwd(), source) : defaultLocalDir;
 
@@ -298,10 +307,12 @@ async function executeLc(
   onProgress?: (status: string) => void,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolvePromise) => {
-    // Make built-in bin directory available in PATH
-    const binDir = resolve(new URL('./bin', import.meta.url).pathname);
+    // Prefer standard /usr/local/bin if present (avoids leaking /app path into the agent's PATH)
     const existingPath = process.env.PATH || '';
-    const augmentedPath = existsSync(binDir) ? `${binDir}:${existingPath}` : existingPath;
+    const binDir = resolve(new URL('./bin', import.meta.url).pathname);
+    const augmentedPath = existsSync('/usr/local/bin/cdp')
+      ? existingPath
+      : (existsSync(binDir) ? `${binDir}:${existingPath}` : existingPath);
 
     const fullArgs = [...resolvedLc.args, '--session', sessionKey, prompt];
     const slackToolsSystem = [
@@ -328,6 +339,11 @@ async function executeLc(
       '- slack-screenshot [url] [comment]: Screenshot and upload directly to this Slack thread in one step',
       '- slack-post <message>: Post a progress update or message to this Slack thread',
       '- slack-read: Read recent messages from this channel/thread',
+      '',
+      'Workspace & Execution Boundary:',
+      '- Your assigned workspace is /home/node/workspace. All file operations and shell commands must remain within /home/node/workspace.',
+      '- All helper tools (cdp, start-browser, screenshot, etc.) are standard system commands in /usr/local/bin. You do not need to look for them elsewhere.',
+      '- Never navigate to, inspect, or modify system application code or harness internals (/app).',
       '',
       'Browser Best Practices:',
       '1. After navigating (`cdp goto <url>`), run `cdp ax`. Each interactive control gets an explicit [@ref] tag (e.g. `- button "Search" [@5]`, `- textbox "Zip" [@3]`).',

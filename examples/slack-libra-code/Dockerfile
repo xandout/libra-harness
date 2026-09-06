@@ -75,6 +75,8 @@ RUN echo "build cache-bust: $CACHE_BUST" \
   && pnpm install \
   && pnpm build \
   && pnpm --filter @xandout/libra-code build \
+  && ln -sf /app/extras/libra-code/dist/index.js /usr/local/bin/lc \
+  && chmod +x /app/extras/libra-code/dist/index.js \
   && git config --system --add safe.directory '*' \
   && touch /home/node/.bashrc \
   && chown -R node:node /app /home/node
