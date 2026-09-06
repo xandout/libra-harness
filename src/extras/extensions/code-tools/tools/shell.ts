@@ -127,7 +127,7 @@ export class ShellRegistry {
         : `${command} < /dev/null; echo $? > "${exitFile}" 2>/dev/null`;
 
       const child = spawn(fullCommand, {
-        shell: true,
+        shell: '/bin/bash',
         cwd,
         env: { ...process.env, ...env },
         stdio: [nullFd, outFd, errFd],
@@ -183,7 +183,7 @@ export class ShellRegistry {
 
     // ── Foreground: pipes connected, parent owns the process ──
     const child = spawn(command, {
-      shell: true,
+      shell: '/bin/bash',
       cwd,
       env: { ...process.env, ...env },
       stdio: ['pipe', 'pipe', 'pipe'],
