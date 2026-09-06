@@ -12,6 +12,7 @@ RUN apt-get update \
     ghostscript \
     imagemagick \
     jq \
+    tini \
     xvfb \
     xdotool \
     xclip \
@@ -65,5 +66,5 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 
 WORKDIR /app
 
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 CMD ["pnpm", "start"]
