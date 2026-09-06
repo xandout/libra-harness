@@ -308,8 +308,10 @@ async function executeLc(
 - screenshot [output.png] [url]: Take a screenshot of virtual desktop (:99) or a URL via headless Chrome
 - slack-upload <file> [comment]: Upload any file or image directly into this Slack thread
 - slack-screenshot [url] [comment]: Take a screenshot and upload directly to this Slack thread in one step
-- slack-post <message>: Post an additional update to this Slack thread
-- slack-read: Read recent messages from this channel/thread]
+- slack-post <message>: Post an additional update to this Slack thread (use this to send brief progress updates during long tasks)
+- slack-read: Read recent messages from this channel/thread
+
+Important: If a task will take more than a few steps, use slack-post to post brief progress updates so the user isn't left waiting silently. For example: after starting a browser session, after completing a major step, or when waiting for something.]
 
 ${prompt}`;
 

@@ -266,7 +266,7 @@ export function createSocketEventsExtension(): Extension {
 
       agent.hook('beforeTool', 'socket-events', async (ctx) => {
         const socketServer = ctx.turn.metadata.__socketServer as SessionSocketServer | undefined;
-        if (!socketServer || !ctx.toolCall) return;
+        if (!ctx.toolCall) return;
 
         const parsed = (() => { try { return JSON.parse(ctx.toolCall.arguments); } catch { return {}; } })();
         let file: string | undefined;
@@ -274,7 +274,12 @@ export function createSocketEventsExtension(): Extension {
         else if (parsed.pattern) file = parsed.path ? `${parsed.pattern} in ${parsed.path}` : String(parsed.pattern);
         else if (parsed.command) file = String(parsed.command);
 
-        socketServer.broadcast({
+        const label = file ? `${ctx.toolCall.name}(${file})` : ctx.toolCall.name;
+        // Write to stderr so the Slack adapter (and any observer watching stderr) can parse
+        // "→ toolname" lines for live progress updates without needing a socket client.
+        process.stderr.write(`\n  → ${label}\n`);
+
+        socketServer?.broadcast({
           type: 'tool',
           name: ctx.toolCall.name,
           phase: 'start',
@@ -285,9 +290,11 @@ export function createSocketEventsExtension(): Extension {
 
       agent.hook('afterTool', 'socket-events', async (ctx) => {
         const socketServer = ctx.turn.metadata.__socketServer as SessionSocketServer | undefined;
-        if (!socketServer || !ctx.toolCall) return;
+        if (!ctx.toolCall) return;
 
-        socketServer.broadcast({
+        process.stderr.write(`  ✓ ${ctx.toolCall.name}\n`);
+
+        socketServer?.broadcast({
           type: 'tool',
           name: ctx.toolCall.name,
           phase: 'end',
