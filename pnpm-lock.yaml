@@ -218,7 +218,7 @@ importers:
         specifier: ^4.0.36
         version: 4.0.36(zod@4.4.3)
       '@xandout/libra-harness':
-        specifier: workspace:*
+        specifier: link:../..
         version: link:../..
       diff:
         specifier: ^5.2.2

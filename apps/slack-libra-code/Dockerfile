@@ -24,12 +24,10 @@ RUN echo "build cache-bust: $CACHE_BUST" \
   && pnpm pack --pack-destination /packages \
   && cd packages/libra-code && pnpm pack --pack-destination /packages
 
-# Prepare the Slack runner host in /opt/slack-libra-code and skills in /opt/skills
+# Prepare the Slack runner host in /opt/libra-harness and skills in /opt/skills
 WORKDIR /src
-RUN mkdir -p /opt/slack-libra-code /opt/skills \
-  && cp -r /src/apps/slack-libra-code/index.ts /src/apps/slack-libra-code/tsconfig.json /src/apps/slack-libra-code/package.json /opt/slack-libra-code/ \
-  && cp -r /src/apps/slack-libra-code/node_modules /opt/slack-libra-code/ \
-  && cp -r /src/node_modules /opt/ \
+RUN mkdir -p /opt/libra-harness /opt/skills \
+  && cp -r /src/* /src/.[!.]* /opt/libra-harness/ 2>/dev/null || true \
   && if [ -d /src/skills ]; then cp -r /src/skills/* /opt/skills/; fi \
   && if [ -d /src/apps/slack-libra-code/skills ]; then cp -r /src/apps/slack-libra-code/skills/* /opt/skills/; fi
 
@@ -93,7 +91,7 @@ RUN npm install -g /tmp/packages/*.tgz \
   && rm -rf /tmp/packages
 
 # Copy Slack runner host and skills from builder
-COPY --from=builder /opt/slack-libra-code /opt/slack-libra-code
+COPY --from=builder /opt/libra-harness /opt/libra-harness
 COPY --from=builder /opt/skills /opt/skills
 
 # Copy helper tools and entrypoint
@@ -107,7 +105,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 RUN mkdir -p /home/node/workspace \
   && git config --system --add safe.directory '*' \
   && touch /home/node/.bashrc \
-  && chown -R node:node /opt/slack-libra-code /opt/skills /home/node
+  && chown -R node:node /opt/libra-harness /opt/skills /home/node
 
 # Default environment
 ENV HOME=/home/node
@@ -123,4 +121,4 @@ USER node
 WORKDIR /home/node/workspace
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
-CMD ["node", "/opt/slack-libra-code/node_modules/tsx/dist/cli.mjs", "/opt/slack-libra-code/index.ts"]
+CMD ["/opt/libra-harness/apps/slack-libra-code/node_modules/.bin/tsx", "/opt/libra-harness/apps/slack-libra-code/index.ts"]
