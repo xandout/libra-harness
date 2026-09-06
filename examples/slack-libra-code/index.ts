@@ -451,13 +451,13 @@ async function runTurn(opts: {
   }
 
   if (exitCode === 0) {
-    await swapReaction(client, channelId, messageTs, 'thinking_face', 'white_check_mark');
+    try { await swapReaction(client, channelId, messageTs, 'thinking_face', 'white_check_mark'); } catch {}
     const reply = stdout.trim() || 'Done (no text output).';
     await postMessage(client, channelId, reply, replyThreadTs);
     if (replyThreadTs) activeThreads.add(replyThreadTs);
     console.log(`[slack] lc completed successfully for [${sessionKey}]`);
   } else {
-    await swapReaction(client, channelId, messageTs, 'thinking_face', 'x');
+    try { await swapReaction(client, channelId, messageTs, 'thinking_face', 'x'); } catch {}
     const errorDetails = stderr.trim() || stdout.trim() || `Process exited with code ${exitCode}`;
     await postMessage(client, channelId, `:x: **lc error**:\n\`\`\`\n${errorDetails.slice(-2000)}\n\`\`\``, replyThreadTs);
     console.error(`[slack] lc failed with exit code ${exitCode} for [${sessionKey}]`);
@@ -505,14 +505,21 @@ app.message(async ({ message, client }) => {
     return;
   }
 
-  await runTurn({
-    channelId,
-    threadTs: threadTs || undefined,
-    messageTs,
-    cleanedText,
-    client,
-    isDm,
-  });
+  try {
+    await runTurn({
+      channelId,
+      threadTs: threadTs || undefined,
+      messageTs,
+      cleanedText,
+      client,
+      isDm,
+    });
+  } catch (err: any) {
+    console.error(`[slack] runTurn threw for [${channelId}]:`, err?.message || err);
+    try {
+      await postMessage(client, channelId, `:warning: Error: ${err?.message || String(err)}`, isDm ? undefined : (threadTs || messageTs));
+    } catch {}
+  }
 });
 
 // ── Slash Command: /ronny ───────────────────────────────────────────────
