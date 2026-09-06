@@ -641,10 +641,8 @@ export default function createDiskSessionExtension(
 
         if (filteredMessages.length === 0) {
           // All records were already written incrementally by afterLLM
-          // and afterTool. Still need to backfill the system prompt on
-          // the user record and clean up usage metadata.
+          // and afterTool. Backfill system prompt in-memory and return.
           delete ctx.turn.metadata['_diskSessionUsage'];
-          // ── Backfill system prompt on the last user record ───────
           const finalSystemPrompt = ctx.turn.systemPrompt;
           if (finalSystemPrompt) {
             const records = store.get(key) ?? [];
@@ -654,12 +652,6 @@ export default function createDiskSessionExtension(
                 break;
               }
             }
-            appendToFile(key, [{
-              role: 'control',
-              content: '',
-              recordedAt: new Date().toISOString(),
-              systemPrompt: finalSystemPrompt,
-            } as SessionRecord]);
           }
           return;
         }
@@ -704,11 +696,9 @@ export default function createDiskSessionExtension(
         const records = store.get(key) ?? [];
         records.push(...newRecords);
 
-        // ── Backfill system prompt on the last user record ───────
+        // Backfill system prompt on the last user record (in-memory only).
         // The system prompt wasn't available at beforeTurn (beforeContext
-        // hooks hadn't run yet). Now it's final, so update the last user
-        // record in the in-memory store and append a correction record
-        // to the JSONL so the audit trail has the complete prompt.
+        // hooks hadn't run yet), so we update it now.
         const finalSystemPrompt = ctx.turn.systemPrompt;
         if (finalSystemPrompt) {
           for (let i = records.length - 1; i >= 0; i--) {
@@ -717,15 +707,6 @@ export default function createDiskSessionExtension(
               break;
             }
           }
-          // Append a lightweight audit record so the JSONL file also
-          // has the final system prompt (the user record in the file
-          // was written without it at beforeTurn).
-          appendToFile(key, [{
-            role: 'control',
-            content: '',
-            recordedAt: new Date().toISOString(),
-            systemPrompt: finalSystemPrompt,
-          } as SessionRecord]);
         }
 
         // Trim in-memory cache (file keeps full history).
