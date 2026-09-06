@@ -31,9 +31,9 @@ fi
 
 # Start x11vnc for VNC observation
 if [ "${VNC_ENABLED:-true}" = "true" ]; then
-  mkdir -p /root/.vnc && x11vnc -storepasswd "${VNC_PASSWORD:-connie}" /root/.vnc/passwd 2>/dev/null || true
+  mkdir -p "$HOME/.vnc" && x11vnc -storepasswd "${VNC_PASSWORD:-connie}" "$HOME/.vnc/passwd" 2>/dev/null || true
   if ! pgrep -x "x11vnc" >/dev/null; then
-    x11vnc -display :99 -rfbport "${VNC_PORT:-5900}" -rfbauth /root/.vnc/passwd -forever -shared -bg -o /tmp/x11vnc.log || true
+    x11vnc -display :99 -rfbport "${VNC_PORT:-5900}" -rfbauth "$HOME/.vnc/passwd" -forever -shared -bg -o /tmp/x11vnc.log || true
   fi
 fi
 

@@ -49,13 +49,13 @@ RUN install -m 0755 -d /etc/apt/keyrings \
 RUN corepack enable
 
 # Default environment
-ENV HOME=/root
+ENV HOME=/home/node
 ENV DISPLAY=:99
 ENV TERM=xterm-256color
 ENV TZ=America/New_York
 ENV LC_CWD=/home/node/workspace
 ENV LIBRA_HOME=/home/node/workspace/.libra
-ENV BASH_ENV=/root/.bashrc
+ENV BASH_ENV=/home/node/.bashrc
 
 # Clone and build the app at image build time
 RUN mkdir -p /app /home/node/workspace \
@@ -64,7 +64,10 @@ RUN mkdir -p /app /home/node/workspace \
   && corepack enable \
   && pnpm install \
   && pnpm build \
-  && pnpm --filter @xandout/libra-code build
+  && pnpm --filter @xandout/libra-code build \
+  && git config --system --add safe.directory '*' \
+  && touch /home/node/.bashrc \
+  && chown -R node:node /app /home/node
 
 COPY bin/* /usr/local/bin/
 RUN chmod +x /usr/local/bin/*
@@ -72,6 +75,7 @@ RUN chmod +x /usr/local/bin/*
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
+USER node
 WORKDIR /home/node/workspace
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
