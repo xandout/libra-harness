@@ -1085,4 +1085,81 @@ describe('code-tools extension', () => {
       expect(result.content).toContain('[ ] Task');
     });
   });
+
+  // ── view_image tool ────────────────────────────────────────────────
+  describe('view_image tool', () => {
+    it('is not registered when visionModel is not provided', () => {
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+      expect(agent.getTools()).not.toContain('view_image');
+    });
+
+    it('is registered when visionModel is provided', () => {
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension({ visionModel: mockModel() as any }));
+      expect(agent.getTools()).toContain('view_image');
+    });
+
+    it('inspects an image file and returns vision response', async () => {
+      const imgPath = join(tmpDir, 'screenshot.png');
+      writeFileSync(imgPath, Buffer.from('fake-png-bytes'));
+
+      let receivedMessages: any[] = [];
+      const visionModel = {
+        async generate(req: any) {
+          receivedMessages = req.messages;
+          return {
+            message: { role: 'assistant' as const, content: 'This is a login screen.' },
+            finishReason: 'stop' as const,
+          };
+        },
+      };
+
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension({ visionModel: visionModel as any }));
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const viewTool = tools.get('view_image');
+
+      const result = await viewTool.execute(
+        { file_path: imgPath, prompt: 'What screen is this?' },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.isError).toBeFalsy();
+      expect(result.content).toBe('This is a login screen.');
+
+      // Check multimodal format sent to vision model
+      expect(receivedMessages).toHaveLength(1);
+      const userContent = receivedMessages[0].content;
+      expect(Array.isArray(userContent)).toBe(true);
+      expect(userContent[0]).toEqual({ type: 'text', text: 'What screen is this?' });
+      expect(userContent[1].type).toBe('file');
+      expect(userContent[1].mediaType).toBe('image/png');
+    });
+
+    it('returns error if file does not exist or is not an image', async () => {
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension({ visionModel: mockModel() as any }));
+
+      const tools = (agent as any).tools as Map<string, any>;
+      const viewTool = tools.get('view_image');
+
+      const notFound = await viewTool.execute(
+        { file_path: join(tmpDir, 'nonexistent.png') },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+      expect(notFound.isError).toBe(true);
+      expect(notFound.content).toContain('File not found');
+
+      const textFile = join(tmpDir, 'notes.txt');
+      writeFileSync(textFile, 'hello');
+      const badFormat = await viewTool.execute(
+        { file_path: textFile },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+      expect(badFormat.isError).toBe(true);
+      expect(badFormat.content).toContain('Unsupported image format');
+    });
+  });
 });

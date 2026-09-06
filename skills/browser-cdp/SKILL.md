@@ -38,6 +38,7 @@ All browser interactions are driven by `cdp` commands connecting to a headed Chr
 
 ## Display & Screenshot Tools
 
+- `view_image <file_path> [prompt]`: **Direct visual inspection tool!** Inspect any image or screenshot (PNG, JPG, WEBP) using the configured vision model. Ask specific questions like `view_image file_path="/tmp/screen.png" prompt="Is there a CAPTCHA or error message visible?"`.
 - `screenshot [output.png] [url]`: Capture a screenshot of virtual display `:99` (or render a URL).
 - `slack-screenshot [url] [comment]`: Take a screenshot and upload it directly to the active Slack thread in one step.
 

@@ -9,6 +9,7 @@ import { codeSearchTool } from './tools/code-search.js';
 import { ShellRegistry, execTool, getOutputTool, killShellTool, writeToProcessTool } from './tools/shell.js';
 import type { ShellToolFactory } from './tools/shell.js';
 import { TodoStore, todoWriteTool } from './tools/todo.js';
+import { viewImageTool } from './tools/view-image.js';
 
 /**
  * Configuration for the code-tools extension.
@@ -59,6 +60,13 @@ export interface CodeToolsConfig {
    * Max iterations for the code_search subagent. Default: 10.
    */
   codeSearchMaxIterations?: number;
+  /**
+   * Vision-capable model for the `view_image` tool. When provided,
+   * the `view_image` tool is registered — allowing the agent to inspect
+   * images and screenshots via a vision model.
+   * Default: undefined (view_image tool is not registered)
+   */
+  visionModel?: Model;
 }
 
 /**
@@ -146,6 +154,14 @@ export default function createCodeToolsExtension(
           toolPrefix: resolved.toolPrefix,
           model: config.model,
           maxIterations: config.codeSearchMaxIterations,
+        }));
+      }
+
+      // view_image tool — registered when a vision-capable model is provided.
+      if (config?.visionModel) {
+        agent.tool(viewImageTool({
+          toolPrefix: resolved.toolPrefix,
+          visionModel: config.visionModel,
         }));
       }
     },

@@ -36,6 +36,7 @@ export const CONFIG_FILE = join(LIBRA_HOME, 'config.json');
 
 export interface LibraCodeConfig {
   model?: string;
+  visionModel?: string;
   maxIterations?: number;
   /** Custom system prompt. Overrides the default if set. */
   systemPrompt?: string;
@@ -403,6 +404,16 @@ export async function buildAgent(opts: BuildAgentOptions = {}): Promise<BuiltAge
   }
 
   const model = await resolveModel(modelId, { providers: buildProviders() });
+  const visionModelId = config.visionModel ?? process.env.LIBRA_VISION_MODEL ?? process.env.VISION_MODEL;
+  let visionModel: import('@xandout/libra-harness').Model | undefined;
+  if (visionModelId) {
+    try {
+      visionModel = await resolveModel(visionModelId, { providers: buildProviders() });
+    } catch (err) {
+      console.warn(`[vision] Failed to resolve VISION_MODEL "${visionModelId}":`, err instanceof Error ? err.message : String(err));
+    }
+  }
+
   const cwd = process.cwd();
   const sessionKey = sessionKeyForCwd(cwd);
   const todoFile = join(TODOS_DIR, `${sessionKey}.json`);
@@ -439,6 +450,7 @@ export async function buildAgent(opts: BuildAgentOptions = {}): Promise<BuiltAge
     shellsDir: SHELLS_DIR,
     todoFile,
     model,
+    visionModel,
     codeSearchMaxIterations: 10,
   }));
   agent.use(createSocketEventsExtension());
