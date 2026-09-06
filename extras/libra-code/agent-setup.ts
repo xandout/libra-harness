@@ -111,13 +111,16 @@ export function buildSystemPrompt(projectDir?: string): string {
   const config = loadConfig();
   const base = config.systemPrompt?.trim() || SYSTEM_PROMPT;
   const agentsMd = loadAgentsMd(projectDir ?? process.cwd());
-  if (!agentsMd) return base;
-  return `${base}
+  const extraSystem = process.env.LIBRA_EXTRA_SYSTEM?.trim();
 
-══════════════════════════════════════════════════════════════════════
-PROJECT INSTRUCTIONS (AGENTS.md)
-══════════════════════════════════════════════════════════════════════
-${agentsMd}`;
+  let prompt = base;
+  if (agentsMd) {
+    prompt += `\n\n══════════════════════════════════════════════════════════════════════\nPROJECT INSTRUCTIONS (AGENTS.md)\n══════════════════════════════════════════════════════════════════════\n${agentsMd}`;
+  }
+  if (extraSystem) {
+    prompt += `\n\n${extraSystem}`;
+  }
+  return prompt;
 }
 
 export interface ThinkingResolvedConfig {
