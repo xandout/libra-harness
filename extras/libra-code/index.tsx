@@ -6,7 +6,7 @@ import { render } from 'ink';
 import React from 'react';
 import { configuredProviders } from '@xandout/libra-harness/extras/models';
 import {
-  LIBRA_HOME, SESSIONS_DIR, SOCKETS_DIR, TODOS_DIR, TURNS_DIR, TURN_META_DIR, LOCKS_DIR, CONFIG_FILE,
+  LIBRA_HOME, SESSIONS_DIR, SOCKETS_DIR, TODOS_DIR, CONFIG_FILE,
   loadConfig, saveConfig, ensureDirs, sessionKeyForCwd, buildAgent,
 } from './agent-setup.js';
 import {
@@ -253,11 +253,8 @@ async function runWithTui(
   };
 
   // ── Control state ──
-  let currentJournal: TurnJournal | null = null;
   let agentProcess: ChildProcess | null = null;
   let haltPressed = false;
-  const lockManager = new SessionLockManager(LOCKS_DIR);
-  let reattaching = false;
 
   // ── Re-render helper — throttled to max ~30fps ──
   let renderFns: { rerender: (node: React.ReactNode) => void; unmount: () => void } | null = null;
@@ -319,7 +316,7 @@ async function runWithTui(
   };
 
   // ── Journal event handler — updates display state from events ──
-  function handleJournalEvent(ev: TurnEvent): void {
+  function handleJournalEvent(ev: SocketEvent): void {
     switch (ev.type) {
       case 'status':
         break;
@@ -406,38 +403,6 @@ async function runWithTui(
     }
   }
 
-  // ── Journal file watcher (polling — macOS-safe) ──
-  let watchOffset = 0;
-  let watchTimer: ReturnType<typeof setInterval> | null = null;
-
-  function startWatching(journalPath: string, initialOffset = 0) {
-    watchOffset = initialOffset;
-    if (watchTimer) clearInterval(watchTimer);
-    watchTimer = setInterval(() => {
-      try {
-        if (!existsSync(journalPath)) return;
-        const stat = statSync(journalPath);
-        if (stat.size <= watchOffset) return;
-        const content = readFileSync(journalPath, 'utf-8');
-        const newContent = content.slice(watchOffset);
-        watchOffset = content.length;
-        for (const line of newContent.split('\n')) {
-          if (!line.trim()) continue;
-          try {
-            handleJournalEvent(JSON.parse(line) as TurnEvent);
-          } catch { /* partial line */ }
-        }
-      } catch { /* file may be mid-write */ }
-    }, 100);
-  }
-
-  function stopWatching() {
-    if (watchTimer) {
-      clearInterval(watchTimer);
-      watchTimer = null;
-    }
-  }
-
   let socketClient: SessionSocketClient | null = null;
 
   async function connectSocket(): Promise<SessionSocketClient | null> {
@@ -445,7 +410,7 @@ async function runWithTui(
     const client = new SessionSocketClient(socketPath);
     try {
       await client.connect();
-      client.onEvent((ev) => handleJournalEvent(ev));
+      client.onEvent((ev: SocketEvent) => handleJournalEvent(ev));
       socketClient = client;
       return client;
     } catch {
@@ -603,7 +568,7 @@ async function runStdout(
       process.on('SIGINT', onSigInt);
 
       await new Promise<void>((resolve) => {
-        client.onEvent((ev) => {
+        client.onEvent((ev: SocketEvent) => {
           switch (ev.type) {
             case 'text':
               if (firstText) {
