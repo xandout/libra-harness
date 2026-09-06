@@ -2,19 +2,17 @@
 /**
  * slack-read — Read recent Slack messages from the current thread or channel.
  *
+ * Standalone script with zero external dependencies (uses native fetch).
+ *
  * Usage:
  *   slack-read [--channel <id>] [--thread <ts>] [--limit <number>]
  */
-
-import { WebClient } from '@slack/web-api';
 
 const token = process.env.SLACK_BOT_TOKEN;
 if (!token) {
   console.error('Error: SLACK_BOT_TOKEN is not set.');
   process.exit(1);
 }
-
-const client = new WebClient(token);
 
 const args = process.argv.slice(2);
 let channel = process.env.SLACK_CHANNEL_ID;
@@ -33,16 +31,29 @@ if (!channel) {
 }
 
 try {
+  const endpoint = threadTs ? 'conversations.replies' : 'conversations.history';
+  const url = new URL(`https://slack.com/api/${endpoint}`);
+  url.searchParams.set('channel', channel);
+  url.searchParams.set('limit', String(limit));
   if (threadTs) {
-    const res = await client.conversations.replies({ channel, ts: threadTs, limit });
-    for (const msg of res.messages || []) {
-      console.log(`[${msg.user || 'bot'} @ ${msg.ts}]: ${msg.text || ''}`);
-    }
-  } else {
-    const res = await client.conversations.history({ channel, limit });
-    for (const msg of res.messages || []) {
-      console.log(`[${msg.user || 'bot'} @ ${msg.ts}]: ${msg.text || ''}`);
-    }
+    url.searchParams.set('ts', threadTs);
+  }
+
+  const res = await fetch(url.toString(), {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json; charset=utf-8',
+    },
+  });
+
+  const data = await res.json();
+  if (!data.ok) {
+    throw new Error(data.error || `HTTP ${res.status}`);
+  }
+
+  for (const msg of data.messages || []) {
+    console.log(`[${msg.user || 'bot'} @ ${msg.ts}]: ${msg.text || ''}`);
   }
 } catch (err) {
   console.error('Failed to read Slack conversation:', err.message || err);

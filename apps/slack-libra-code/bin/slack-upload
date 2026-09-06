@@ -2,6 +2,12 @@
 /**
  * slack-upload — Upload a file or image to Slack as the bot.
  *
+ * Standalone script with zero external dependencies (uses native fetch + FormData).
+ * Uses Slack's modern 3-step external upload API:
+ *   1. files.getUploadURLExternal
+ *   2. POST raw file bytes to upload_url
+ *   3. files.completeUploadExternal
+ *
  * Usage:
  *   slack-upload <file_path> [comment] [--channel <id>] [--thread <ts>]
  *
@@ -11,8 +17,7 @@
  *   SLACK_THREAD_TS   — Default thread timestamp (injected by runner)
  */
 
-import { WebClient } from '@slack/web-api';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, statSync, existsSync } from 'node:fs';
 import { basename } from 'node:path';
 
 const token = process.env.SLACK_BOT_TOKEN;
@@ -20,8 +25,6 @@ if (!token) {
   console.error('Error: SLACK_BOT_TOKEN environment variable is not set.');
   process.exit(1);
 }
-
-const client = new WebClient(token);
 
 const args = process.argv.slice(2);
 if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
@@ -58,17 +61,60 @@ if (!channel) {
   process.exit(1);
 }
 
-const fileData = readFileSync(filePath);
+const fileStats = statSync(filePath);
+const fileSize = fileStats.size;
 const filename = basename(filePath);
+const fileData = readFileSync(filePath);
 
 try {
-  const result = await client.files.uploadV2({
-    channel_id: channel,
-    thread_ts: threadTs || undefined,
-    file: fileData,
-    filename,
-    initial_comment: comment || undefined,
+  // Step 1: Request upload URL from Slack
+  const step1Url = new URL('https://slack.com/api/files.getUploadURLExternal');
+  step1Url.searchParams.set('filename', filename);
+  step1Url.searchParams.set('length', String(fileSize));
+
+  const step1Res = await fetch(step1Url.toString(), {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
   });
+  const step1Data = await step1Res.json();
+  if (!step1Data.ok) {
+    throw new Error(`Step 1 (getUploadURLExternal) failed: ${step1Data.error || step1Res.status}`);
+  }
+
+  const { upload_url: uploadUrl, file_id: fileId } = step1Data;
+
+  // Step 2: POST file data to upload_url
+  const step2Res = await fetch(uploadUrl, {
+    method: 'POST',
+    body: fileData,
+  });
+  if (!step2Res.ok) {
+    throw new Error(`Step 2 (file binary upload) failed: HTTP ${step2Res.status}`);
+  }
+
+  // Step 3: Complete upload and share to channel/thread
+  const completePayload = {
+    files: [{ id: fileId, title: filename }],
+    channel_id: channel,
+    ...(threadTs ? { thread_ts: threadTs } : {}),
+    ...(comment ? { initial_comment: comment } : {}),
+  };
+
+  const step3Res = await fetch('https://slack.com/api/files.completeUploadExternal', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json; charset=utf-8',
+    },
+    body: JSON.stringify(completePayload),
+  });
+  const step3Data = await step3Res.json();
+  if (!step3Data.ok) {
+    throw new Error(`Step 3 (completeUploadExternal) failed: ${step3Data.error || step3Res.status}`);
+  }
+
   console.log(`Uploaded ${filename} to Slack (${channel}${threadTs ? ' thread ' + threadTs : ''})`);
 } catch (err) {
   console.error('Failed to upload file to Slack:', err.message || err);

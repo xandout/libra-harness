@@ -2,19 +2,17 @@
 /**
  * slack-post — Post a text or block message to Slack as the bot.
  *
+ * Standalone script with zero external dependencies (uses native fetch).
+ *
  * Usage:
  *   slack-post <message> [--channel <id>] [--thread <ts>]
  */
-
-import { WebClient } from '@slack/web-api';
 
 const token = process.env.SLACK_BOT_TOKEN;
 if (!token) {
   console.error('Error: SLACK_BOT_TOKEN is not set.');
   process.exit(1);
 }
-
-const client = new WebClient(token);
 
 const args = process.argv.slice(2);
 if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
@@ -44,11 +42,26 @@ if (!channel) {
 }
 
 try {
-  await client.chat.postMessage({
+  const body = {
     channel,
     text,
-    thread_ts: threadTs || undefined,
+    ...(threadTs ? { thread_ts: threadTs } : {}),
+  };
+
+  const res = await fetch('https://slack.com/api/chat.postMessage', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json; charset=utf-8',
+    },
+    body: JSON.stringify(body),
   });
+
+  const data = await res.json();
+  if (!data.ok) {
+    throw new Error(data.error || `HTTP ${res.status}`);
+  }
+
   console.log(`Posted message to Slack (${channel}${threadTs ? ' thread ' + threadTs : ''})`);
 } catch (err) {
   console.error('Failed to post message to Slack:', err.message || err);
