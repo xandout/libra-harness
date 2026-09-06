@@ -20,9 +20,8 @@ RUN echo "build cache-bust: $CACHE_BUST" \
   && mv /src/packages/libra-code/*.tgz /packages/
 
 # Prepare the Slack runner host in /opt/slack-libra-code and skills in /opt/skills
-WORKDIR /opt/slack-libra-code
-RUN cp -r /src/apps/slack-libra-code/* ./ \
-  && pnpm install --prod \
+WORKDIR /src
+RUN pnpm --filter slack-libra-code deploy --legacy --prod /opt/slack-libra-code \
   && mkdir -p /opt/skills \
   && if [ -d /src/skills ]; then cp -r /src/skills/* /opt/skills/; fi \
   && if [ -d /src/apps/slack-libra-code/skills ]; then cp -r /src/apps/slack-libra-code/skills/* /opt/skills/; fi
