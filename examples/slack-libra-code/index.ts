@@ -306,12 +306,15 @@ async function executeLc(
     const fullArgs = [...resolvedLc.args, '--session', sessionKey, prompt];
     const slackToolsSystem = [
       'Available shell tools (use these to interact with Slack and the browser):',
+      '- start-browser: Start or ensure headed Chrome is running on display :99 with persistent profile and remote debugging (cleans locks automatically)',
+      '- cdp <goto|click|type|scroll|eval|title|url|wait-for> [args]: Control Chrome via Chrome DevTools Protocol',
       '- screenshot [output.png] [url]: Take a screenshot of virtual display :99 or a URL',
       '- slack-upload <file> [comment]: Upload a file to this Slack thread',
       '- slack-screenshot [url] [comment]: Screenshot and upload to this Slack thread',
       '- slack-post <message>: Post an update to this Slack thread',
       '- slack-read: Read recent messages from this channel/thread',
       '',
+      'Browser guidelines: Use `start-browser` if Chrome is not started, and `cdp` to navigate and interact. Do not launch raw unmanaged background chrome processes.',
       'For tasks with multiple steps, use slack-post to send brief progress updates so the user is not left waiting.',
     ].join('\n');
 

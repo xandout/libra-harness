@@ -18,6 +18,15 @@ pnpm install --frozen-lockfile || true
 pnpm build || true
 pnpm --filter @xandout/libra-code build || true
 
+# Clean up stale Chrome locks from previous container runs
+CHROME_PROFILE_DIR="${CHROME_PROFILE_DIR:-/home/node/chrome-profile}"
+if [ -d "$CHROME_PROFILE_DIR" ]; then
+  rm -f "$CHROME_PROFILE_DIR/SingletonLock" \
+        "$CHROME_PROFILE_DIR/SingletonCookie" \
+        "$CHROME_PROFILE_DIR/SingletonSocket" 2>/dev/null || true
+fi
+rm -rf /tmp/.org.chromium.Chromium.* /tmp/.com.google.Chrome.* 2>/dev/null || true
+
 # Ensure Xvfb virtual display is running on :99
 if ! pgrep -x "Xvfb" >/dev/null; then
   rm -f /tmp/.X99-lock /tmp/.X11-unix/X99

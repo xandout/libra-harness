@@ -9,14 +9,20 @@ PROFILE_DIR="${CHROME_PROFILE_DIR:-/home/node/chrome-profile}"
 DEBUG_PORT="${CHROME_DEBUG_PORT:-18800}"
 
 if pgrep -f "remote-debugging-port=$DEBUG_PORT" >/dev/null; then
-  echo "Chrome already running on port $DEBUG_PORT"
-  exit 0
+  if curl -s "http://127.0.0.1:$DEBUG_PORT/json/version" >/dev/null; then
+    echo "Chrome already running on port $DEBUG_PORT"
+    exit 0
+  fi
+  echo "Stale Chrome process found on port $DEBUG_PORT (unresponsive), killing..."
+  pkill -9 -f "remote-debugging-port=$DEBUG_PORT" 2>/dev/null || true
+  sleep 1
 fi
 
 mkdir -p "$PROFILE_DIR"
 
-# Clean up stale locks to prevent "profile in use" xmessage popups hanging chrome
-rm -f "$PROFILE_DIR/SingletonLock" "$PROFILE_DIR/SingletonCookie" "$PROFILE_DIR/SingletonSocket"
+# Clean up stale locks to prevent "profile in use" popups and crashes
+rm -f "$PROFILE_DIR/SingletonLock" "$PROFILE_DIR/SingletonCookie" "$PROFILE_DIR/SingletonSocket" 2>/dev/null || true
+rm -rf /tmp/.org.chromium.Chromium.* /tmp/.com.google.Chrome.* 2>/dev/null || true
 
 google-chrome \
   --remote-debugging-port="$DEBUG_PORT" \
