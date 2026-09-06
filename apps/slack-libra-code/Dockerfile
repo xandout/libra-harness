@@ -96,7 +96,9 @@ COPY --from=builder /opt/skills /opt/skills
 
 # Copy helper tools and entrypoint
 COPY bin/* /usr/local/bin/
-RUN chmod +x /usr/local/bin/*
+RUN chmod +x /usr/local/bin/* \
+  && ln -s /opt/libra-harness/apps/slack-libra-code/node_modules /node_modules \
+  && ln -s /opt/libra-harness/apps/slack-libra-code/node_modules /usr/local/node_modules
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
