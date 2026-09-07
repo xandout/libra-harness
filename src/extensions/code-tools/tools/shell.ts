@@ -11,7 +11,7 @@ export interface ShellToolConfig {
 
 export type ShellToolFactory = (cfg: ShellToolConfig) => ReturnType<ToolFactory>;
 
-interface ShellEntry {
+export interface ShellEntry {
   id: string;
   process?: ChildProcess;
   pid: number;
@@ -55,7 +55,12 @@ export class ShellRegistry {
     return join(this.shellsDir, `${id}.json`);
   }
 
-  async create(command: string, cwd: string, env: Record<string, string>, background: boolean = false): Promise<ShellEntry> {
+  async create(
+    command: string,
+    cwd: string,
+    env: Record<string, string>,
+    background: boolean = false
+  ): Promise<ShellEntry> {
     const id = this.nextId();
     const shellsDir = this.shellsDir;
 
@@ -78,9 +83,11 @@ export class ShellRegistry {
       const fifoReady = existsSync(inputFifo);
       const nullFd = openSync('/dev/null', 'r');
 
+      // Wrap in parentheses `( command )` so internal pipes (`a | b | head`)
+      // do NOT have the right-hand command stdin redirected to `<&3`!
       const fullCommand = fifoReady
-        ? `exec 3<>"${inputFifo}"; ${command} <&3; echo $? > "${exitFile}" 2>/dev/null`
-        : `${command} < /dev/null; echo $? > "${exitFile}" 2>/dev/null`;
+        ? `exec 3<>"${inputFifo}"; ( ${command} ) <&3; echo $? > "${exitFile}" 2>/dev/null`
+        : `( ${command} ) < /dev/null; echo $? > "${exitFile}" 2>/dev/null`;
 
       const child = spawn(fullCommand, {
         shell: '/bin/bash',
@@ -138,7 +145,7 @@ export class ShellRegistry {
       return entry;
     }
 
-    // ── Foreground: direct pipes, parent owns the process ──
+    // ── Foreground: direct in-memory pipes, parent owns the process ──
     const child = spawn(command, {
       shell: '/bin/bash',
       cwd,
@@ -179,46 +186,27 @@ export class ShellRegistry {
     return entry;
   }
 
-    child.on('exit', (code) => {
-      entry.done = true;
-      entry.exitCode = code;
-      if (this.onTaskComplete) {
-        let finalOutput = '';
-        try { finalOutput = readFileSync(outputFile, 'utf-8'); } catch {}
-        this.onTaskComplete(id, code ?? -1, finalOutput);
-      }
-    });
-    child.on('error', (err) => {
-      try { appendFileSync(outputFile, `\nError: ${err.message}\n`); } catch {}
-      entry.done = true;
-      entry.exitCode = -1;
-      if (this.onTaskComplete) {
-        let finalOutput = '';
-        try { finalOutput = readFileSync(outputFile, 'utf-8'); } catch {}
-        this.onTaskComplete(id, -1, finalOutput);
-      }
-    });
-
-    child.unref();
-
-    const meta: ShellMeta = {
-      id,
-      pid: child.pid ?? -1,
-      command,
-      cwd,
-      startedAt: entry.startedAt,
-      outputFile,
-      inputFifo: inputFifo,
-    };
-    try { writeFileSync(metaFile, JSON.stringify(meta, null, 2)); } catch {}
-
-    this.shells.set(id, entry);
-    return entry;
-  }
-
   get(id: string): ShellEntry | undefined {
     const cached = this.shells.get(id);
-    if (cached) return cached;
+    if (cached) {
+      if (!cached.done && cached.detached) {
+        const exitFile = join(this.shellsDir, `${id}.exit`);
+        if (existsSync(exitFile)) {
+          try {
+            cached.exitCode = Number(readFileSync(exitFile, 'utf-8').trim());
+            cached.done = true;
+          } catch {}
+        } else if (cached.pid > 0) {
+          try {
+            process.kill(cached.pid, 0);
+          } catch {
+            cached.done = true;
+            cached.exitCode = -1;
+          }
+        }
+      }
+      return cached;
+    }
 
     const metaFile = this.metaPath(id);
     if (!existsSync(metaFile)) return undefined;
@@ -274,6 +262,17 @@ export class ShellRegistry {
   }
 
   delete(id: string): boolean {
+    const entry = this.shells.get(id);
+    if (entry && !entry.done) {
+      try {
+        if (entry.process) {
+          entry.process.kill('SIGKILL');
+        } else if (entry.pid > 0) {
+          process.kill(entry.pid, 'SIGKILL');
+        }
+      } catch {}
+    }
+
     const removed = this.shells.delete(id);
     const metaFile = this.metaPath(id);
     const outputFile = join(this.shellsDir, `${id}.output`);
@@ -288,9 +287,13 @@ export class ShellRegistry {
   close() {
     for (const entry of this.shells.values()) {
       if (!entry.done) {
-        try { process.kill(-entry.pid, 'SIGKILL'); } catch {
-          try { process.kill(entry.pid, 'SIGKILL'); } catch {}
-        }
+        try {
+          if (entry.process) {
+            entry.process.kill('SIGKILL');
+          } else if (entry.pid > 0) {
+            process.kill(entry.pid, 'SIGKILL');
+          }
+        } catch {}
       }
       this.delete(entry.id);
     }
@@ -312,52 +315,65 @@ export const runCommandTool: ShellToolFactory = (cfg) => ({
         type: 'string',
         description: 'The exact command line string to execute.',
       },
+      command: {
+        type: 'string',
+        description: 'Alias for CommandLine.',
+      },
       Cwd: {
         type: 'string',
         description: 'The current working directory for the command.',
       },
+      cwd: {
+        type: 'string',
+        description: 'Alias for Cwd.',
+      },
       WaitMsBeforeAsync: {
         type: 'integer',
-        description: 'Milliseconds to wait after starting the command before sending it to the background.',
+        description: 'Milliseconds to wait after starting the command before sending it to the background. Default: 30000 (30s).',
+      },
+      timeout: {
+        type: 'integer',
+        description: 'Alias for WaitMsBeforeAsync.',
       },
       IsDaemon: {
         type: 'boolean',
         description: 'Set to true for long-running support processes.',
       },
     },
-    required: ['CommandLine', 'Cwd', 'WaitMsBeforeAsync'],
+    required: ['CommandLine'],
   },
   async execute(args) {
-    const command = String(args.CommandLine ?? '');
-    const cwd = String(args.Cwd ?? process.cwd());
-    const waitMs = Number(args.WaitMsBeforeAsync ?? 1000);
+    const command = String(args.CommandLine ?? args.command ?? '');
+    const cwd = String(args.Cwd ?? args.cwd ?? process.cwd());
+    const waitMs = args.WaitMsBeforeAsync !== undefined
+      ? Number(args.WaitMsBeforeAsync)
+      : (args.timeout !== undefined ? Number(args.timeout) : 30000);
     const isDaemon = args.IsDaemon === true;
 
     if (!command) {
       return { toolCallId: '', content: 'Error: CommandLine is required' };
     }
 
-    const entry = await cfg.registry.create(command, cwd, {});
-
     if (isDaemon || waitMs <= 0) {
+      const entry = await cfg.registry.create(command, cwd, {}, true);
       return {
         toolCallId: '',
         content: `Command sent to background. Task ID: ${entry.id}`,
       };
     }
 
+    // Foreground execution with direct pipes
+    const entry = await cfg.registry.create(command, cwd, {}, false);
+
     // Wait up to waitMs
     const start = Date.now();
     while (!entry.done && (Date.now() - start) < waitMs) {
-      await new Promise((r) => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 50));
     }
 
     if (entry.done) {
-      let output = '';
-      if (entry.outputFile && existsSync(entry.outputFile)) {
-        try { output = readFileSync(entry.outputFile, 'utf-8'); } catch {}
-      }
       cfg.registry.delete(entry.id);
+      const output = entry.output;
       const truncated = output.length > 50000 ? output.slice(0, 50000) + '\n[output truncated]' : output;
       return {
         toolCallId: '',
@@ -365,13 +381,22 @@ export const runCommandTool: ShellToolFactory = (cfg) => ({
       };
     }
 
-    // Didn't finish in time, background it
+    // Didn't finish in time, report backgrounded
     return {
       toolCallId: '',
       content: `Command still running after ${waitMs}ms. Sent to background. Task ID: ${entry.id}`,
     };
   },
 });
+
+export const execTool: ShellToolFactory = (cfg) => {
+  const base = runCommandTool(cfg);
+  return {
+    ...base,
+    name: makeToolName(cfg.toolPrefix, 'exec'),
+    description: 'Execute a shell command. Alias for run_command.',
+  };
+};
 
 // ── manage_task ───────────────────────────────────────────────────────
 export const manageTaskTool: ShellToolFactory = (cfg) => ({
@@ -389,11 +414,11 @@ export const manageTaskTool: ShellToolFactory = (cfg) => ({
       },
       TaskId: {
         type: 'string',
-        description: 'The task ID to manage. Required when Action is kill, status, or send_input.',
+        description: 'The task ID to manage.',
       },
       Input: {
         type: 'string',
-        description: 'The input to send to the task. Required when Action is send_input.',
+        description: 'The input to send to the task (required for send_input).',
       },
     },
     required: ['Action'],
@@ -401,14 +426,13 @@ export const manageTaskTool: ShellToolFactory = (cfg) => ({
   async execute(args) {
     const action = String(args.Action ?? '');
     const taskId = String(args.TaskId ?? '');
-    const input = String(args.Input ?? '');
 
     if (action === 'list') {
       return { toolCallId: '', content: 'Error: list action not supported, track your task IDs.' };
     }
 
     if (!taskId) {
-      return { toolCallId: '', content: 'Error: TaskId is required for this action' };
+      return { toolCallId: '', content: 'Error: TaskId is required' };
     }
 
     const entry = cfg.registry.get(taskId);
@@ -416,25 +440,8 @@ export const manageTaskTool: ShellToolFactory = (cfg) => ({
       return { toolCallId: '', content: `Error: no task with id "${taskId}"` };
     }
 
-    if (action === 'kill') {
-      try { process.kill(-entry.pid, 'SIGKILL'); } catch {
-        try { process.kill(entry.pid, 'SIGKILL'); } catch {}
-      }
-      await new Promise((r) => setTimeout(r, 100));
-      let output = '';
-      if (entry.outputFile && existsSync(entry.outputFile)) {
-        try { output = readFileSync(entry.outputFile, 'utf-8'); } catch {}
-      }
-      const truncated = output.length > 50000 ? output.slice(0, 50000) + '\n[output truncated]' : output;
-      cfg.registry.delete(taskId);
-      return {
-        toolCallId: '',
-        content: `Killed task ${taskId}.\n${truncated}`,
-      };
-    }
-
     if (action === 'status') {
-      let output = '';
+      let output = entry.output;
       if (entry.outputFile && existsSync(entry.outputFile)) {
         try { output = readFileSync(entry.outputFile, 'utf-8'); } catch {}
       }
@@ -444,29 +451,51 @@ export const manageTaskTool: ShellToolFactory = (cfg) => ({
         cfg.registry.delete(taskId);
         return { toolCallId: '', content: `Task finished (code: ${entry.exitCode}).\n${truncated}` };
       }
+
       return { toolCallId: '', content: `Task still running.\n${truncated}` };
     }
 
-    if (action === 'send_input') {
-      if (entry.done) {
-        return { toolCallId: '', content: `Error: task ${taskId} has already exited` };
+    if (action === 'kill') {
+      try {
+        if (entry.process) {
+          entry.process.kill('SIGKILL');
+        } else if (entry.pid > 0) {
+          process.kill(entry.pid, 'SIGKILL');
+        }
+      } catch {}
+
+      let output = entry.output;
+      if (entry.outputFile && existsSync(entry.outputFile)) {
+        try { output = readFileSync(entry.outputFile, 'utf-8'); } catch {}
       }
-      if (entry.inputFifo && existsSync(entry.inputFifo)) {
-        const { spawn } = await import('node:child_process');
-        return new Promise((resolve) => {
-          const writer = spawn('sh', ['-c', `printf %s "$1" >> "${entry.inputFifo}"`, 'write_to_process', input], { stdio: 'ignore' });
-          writer.on('exit', (code) => {
-            if (code === 0) {
-              resolve({ toolCallId: '', content: `Wrote ${input.length} bytes to ${taskId}` });
-            } else {
-              resolve({ toolCallId: '', content: `Error writing to ${taskId}: exit code ${code}`, isError: true });
-            }
-          });
-        });
-      }
-      return { toolCallId: '', content: `Error: task ${taskId} has no input fifo`, isError: true };
+      cfg.registry.delete(taskId);
+      const truncated = output.length > 50000 ? output.slice(0, 50000) + '\n[output truncated]' : output;
+
+      return {
+        toolCallId: '',
+        content: `Killed task ${taskId}.\n${truncated}`,
+      };
     }
 
-    return { toolCallId: '', content: `Error: unknown action ${action}` };
+    if (action === 'send_input') {
+      const input = String(args.Input ?? '');
+
+      if (entry.done) {
+        return { toolCallId: '', content: `Error: task "${taskId}" has already exited` };
+      }
+
+      if (entry.inputFifo && existsSync(entry.inputFifo)) {
+        try {
+          appendFileSync(entry.inputFifo, input + '\n');
+          return { toolCallId: '', content: `Sent input to task ${taskId}` };
+        } catch (err: any) {
+          return { toolCallId: '', content: `Error writing to input FIFO: ${err.message}` };
+        }
+      }
+
+      return { toolCallId: '', content: `Error: task "${taskId}" does not accept input` };
+    }
+
+    return { toolCallId: '', content: `Unknown action: "${action}"` };
   },
 });

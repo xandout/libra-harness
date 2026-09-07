@@ -7,7 +7,7 @@ import { writeTool, editTool } from './tools/write.js';
 import { findFileByNameTool } from './tools/find.js';
 import { grepTool } from './tools/grep.js';
 import { codeSearchTool } from './tools/code-search.js';
-import { ShellRegistry, runCommandTool, manageTaskTool } from './tools/shell.js';
+import { ShellRegistry, runCommandTool, execTool, manageTaskTool } from './tools/shell.js';
 import type { ShellToolFactory } from './tools/shell.js';
 import { TodoStore, todoWriteTool } from './tools/todo.js';
 import { viewImageTool } from './tools/view-image.js';
@@ -45,6 +45,7 @@ export default function createCodeToolsExtension(config?: CodeToolsConfig): Exte
 
   const shellToolFactories: ShellToolFactory[] = [
     runCommandTool,
+    execTool,
     manageTaskTool,
   ];
 
