@@ -108,6 +108,22 @@ export const editTool: ToolFactory = (cfg) => ({
     const targetContent = String(args.targetContent ?? '');
     const replacementContent = String(args.replacementContent ?? '');
 
+    if (isNaN(startLine) || isNaN(endLine) || startLine < 1 || endLine < startLine) {
+      return {
+        toolCallId: '',
+        content: `Error: Invalid line range (${args.startLine}, ${args.endLine}). startLine must be >= 1 and <= endLine.`,
+        isError: true,
+      };
+    }
+
+    if (targetContent === replacementContent) {
+      return {
+        toolCallId: '',
+        content: 'Error: targetContent and replacementContent are identical',
+        isError: true,
+      };
+    }
+
     if (!existsSync(filePath)) {
       return {
         toolCallId: '',

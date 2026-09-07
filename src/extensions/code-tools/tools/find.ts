@@ -2,6 +2,22 @@ import { existsSync, statSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { makeToolName, type ToolFactory } from './shared.js';
 
+let fdBinary: string | undefined;
+function getFdCommand(): string {
+  if (fdBinary) return fdBinary;
+  try {
+    execSync('fd --version', { stdio: 'ignore' });
+    fdBinary = 'fd';
+    return fdBinary;
+  } catch {}
+  try {
+    execSync('fdfind --version', { stdio: 'ignore' });
+    fdBinary = 'fdfind';
+    return fdBinary;
+  } catch {}
+  return 'fd';
+}
+
 export const findFileByNameTool: ToolFactory = (cfg) => ({
   name: makeToolName(cfg.toolPrefix, 'find_file_by_name'),
   description:
@@ -38,11 +54,10 @@ export const findFileByNameTool: ToolFactory = (cfg) => ({
       return { toolCallId: '', content: `Path is not a directory: ${searchDir}` };
     }
 
+
     try {
-      // Use fd to search
-      // -g for glob pattern
-      // -c never to disable color
-      const output = execSync(`fd -g "${pattern}" -c never`, { cwd: searchDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] });
+      const bin = getFdCommand();
+      const output = execSync(`${bin} -g "${pattern}" -c never`, { cwd: searchDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] });
       
       const files = output.split('\n').map(f => f.trim()).filter(Boolean);
       if (files.length === 0) {

@@ -55,42 +55,96 @@ export class ShellRegistry {
     return join(this.shellsDir, `${id}.json`);
   }
 
-  async create(command: string, cwd: string, env: Record<string, string>): Promise<ShellEntry> {
+  async create(command: string, cwd: string, env: Record<string, string>, background: boolean = false): Promise<ShellEntry> {
     const id = this.nextId();
     const shellsDir = this.shellsDir;
 
-    mkdirSync(shellsDir, { recursive: true });
-    const outputFile = join(shellsDir, `${id}.output`);
-    const exitFile = join(shellsDir, `${id}.exit`);
-    const inputFifo = join(shellsDir, `${id}.in`);
-    const metaFile = this.metaPath(id);
+    if (background) {
+      mkdirSync(shellsDir, { recursive: true });
+      const outputFile = join(shellsDir, `${id}.output`);
+      const exitFile = join(shellsDir, `${id}.exit`);
+      const inputFifo = join(shellsDir, `${id}.in`);
+      const metaFile = this.metaPath(id);
 
-    writeFileSync(outputFile, '');
+      writeFileSync(outputFile, '');
 
-    try {
-      if (existsSync(inputFifo)) unlinkSync(inputFifo);
-      execFileSync('mkfifo', [inputFifo], { stdio: 'ignore' });
-    } catch {}
+      try {
+        if (existsSync(inputFifo)) unlinkSync(inputFifo);
+        execFileSync('mkfifo', [inputFifo], { stdio: 'ignore' });
+      } catch {}
 
-    const outFd = openSync(outputFile, 'a');
-    const errFd = outFd;
-    const fifoReady = existsSync(inputFifo);
-    const nullFd = openSync('/dev/null', 'r');
+      const outFd = openSync(outputFile, 'a');
+      const errFd = outFd;
+      const fifoReady = existsSync(inputFifo);
+      const nullFd = openSync('/dev/null', 'r');
 
-    const fullCommand = fifoReady
-      ? `exec 3<>"${inputFifo}"; ${command} <&3; echo $? > "${exitFile}" 2>/dev/null`
-      : `${command} < /dev/null; echo $? > "${exitFile}" 2>/dev/null`;
+      const fullCommand = fifoReady
+        ? `exec 3<>"${inputFifo}"; ${command} <&3; echo $? > "${exitFile}" 2>/dev/null`
+        : `${command} < /dev/null; echo $? > "${exitFile}" 2>/dev/null`;
 
-    const child = spawn(fullCommand, {
+      const child = spawn(fullCommand, {
+        shell: '/bin/bash',
+        cwd,
+        env: { ...process.env, ...env },
+        stdio: [nullFd, outFd, errFd],
+        detached: true,
+      });
+
+      closeSync(outFd);
+      try { closeSync(nullFd); } catch {}
+
+      const entry: ShellEntry = {
+        id,
+        process: child,
+        pid: child.pid ?? -1,
+        output: '',
+        done: false,
+        exitCode: null,
+        startedAt: Date.now(),
+        command,
+        cwd,
+        outputFile,
+        inputFifo: existsSync(inputFifo) ? inputFifo : undefined,
+        detached: true,
+        readOffset: 0,
+      };
+
+      child.on('exit', (code) => {
+        entry.done = true;
+        entry.exitCode = code;
+        if (this.onTaskComplete) {
+          let finalOutput = '';
+          if (entry.outputFile && existsSync(entry.outputFile)) {
+            try { finalOutput = readFileSync(entry.outputFile, 'utf-8'); } catch {}
+          }
+          this.onTaskComplete(entry.id, code ?? 0, finalOutput);
+        }
+      });
+
+      child.unref();
+
+      const meta: ShellMeta = {
+        id,
+        pid: child.pid ?? -1,
+        command,
+        cwd,
+        startedAt: entry.startedAt,
+        outputFile,
+        inputFifo,
+      };
+      try { writeFileSync(metaFile, JSON.stringify(meta, null, 2)); } catch {}
+
+      this.shells.set(id, entry);
+      return entry;
+    }
+
+    // ── Foreground: direct pipes, parent owns the process ──
+    const child = spawn(command, {
       shell: '/bin/bash',
       cwd,
       env: { ...process.env, ...env },
-      stdio: [nullFd, outFd, errFd],
-      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
-
-    closeSync(outFd);
-    try { closeSync(nullFd); } catch {}
 
     const entry: ShellEntry = {
       id,
@@ -102,11 +156,28 @@ export class ShellRegistry {
       startedAt: Date.now(),
       command,
       cwd,
-      outputFile,
-      inputFifo: existsSync(inputFifo) ? inputFifo : undefined,
-      detached: true,
-      readOffset: 0,
+      detached: false,
     };
+
+    child.stdout?.on('data', (data) => {
+      entry.output += data.toString();
+    });
+    child.stderr?.on('data', (data) => {
+      entry.output += data.toString();
+    });
+    child.on('exit', (code) => {
+      entry.done = true;
+      entry.exitCode = code;
+    });
+    child.on('error', (err) => {
+      entry.output += `\nError: ${err.message}\n`;
+      entry.done = true;
+      entry.exitCode = -1;
+    });
+
+    this.shells.set(id, entry);
+    return entry;
+  }
 
     child.on('exit', (code) => {
       entry.done = true;
@@ -282,11 +353,11 @@ export const runCommandTool: ShellToolFactory = (cfg) => ({
     }
 
     if (entry.done) {
-      cfg.registry.delete(entry.id);
       let output = '';
       if (entry.outputFile && existsSync(entry.outputFile)) {
         try { output = readFileSync(entry.outputFile, 'utf-8'); } catch {}
       }
+      cfg.registry.delete(entry.id);
       const truncated = output.length > 50000 ? output.slice(0, 50000) + '\n[output truncated]' : output;
       return {
         toolCallId: '',

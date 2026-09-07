@@ -78,11 +78,15 @@ async function getPageTargets() {
 async function getActivePageTarget(targetId) {
   const targets = await getPageTargets();
   if (targets.length === 0) throw new Error('No open page targets found in Chrome.');
+  let selected = targets[0];
   if (targetId) {
     const matched = targets.find((t) => t.id === targetId || t.id.startsWith(targetId));
-    if (matched) return matched;
+    if (matched) selected = matched;
   }
-  return targets[0];
+  try {
+    await fetchJson(`${CDP_URL}/json/activate/${selected.id}`, { method: 'PUT' });
+  } catch {}
+  return selected;
 }
 
 class CdpClient {
@@ -93,38 +97,66 @@ class CdpClient {
     this.events = new Map();
 
     this.ws.onmessage = (msg) => {
-      const data = JSON.parse(msg.data);
-      if (data.id && this.callbacks.has(data.id)) {
-        const { resolve, reject } = this.callbacks.get(data.id);
-        this.callbacks.delete(data.id);
-        if (data.error) reject(new Error(data.error.message));
-        else resolve(data.result);
-      } else if (data.method) {
-        if (this.events.has(data.method)) {
-          this.events.get(data.method).forEach((cb) => cb(data.params));
+      try {
+        const raw = typeof msg.data === 'string' ? msg.data : msg.data.toString();
+        const data = JSON.parse(raw);
+        if (data.id && this.callbacks.has(data.id)) {
+          const { resolve, reject } = this.callbacks.get(data.id);
+          this.callbacks.delete(data.id);
+          if (data.error) reject(new Error(data.error.message));
+          else resolve(data.result);
+        } else if (data.method) {
+          if (this.events.has(data.method)) {
+            this.events.get(data.method).forEach((cb) => cb(data.params));
+          }
         }
-      }
+      } catch {}
     };
   }
 
-  async connect() {
+  async connect(timeoutMs = 10000) {
     return new Promise((resolve, reject) => {
-      this.ws.onopen = resolve;
-      this.ws.onerror = reject;
+      const timer = setTimeout(() => {
+        reject(new Error(`WebSocket connection to Chrome timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.ws.onopen = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      this.ws.onerror = (err) => {
+        clearTimeout(timer);
+        reject(err);
+      };
     });
   }
 
   async close() {
-    this.ws.close();
+    try { this.ws.close(); } catch {}
   }
 
-  async send(method, params = {}, sessionId = undefined) {
+  async send(method, params = {}, sessionId = undefined, timeoutMs = 15000) {
     return new Promise((resolve, reject) => {
       const id = this.id++;
-      this.callbacks.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        if (this.callbacks.has(id)) {
+          this.callbacks.delete(id);
+          reject(new Error(`CDP command "${method}" timed out after ${timeoutMs}ms`));
+        }
+      }, timeoutMs);
+
+      this.callbacks.set(id, {
+        resolve: (val) => { clearTimeout(timer); resolve(val); },
+        reject: (err) => { clearTimeout(timer); reject(err); },
+      });
       const msg = { id, method, params };
       if (sessionId) msg.sessionId = sessionId;
-      this.ws.send(JSON.stringify(msg));
+      try {
+        this.ws.send(JSON.stringify(msg));
+      } catch (err) {
+        clearTimeout(timer);
+        this.callbacks.delete(id);
+        reject(err);
+      }
     });
   }
 
@@ -222,6 +254,96 @@ function loadSavedRefs() {
     }
   } catch {}
   return {};
+}
+
+async function extractDomSemanticTree(client, maxDepth = 8) {
+  const script = `(() => {
+    const refs = {};
+    let refCounter = 0;
+    const lines = [];
+
+    const isVisible = (el) => {
+      if (!el || el.nodeType !== 1) return false;
+      const style = window.getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+
+    const getAccessibleName = (el) => {
+      const aria = el.getAttribute('aria-label');
+      if (aria && aria.trim()) return aria.trim();
+      if (el.tagName === 'INPUT' && ['submit', 'button', 'reset'].includes(el.type)) return (el.value || '').trim();
+      if (el.getAttribute('placeholder')) return el.getAttribute('placeholder').trim();
+      if (el.getAttribute('title')) return el.getAttribute('title').trim();
+      const text = (el.innerText || el.textContent || '').trim();
+      return text.replace(/\\s+/g, ' ');
+    };
+
+    const INTERACTIVE = new Set(['a', 'button', 'input', 'select', 'textarea']);
+    const HEADING = /^h[1-6]$/i;
+
+    const walk = (node, depth) => {
+      if (depth > ${maxDepth}) return;
+      if (node.nodeType !== 1) return;
+      if (!isVisible(node)) return;
+
+      const tag = node.tagName.toLowerCase();
+      const role = node.getAttribute('role') || (INTERACTIVE.has(tag) ? tag : HEADING.test(tag) ? 'heading' : '');
+      const name = getAccessibleName(node);
+      const isInteractive = INTERACTIVE.has(tag) || node.hasAttribute('onclick') || node.getAttribute('role') === 'button';
+
+      if (role || isInteractive || (name && name.length < 100)) {
+        const indent = '  '.repeat(depth);
+        let line = \`\${indent}- \${role || tag}\`;
+        if (name) {
+          const truncated = name.length > 80 ? name.slice(0, 77) + '...' : name;
+          line += \` "\${truncated}"\`;
+        }
+        if (node.value && tag === 'input' && !['submit', 'button'].includes(node.type)) {
+          line += \` [value: "\${node.value}"]\`;
+        }
+        if (isInteractive) {
+          refCounter++;
+          line += \` [@\${refCounter}]\`;
+          refs[String(refCounter)] = {
+            ref: refCounter,
+            role: role || tag,
+            name: name || '',
+            selector: node.id ? '#' + node.id : (node.getAttribute('name') ? \`[name="\${node.getAttribute('name')}"]\` : null),
+          };
+        }
+        lines.push(line);
+      }
+
+      for (let i = 0; i < node.children.length; i++) {
+        walk(node.children[i], depth + 1);
+      }
+    };
+
+    walk(document.body, 0);
+    return { lines: lines.join('\\n'), refs };
+  })()`;
+
+  try {
+    const res = await client.send('Runtime.evaluate', {
+      expression: script,
+      returnByValue: true,
+      awaitPromise: true,
+    }, undefined, 8000);
+
+    if (res && res.result && res.result.value) {
+      const { lines, refs } = res.result.value;
+      if (refs) {
+        try {
+          writeFileSync(REFS_FILE, JSON.stringify(refs, null, 2), 'utf-8');
+        } catch {}
+      }
+      return lines || '(empty semantic tree)';
+    }
+  } catch {}
+
+  return '(unable to retrieve accessibility tree)';
 }
 
 async function main() {
@@ -697,9 +819,28 @@ Tab Management:
 
     } else if (cmd === 'ax') {
       const maxDepth = args[1] ? parseInt(args[1], 10) : 8;
-      await client.send('Accessibility.enable');
-      const { nodes } = await client.send('Accessibility.getFullAXTree', { depth: maxDepth });
-      const rendered = renderAxTree(nodes, maxDepth);
+      let rendered = null;
+
+      try {
+        await client.send('DOM.enable', {}, undefined, 4000).catch(() => {});
+        await client.send('Accessibility.enable', {}, undefined, 4000).catch(() => {});
+        const res = await client.send(
+          'Accessibility.getFullAXTree',
+          { depth: maxDepth, max_depth: maxDepth },
+          undefined,
+          7000,
+        );
+        if (res && res.nodes && res.nodes.length > 0) {
+          rendered = renderAxTree(res.nodes, maxDepth);
+        }
+      } catch (err) {
+        // Accessibility.getFullAXTree timed out or failed — fall back to DOM tree
+      }
+
+      if (!rendered || rendered === '(empty accessibility tree)') {
+        rendered = await extractDomSemanticTree(client, maxDepth);
+      }
+
       console.log(rendered);
 
     } else if (cmd === 'press') {
@@ -723,12 +864,31 @@ Tab Management:
       console.log(`Pressed key: ${lookup.key}`);
 
     } else if (cmd === 'screenshot') {
-      await client.send('Page.enable');
-      const res = await client.send('Page.captureScreenshot', { format: 'png' });
-      const buffer = Buffer.from(res.data, 'base64');
       const outPath = args[1] || `/tmp/cdp_screenshot_${Date.now()}.png`;
-      writeFileSync(outPath, buffer);
-      console.log(outPath);
+      let saved = false;
+
+      try {
+        await client.send('Page.enable', {}, undefined, 4000).catch(() => {});
+        const res = await client.send('Page.captureScreenshot', { format: 'png', fromSurface: true }, undefined, 7000);
+        if (res && res.data) {
+          const buffer = Buffer.from(res.data, 'base64');
+          writeFileSync(outPath, buffer);
+          saved = true;
+        }
+      } catch (err) {
+        // Fall back to ImageMagick import on Xvfb
+        try {
+          const { execSync } = await import('node:child_process');
+          execSync(`import -window root "${outPath}"`, { stdio: 'ignore', timeout: 5000 });
+          saved = true;
+        } catch {}
+      }
+
+      if (saved) {
+        console.log(outPath);
+      } else {
+        throw new Error('Failed to capture screenshot via CDP and X11 fallback');
+      }
 
     } else if (cmd === 'reload') {
       await client.send('Page.enable');
@@ -903,6 +1063,7 @@ Tab Management:
     process.exit(1);
   } finally {
     await client.close();
+    process.exit(0);
   }
 }
 

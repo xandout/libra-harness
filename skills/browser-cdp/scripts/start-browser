@@ -42,6 +42,7 @@ google-chrome \
   --password-store=basic \
   --no-sandbox \
   --disable-dev-shm-usage \
+  --disable-gpu \
   --no-proxy-server \
   --disable-blink-features=AutomationControlled \
   --safebrowsing-disable-download-protection \
