@@ -1083,4 +1083,243 @@ describe('disk-session', () => {
       expect(toolMsgs).toHaveLength(1);
     });
   });
+
+  // ── Auto-summarization & Cache-Preserving Compaction ────────────
+
+  describe('auto-summarization and cache preservation', () => {
+    it('auto-summarizes earlier messages using the session model when reaching maxContextMessages', async () => {
+      let summarizationCallCount = 0;
+      let summarizedPromptText = '';
+
+      const testModel = {
+        async generate(req: { messages: Message[]; systemPrompt?: string }) {
+          const lastMsg = req.messages[req.messages.length - 1];
+          const text = messageContentToText(lastMsg.content);
+          if (req.systemPrompt?.includes('summarizer') || text.includes('summarize')) {
+            summarizationCallCount++;
+            summarizedPromptText = text;
+            return {
+              message: { role: 'assistant' as const, content: 'Summarized decisions: files modified and tasks done.' },
+              finishReason: 'stop' as const,
+              usage: { promptTokens: 10, completionTokens: 5 },
+            };
+          }
+          return {
+            message: { role: 'assistant' as const, content: `Reply to: ${text}` },
+            finishReason: 'stop' as const,
+            usage: { promptTokens: 5, completionTokens: 5 },
+          };
+        },
+      };
+
+      // Set threshold to 6 messages, eviction step to 3 messages
+      const ext = createDiskSessionExtension({
+        sessionDir: tmpDir,
+        maxContextMessages: 6,
+        contextEvictionStep: 3,
+        model: testModel,
+      });
+
+      const agent = new Agent({ model: testModel });
+      agent.use(ext);
+
+      // Turn 1: 2 records (user1, assistant1)
+      await runTurn(agent, 'message 1', sessionIdentity('compact-test', '1'));
+      // Turn 2: 4 records (user2, assistant2)
+      await runTurn(agent, 'message 2', sessionIdentity('compact-test', '2'));
+      // Turn 3: 6 records (user3, assistant3)
+      await runTurn(agent, 'message 3', sessionIdentity('compact-test', '3'));
+
+      expect(summarizationCallCount).toBe(0);
+      expect(ext.getRecords('compact-test')).toHaveLength(6);
+
+      // Turn 4: history is at 6 records (>= maxContextMessages).
+      // Auto-summarization triggers in beforeTurn!
+      let seenInTurn4: Message[] = [];
+      const trackingAgent = new Agent({
+        model: {
+          async generate(req) {
+            const lastMsg = req.messages[req.messages.length - 1];
+            const text = messageContentToText(lastMsg.content);
+            if (req.systemPrompt?.includes('summarizer') || text.includes('summarize')) {
+              return testModel.generate(req);
+            }
+            seenInTurn4 = req.messages;
+            return {
+              message: { role: 'assistant' as const, content: 'Turn 4 reply' },
+              finishReason: 'stop' as const,
+              usage: { promptTokens: 5, completionTokens: 5 },
+            };
+          },
+        },
+      });
+      trackingAgent.use(ext);
+
+      const res4 = await runTurn(trackingAgent, 'message 4', sessionIdentity('compact-test', '4'));
+
+      // 1. Summarization was invoked
+      expect(summarizationCallCount).toBe(1);
+      expect(summarizedPromptText).toContain('message 1');
+
+      // 2. The human's response does NOT leak any compaction text
+      expect(res4.message).toBe('Turn 4 reply');
+
+      // 3. Immediately before the model acts, the model receives the notification
+      const noticeMsg = seenInTurn4.find(
+        (m) => m.role === 'system' && messageContentToText(m.content).includes('automatically compacted into the summary above')
+      );
+      expect(noticeMsg).toBeDefined();
+
+      // 4. The context begins with the summary record
+      const summaryMsg = seenInTurn4.find((m) => messageContentToText(m.content).includes('Summarized decisions'));
+      expect(summaryMsg).toBeDefined();
+    });
+
+    it('preserves prompt cache prefix stability across consecutive turns between compactions', async () => {
+      const prefixesSeen: string[] = [];
+
+      const model = {
+        async generate(req: { messages: Message[]; systemPrompt?: string }) {
+          if (req.systemPrompt?.includes('summarizer')) {
+            return {
+              message: { role: 'assistant' as const, content: 'Consolidated summary' },
+              finishReason: 'stop' as const,
+              usage: { promptTokens: 10, completionTokens: 5 },
+            };
+          }
+          // Record the first message in the history prefix
+          prefixesSeen.push(messageContentToText(req.messages[0].content));
+          return {
+            message: { role: 'assistant' as const, content: 'ok' },
+            finishReason: 'stop' as const,
+            usage: { promptTokens: 5, completionTokens: 5 },
+          };
+        },
+      };
+
+      const ext = createDiskSessionExtension({
+        sessionDir: tmpDir,
+        maxContextMessages: 10,
+        contextEvictionStep: 5,
+        model,
+      });
+
+      const agent = new Agent({ model });
+      agent.use(ext);
+
+      // Run 5 turns (records grow from 2 to 10)
+      for (let i = 1; i <= 5; i++) {
+        await runTurn(agent, `turn ${i}`, sessionIdentity('cache-test', `${i}`));
+      }
+
+      // During turns 1-5, all turns share the exact same first message ("turn 1")
+      for (let i = 0; i < 5; i++) {
+        expect(prefixesSeen[i]).toBe('turn 1');
+      }
+
+      // Turn 6 triggers auto-summarization because records count is 10 (>= maxContextMessages)
+      await runTurn(agent, 'turn 6', sessionIdentity('cache-test', '6'));
+
+      // Turn 7 and Turn 8: history has been compacted to a summary record at index 0.
+      // Both turn 7 and turn 8 must start with the exact same summary record!
+      await runTurn(agent, 'turn 7', sessionIdentity('cache-test', '7'));
+      await runTurn(agent, 'turn 8', sessionIdentity('cache-test', '8'));
+
+      const prefix7 = prefixesSeen[6];
+      const prefix8 = prefixesSeen[7];
+      expect(prefix7).toContain('Consolidated summary');
+      expect(prefix8).toBe(prefix7); // 100% prefix cache hit!
+    });
+
+    it('backs off context limit (e.g. 100 -> 50 -> 25) when a context length error occurs', async () => {
+      let callCount = 0;
+
+      const model = {
+        async generate(req: { messages: Message[]; systemPrompt?: string }) {
+          callCount++;
+          if (req.systemPrompt?.includes('summarizer')) {
+            return {
+              message: { role: 'assistant' as const, content: 'Compact backoff summary' },
+              finishReason: 'stop' as const,
+              usage: { promptTokens: 5, completionTokens: 5 },
+            };
+          }
+          if (callCount === 3) {
+            // Throw a context length error on turn 3
+            throw new Error('400 Maximum context length exceeded: prompt too long');
+          }
+          return {
+            message: { role: 'assistant' as const, content: 'ok' },
+            finishReason: 'stop' as const,
+            usage: { promptTokens: 5, completionTokens: 5 },
+          };
+        },
+      };
+
+      const ext = createDiskSessionExtension({
+        sessionDir: tmpDir,
+        maxContextMessages: 100,
+        fallbackThresholds: [100, 50, 25],
+        model,
+      });
+
+      const agent = new Agent({
+        model,
+        errorPolicy: 'fallback',
+      });
+      agent.use(ext);
+
+      expect(ext.getEffectiveLimit('backoff-session')).toBe(100);
+
+      // Turn 1 & 2 succeed
+      await runTurn(agent, 'msg 1', sessionIdentity('backoff-session', '1'));
+      await runTurn(agent, 'msg 2', sessionIdentity('backoff-session', '2'));
+
+      // Turn 3 throws context length error
+      const res3 = await runTurn(agent, 'msg 3', sessionIdentity('backoff-session', '3'));
+      expect(res3.finishReason).toBe('error');
+
+      // The extension detected the context error and backed off to 50
+      expect(ext.getEffectiveLimit('backoff-session')).toBe(50);
+    });
+
+    it('uses the agent configured model automatically if not explicitly provided in config', async () => {
+      let summarizerCalled = false;
+
+      const model = {
+        async generate(req: { messages: Message[]; systemPrompt?: string }) {
+          if (req.systemPrompt?.includes('summarizer')) {
+            summarizerCalled = true;
+            return {
+              message: { role: 'assistant' as const, content: 'Auto summary using agent model' },
+              finishReason: 'stop' as const,
+              usage: { promptTokens: 5, completionTokens: 5 },
+            };
+          }
+          return {
+            message: { role: 'assistant' as const, content: 'agent reply' },
+            finishReason: 'stop' as const,
+            usage: { promptTokens: 5, completionTokens: 5 },
+          };
+        },
+      };
+
+      // Notice: NO model passed into createDiskSessionExtension
+      const ext = createDiskSessionExtension({
+        sessionDir: tmpDir,
+        maxContextMessages: 4,
+        contextEvictionStep: 2,
+      });
+
+      const agent = new Agent({ model });
+      agent.use(ext);
+
+      await runTurn(agent, 'msg 1', sessionIdentity('agent-model-test', '1'));
+      await runTurn(agent, 'msg 2', sessionIdentity('agent-model-test', '2'));
+      // Reached 4 messages, turn 3 triggers summarizer
+      await runTurn(agent, 'msg 3', sessionIdentity('agent-model-test', '3'));
+
+      expect(summarizerCalled).toBe(true);
+    });
+  });
 });

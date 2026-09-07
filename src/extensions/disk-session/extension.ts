@@ -1,6 +1,6 @@
 import { readFileSync, appendFileSync, mkdirSync, readdirSync, writeFileSync, existsSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Extension, TurnContext } from '@xandout/libra-harness';
+import type { Extension, TurnContext, Model } from '@xandout/libra-harness';
 import { messageContentToText } from '@xandout/libra-harness';
 import type { Message, MessageContent, Role, ToolCall } from '@xandout/libra-harness';
 
@@ -94,9 +94,35 @@ export interface DiskSessionConfig {
   maxRecords?: number;
   /**
    * Max messages to include in the agent's context per turn.
+   * When history reaches this threshold, auto-summarization is triggered.
    * Default: 50.
    */
   maxContextMessages?: number;
+  /**
+   * Number of messages to evict or compact at once when exceeding maxContextMessages.
+   * By evicting in discrete chunks rather than 1-by-1 per turn, the prompt prefix
+   * stays stable for consecutive turns, maximizing LLM prompt cache hits.
+   * Default: Math.max(1, Math.floor(maxContextMessages / 2)).
+   */
+  contextEvictionStep?: number;
+  /**
+   * Fallback message limits to back off to if a context length error occurs
+   * (e.g. [100, 50, 25]). If the model provider rejects a request due to
+   * context length, the extension steps down to the next fallback limit.
+   * Default: [maxContextMessages, Math.floor(maxContextMessages / 2), Math.floor(maxContextMessages / 4)].
+   */
+  fallbackThresholds?: number[];
+  /**
+   * Whether to automatically summarize older conversation messages when history
+   * reaches maxContextMessages.
+   * Default: true.
+   */
+  autoSummarize?: boolean;
+  /**
+   * Model to use for generating auto-summaries.
+   * Defaults to the agent's configured model if not explicitly provided.
+   */
+  model?: Model;
   /**
    * Number of top-level (non-thread) messages to include as channel
    * context when forking a thread. These are messages that came BEFORE
@@ -220,6 +246,56 @@ export function sanitizeConversationMessages(messages: Message[]): Message[] {
   return result;
 }
 
+export function isContextLengthError(err: unknown): boolean {
+  if (!err) return false;
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    msg.includes('context_length') ||
+    msg.includes('context length') ||
+    msg.includes('prompt is too long') ||
+    msg.includes('maximum context length') ||
+    msg.includes('exceeds the context window') ||
+    msg.includes('too many tokens') ||
+    msg.includes('token limit') ||
+    msg.includes('max_tokens') ||
+    msg.includes('string_above_max_length')
+  );
+}
+
+export async function generateSessionSummary(
+  model: Model,
+  records: SessionRecord[],
+): Promise<string> {
+  const summarySystemPrompt =
+    'You are a precise conversation summarizer for an AI agent. ' +
+    'Provide a dense, structured summary of the provided conversation history. ' +
+    'Preserve all essential technical details, user goals, key decisions, file paths, ' +
+    'code changes, commands executed, tool outputs, errors, and pending tasks. ' +
+    'Do not include conversational filler. Output only the summary.';
+
+  const transcript = records
+    .map((r) => {
+      const text = messageContentToText(r.content).trim();
+      const role = r.role.toUpperCase();
+      const tools = r.toolCalls ? ` [called: ${r.toolCalls.map((tc) => tc.name).join(', ')}]` : '';
+      return `[${role}${tools}]: ${text}`;
+    })
+    .filter((line) => line.length > 0)
+    .join('\n\n');
+
+  const response = await model.generate({
+    messages: [
+      {
+        role: 'user',
+        content: `Please summarize this earlier conversation segment to preserve context:\n\n${transcript}`,
+      },
+    ],
+    systemPrompt: summarySystemPrompt,
+  });
+
+  return messageContentToText(response.message.content).trim();
+}
+
 /**
  * Disk-backed session extension.
  *
@@ -271,10 +347,19 @@ export default function createDiskSessionExtension(
     threadTs?: string;
     meta?: Record<string, unknown>;
   }): void;
+  getEffectiveLimit(sessionKey?: string): number;
+  setEffectiveLimit(sessionKey: string, limit: number): void;
 } {
   const dir = config?.sessionDir ?? './sessions';
   const maxRecords = config?.maxRecords ?? 1000;
   const maxContextMessages = config?.maxContextMessages ?? 50;
+  const contextEvictionStep = config?.contextEvictionStep ?? Math.max(1, Math.floor(maxContextMessages / 2));
+  const autoSummarize = config?.autoSummarize ?? true;
+  const fallbackThresholds = config?.fallbackThresholds ?? [
+    maxContextMessages,
+    Math.max(10, Math.floor(maxContextMessages / 2)),
+    Math.max(5, Math.floor(maxContextMessages / 4)),
+  ];
   const channelContextMessages = config?.channelContextMessages ?? 10;
   const recentChannelMessages = config?.recentChannelMessages ?? 5;
   const loadOnStartup = config?.loadOnStartup ?? true;
@@ -285,6 +370,8 @@ export default function createDiskSessionExtension(
   // In-memory cache: sessionKey → SessionRecord[]
   // This is the live log. Reads take a snapshot (copy); writes append.
   const store = new Map<string, SessionRecord[]>();
+  // Effective context limit per session for fallback backoff
+  const sessionLimits = new Map<string, number>();
 
   // ── Load existing sessions from disk ──────────────────────────
   if (loadOnStartup) {
@@ -416,9 +503,18 @@ export default function createDiskSessionExtension(
     return result;
   }
 
-  function sliceAtTurnBoundary(records: SessionRecord[], max: number): SessionRecord[] {
+  function sliceAtTurnBoundary(records: SessionRecord[], max: number, step?: number): SessionRecord[] {
     if (records.length <= max) return records;
-    let startIndex = records.length - max;
+    const evictionStep = step && step > 0 ? step : 1;
+    let startIndex: number;
+    if (evictionStep <= 1) {
+      startIndex = records.length - max;
+    } else {
+      const baseline = Math.max(0, max - evictionStep);
+      const excess = records.length - baseline;
+      const chunks = Math.floor(excess / evictionStep);
+      startIndex = chunks * evictionStep;
+    }
     // Skip forward until we find a turn boundary ('user' or 'system')
     while (
       startIndex < records.length &&
@@ -441,6 +537,8 @@ export default function createDiskSessionExtension(
     snapshot: SessionRecord[],
     threadTs: string | undefined,
     isDirect: boolean,
+    maxContext: number = maxContextMessages,
+    step: number = contextEvictionStep,
   ): Message[] {
     if (snapshot.length === 0) return [];
 
@@ -451,7 +549,7 @@ export default function createDiskSessionExtension(
     if (isDirect || !threadTs) {
       const filtered = snapshot.filter(isConversationMessage);
       const complete = dropIncompleteTrailingTurn(filtered);
-      rawRecords = sliceAtTurnBoundary(complete, maxContextMessages);
+      rawRecords = sliceAtTurnBoundary(complete, maxContext, step);
     } else {
       // Thread: fork from channel context.
       const parentIdx = snapshot.findIndex((r) => r.ts === threadTs);
@@ -463,7 +561,8 @@ export default function createDiskSessionExtension(
         const complete = dropIncompleteTrailingTurn(filtered);
         rawRecords = sliceAtTurnBoundary(
           complete,
-          maxContextMessages,
+          maxContext,
+          step,
         );
       } else {
         // Top-level messages before the parent (channel context at fork point).
@@ -513,6 +612,8 @@ export default function createDiskSessionExtension(
     name: 'disk-session',
     priority: -100,
     install(agent) {
+      const activeModel: Model | undefined = config?.model ?? (agent as any).model;
+
       // ── beforeTurn: take snapshot, build context, prepend ─────
       // The snapshot is a copy of the session records at this moment.
       // Concurrent turns each get their own snapshot — they don't
@@ -523,12 +624,69 @@ export default function createDiskSessionExtension(
         const { key, messageTs, threadTs, isDirect } = identity;
         const isDm = isDirect ?? false;
 
-        // Snapshot: copy the current records (read-only).
+        const effectiveMax = sessionLimits.get(key) ?? maxContextMessages;
+
+        // ── Auto-summarization ──────────────────────────────────
+        // When conversation history reaches effectiveMax, auto-summarize the
+        // oldest chunk so earlier context is retained without thrashing prompt cache.
         const liveRecords = store.get(key) ?? [];
-        const snapshot = [...liveRecords];
+        const convCount = liveRecords.filter(isConversationMessage).length;
+        let autoCompacted = false;
+        let compactedCount = 0;
+
+        if (autoSummarize && activeModel && convCount >= effectiveMax) {
+          const step = config?.contextEvictionStep ?? Math.max(1, Math.floor(effectiveMax / 2));
+          let cutIndex = Math.min(step, liveRecords.length - 1);
+          while (
+            cutIndex < liveRecords.length &&
+            liveRecords[cutIndex].role !== 'user' &&
+            liveRecords[cutIndex].role !== 'system'
+          ) {
+            cutIndex++;
+          }
+
+          if (cutIndex > 0 && cutIndex < liveRecords.length) {
+            const recordsToSummarize = liveRecords.slice(0, cutIndex);
+            const recordsToKeep = liveRecords.slice(cutIndex);
+            try {
+              const summaryText = await generateSessionSummary(activeModel, recordsToSummarize);
+              if (summaryText) {
+                const summaryRecord: SessionRecord = {
+                  role: 'assistant',
+                  content: `[Conversation summary — prior history compacted ${new Date().toISOString()}]\n\n${summaryText}`,
+                  ts: recordsToSummarize[recordsToSummarize.length - 1]?.ts || String(Date.now() / 1000),
+                  recordedAt: new Date().toISOString(),
+                };
+
+                const compactedRecords = [summaryRecord, ...recordsToKeep];
+                store.set(key, compactedRecords);
+
+                const oldPath = filePath(key);
+                const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                const archivedName = `${key.replace(/[^a-zA-Z0-9_-]/g, '_')}_${timestamp}.jsonl`;
+                const archivedPath = join(dir, archivedName);
+                if (existsSync(oldPath)) {
+                  try {
+                    renameSync(oldPath, archivedPath);
+                  } catch {}
+                }
+                appendToFile(key, compactedRecords);
+
+                autoCompacted = true;
+                compactedCount = recordsToSummarize.length;
+              }
+            } catch (err) {
+              console.warn('[disk-session] auto-summarization failed, using window slice:', err);
+            }
+          }
+        }
+
+        // Snapshot: copy the current records (read-only).
+        const currentRecords = store.get(key) ?? [];
+        const snapshot = [...currentRecords];
 
         // Build the forked context from the snapshot.
-        const history = buildContext(snapshot, threadTs, isDm);
+        const history = buildContext(snapshot, threadTs, isDm, effectiveMax, contextEvictionStep);
 
         // ── Persist the user message immediately ────────────────
         // Write the incoming user message to disk NOW, before the
@@ -561,8 +719,20 @@ export default function createDiskSessionExtension(
         // knows where new messages start.
         ctx.turn.metadata['_diskSessionHistoryLen'] = history.length;
 
-        if (history.length > 0) {
-          ctx.turn.messages = [...history, ...ctx.turn.messages];
+        // Immediately before the model acts: if auto-compaction occurred,
+        // inform the model so it can act accordingly. Never inform the human.
+        const messagesToPrepend: Message[] = [...history];
+        if (autoCompacted) {
+          const modelNotice: Message = {
+            role: 'system',
+            content: `[System Notice: Earlier conversation history (${compactedCount} messages) was automatically compacted into the summary above to preserve context. Refer to the summary for earlier decisions, code changes, and context.]`,
+          };
+          messagesToPrepend.push(modelNotice);
+          ctx.turn.metadata['_autoCompacted'] = true;
+        }
+
+        if (messagesToPrepend.length > 0) {
+          ctx.turn.messages = [...messagesToPrepend, ...ctx.turn.messages];
         }
 
         // Track all messages currently in ctx.turn.messages (both history and the
@@ -771,6 +941,59 @@ export default function createDiskSessionExtension(
           store.set(key, records);
         }
       });
+
+      // ── onError: context length backoff fallback ───────────────
+      // If the model provider rejects a request due to context length,
+      // step down to the next fallback limit (e.g. 100 -> 50 -> 25)
+      // and compact the session immediately.
+      agent.hook('onError', 'disk-session', async (ctx) => {
+        const identity = identityFromCtx(ctx);
+        if (!identity) return;
+        const { key } = identity;
+
+        if (isContextLengthError(ctx.error)) {
+          const currentLimit = sessionLimits.get(key) ?? maxContextMessages;
+          const nextLimit = fallbackThresholds.find((t) => t < currentLimit);
+          if (nextLimit && nextLimit > 0) {
+            sessionLimits.set(key, nextLimit);
+            const records = store.get(key) ?? [];
+            const convRecords = records.filter(isConversationMessage);
+            if (convRecords.length > nextLimit && activeModel) {
+              try {
+                const toEvict = convRecords.length - nextLimit;
+                let cut = Math.min(toEvict + Math.max(1, Math.floor(nextLimit / 2)), records.length - 1);
+                while (cut < records.length && records[cut].role !== 'user' && records[cut].role !== 'system') {
+                  cut++;
+                }
+                if (cut > 0 && cut < records.length) {
+                  const chunk = records.slice(0, cut);
+                  const keep = records.slice(cut);
+                  const summary = await generateSessionSummary(activeModel, chunk);
+                  const summaryRecord: SessionRecord = {
+                    role: 'assistant',
+                    content: `[Conversation summary — context limit backed off to ${nextLimit} messages ${new Date().toISOString()}]\n\n${summary}`,
+                    ts: chunk[chunk.length - 1]?.ts || String(Date.now() / 1000),
+                    recordedAt: new Date().toISOString(),
+                  };
+                  const compacted = [summaryRecord, ...keep];
+                  store.set(key, compacted);
+                  appendToFile(key, compacted);
+                }
+              } catch {}
+            }
+          }
+        }
+      });
+    },
+
+    /** Get current effective message limit for a session (reflects any fallback backoff). */
+    getEffectiveLimit(sessionKey: string = 'default'): number {
+      return sessionLimits.get(sessionKey) ?? maxContextMessages;
+    },
+
+    /** Manually set effective message limit for a session. */
+    setEffectiveLimit(sessionKey: string, limit: number): void {
+      sessionLimits.set(sessionKey, limit);
     },
 
     /** Get all records for a session. */

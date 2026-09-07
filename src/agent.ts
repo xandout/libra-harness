@@ -118,6 +118,11 @@ export class Agent {
     }
   }
 
+  /** The configured model for this agent. */
+  get model(): Model {
+    return this.config.model;
+  }
+
   // ── System Prompt ──────────────────────────────────────────────────
 
   /**

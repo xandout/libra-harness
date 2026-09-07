@@ -43,6 +43,8 @@ export interface LibraCodeConfig {
   thinkingLevel?: string;
   /** Alias for thinkingLevel */
   reasoningEffort?: string;
+  /** Max messages to include in context before auto-summarization. Default: 100. */
+  maxContextMessages?: number;
 }
 
 export function loadConfig(): LibraCodeConfig {
@@ -440,9 +442,13 @@ export async function buildAgent(opts: BuildAgentOptions = {}): Promise<BuiltAge
   // Extensions — always installed. The journal is the single source of
   // truth for all output; every mode (worker, TUI, stdout) subscribes to
   // it. Turn events + command polling are always on.
+  const maxContextMessages = config.maxContextMessages
+    ? Number(config.maxContextMessages)
+    : (process.env.LIBRA_MAX_CONTEXT_MESSAGES ? parseInt(process.env.LIBRA_MAX_CONTEXT_MESSAGES, 10) : 100);
+
   agent.use(createDiskSessionExtension({
     sessionDir: SESSIONS_DIR,
-    maxContextMessages: 100,
+    maxContextMessages,
     verbose: false,
   }));
   agent.use(createStreamingExtension());
