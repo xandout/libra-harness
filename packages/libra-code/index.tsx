@@ -202,6 +202,10 @@ async function runWorker(args: string[]) {
       },
     });
 
+    handle.onMessage((blurb: string) => {
+      socketServer.broadcast({ type: 'message', text: blurb, ts: Date.now() });
+    });
+
     socketServer.attachHandle(handle);
     const result = await handle;
 
@@ -575,6 +579,11 @@ async function runStdout(
               }
               process.stdout.write(ev.delta || '');
               break;
+            case 'message':
+              if (ev.text) {
+                process.stdout.write(`\n⟦blurb:${JSON.stringify(ev.text)}⟧\n`);
+              }
+              break;
             case 'tool':
               if (ev.phase === 'start') {
                 process.stderr.write(`\n  → ${ev.name}(${ev.file || ''})\n`);
@@ -646,6 +655,11 @@ async function runStdout(
           },
         },
       },
+    });
+
+    handle.onMessage((blurb: string) => {
+      process.stdout.write(`\n⟦blurb:${JSON.stringify(blurb)}⟧\n`);
+      socketServer.broadcast({ type: 'message', text: blurb, ts: Date.now() });
     });
 
     socketServer.attachHandle(handle);

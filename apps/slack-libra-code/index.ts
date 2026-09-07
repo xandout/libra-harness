@@ -305,6 +305,7 @@ async function executeLc(
   channelId: string,
   threadTs?: string,
   onProgress?: (status: string) => void,
+  onMessage?: (text: string) => void,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolvePromise) => {
     // Prefer standard /usr/local/bin if present (avoids leaking /app path into the agent's PATH)
@@ -362,11 +363,29 @@ async function executeLc(
 
     let stdout = '';
     let stderr = '';
+    let stdoutBuffer = '';
 
     proc.stdout?.on('data', (data) => {
       const text = data.toString();
       stdout += text;
       process.stdout.write(text);
+
+      stdoutBuffer += text;
+      const lines = stdoutBuffer.split('\n');
+      stdoutBuffer = lines.pop() ?? '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('⟦blurb:') && trimmed.endsWith('⟧')) {
+          try {
+            const rawJson = trimmed.slice(7, -1);
+            const blurb = JSON.parse(rawJson);
+            if (typeof blurb === 'string' && blurb.trim()) {
+              onMessage?.(blurb.trim());
+            }
+          } catch {}
+        }
+      }
     });
 
     proc.stderr?.on('data', (data) => {
@@ -384,6 +403,18 @@ async function executeLc(
     });
 
     proc.on('close', (exitCode) => {
+      if (stdoutBuffer) {
+        const trimmed = stdoutBuffer.trim();
+        if (trimmed.startsWith('⟦blurb:') && trimmed.endsWith('⟧')) {
+          try {
+            const rawJson = trimmed.slice(7, -1);
+            const blurb = JSON.parse(rawJson);
+            if (typeof blurb === 'string' && blurb.trim()) {
+              onMessage?.(blurb.trim());
+            }
+          } catch {}
+        }
+      }
       inFlight.delete(sessionKey);
       resolvePromise({ stdout, stderr, exitCode: exitCode ?? 0 });
     });
@@ -423,6 +454,7 @@ async function runTurn(opts: {
 
   let statusMsgTs: string | undefined;
   let lastUpdate = 0;
+  let postedBlurbsCount = 0;
   
   const onProgress = async (status: string) => {
     // Only update every 3 seconds to avoid rate limits
@@ -448,7 +480,17 @@ async function runTurn(opts: {
     }
   };
 
-  const { stdout, stderr, exitCode } = await executeLc(cleanedText, sessionKey, channelId, replyThreadTs, onProgress);
+  const onMessage = async (blurb: string) => {
+    try {
+      postedBlurbsCount++;
+      await postMessage(client, channelId, blurb, replyThreadTs);
+      if (replyThreadTs) activeThreads.add(replyThreadTs);
+    } catch (e) {
+      console.error(`[slack] Failed to post blurb to [${sessionKey}]:`, e);
+    }
+  };
+
+  const { stdout, stderr, exitCode } = await executeLc(cleanedText, sessionKey, channelId, replyThreadTs, onProgress, onMessage);
   
   if (statusMsgTs) {
     try {
@@ -458,15 +500,22 @@ async function runTurn(opts: {
     }
   }
 
+  // Clean out internal delimiter markers from stdout
+  const cleanStdout = stdout
+    .replace(/\n?⟦blurb:.*?⟧\n?/g, '')
+    .trim();
+
   if (exitCode === 0) {
     try { await swapReaction(client, channelId, messageTs, 'thinking_face', 'white_check_mark'); } catch {}
-    const reply = stdout.trim() || 'Done (no text output).';
-    await postMessage(client, channelId, reply, replyThreadTs);
-    if (replyThreadTs) activeThreads.add(replyThreadTs);
+    if (postedBlurbsCount === 0) {
+      const reply = cleanStdout || 'Done (no text output).';
+      await postMessage(client, channelId, reply, replyThreadTs);
+      if (replyThreadTs) activeThreads.add(replyThreadTs);
+    }
     console.log(`[slack] lc completed successfully for [${sessionKey}]`);
   } else {
     try { await swapReaction(client, channelId, messageTs, 'thinking_face', 'x'); } catch {}
-    const errorDetails = stderr.trim() || stdout.trim() || `Process exited with code ${exitCode}`;
+    const errorDetails = stderr.trim() || cleanStdout || `Process exited with code ${exitCode}`;
     await postMessage(client, channelId, `:x: **lc error**:\n\`\`\`\n${errorDetails.slice(-2000)}\n\`\`\``, replyThreadTs);
     console.error(`[slack] lc failed with exit code ${exitCode} for [${sessionKey}]`);
   }

@@ -2211,3 +2211,80 @@ describe('27. External tools (pass-through tool calls)', () => {
     expect(result2.message).toBe('Based on the result: hello world');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────
+// 27. Blurb emission (onMessage) on arrival
+// ─────────────────────────────────────────────────────────────────────
+
+describe('27. Blurb emission (onMessage) on arrival', () => {
+  it('emits intermediate blurbs via request.onMessage and handle.onMessage before tool calls', async () => {
+    const model = new MockModel([
+      {
+        message: {
+          role: 'assistant',
+          content: 'Let me look up that information for you.',
+          toolCalls: [toolCall('call-1', 'lookup', { query: 'test' })],
+        },
+        finishReason: 'tool_calls',
+      },
+      textResponse('Here is the final answer.'),
+    ]);
+
+    const agent = new Agent({
+      model,
+      tools: [makeTool('lookup', async () => 'data: 123')],
+    });
+
+    const requestBlurbs: string[] = [];
+    const handleBlurbs: string[] = [];
+
+    const handle = agent.run({
+      message: 'Find info',
+      onMessage: (msg) => requestBlurbs.push(msg),
+    });
+
+    handle.onMessage((msg) => handleBlurbs.push(msg));
+
+    const result = await handle;
+
+    expect(requestBlurbs).toEqual([
+      'Let me look up that information for you.',
+      'Here is the final answer.',
+    ]);
+    expect(handleBlurbs).toEqual([
+      'Let me look up that information for you.',
+      'Here is the final answer.',
+    ]);
+    expect(result.message).toBe('Here is the final answer.');
+  });
+
+  it('does not emit empty blurbs if model output is blank or whitespace', async () => {
+    const model = new MockModel([
+      {
+        message: {
+          role: 'assistant',
+          content: '   ',
+          toolCalls: [toolCall('call-1', 'lookup', { query: 'test' })],
+        },
+        finishReason: 'tool_calls',
+      },
+      textResponse('Finished!'),
+    ]);
+
+    const agent = new Agent({
+      model,
+      tools: [makeTool('lookup', async () => 'done')],
+    });
+
+    const blurbs: string[] = [];
+    const handle = agent.run({
+      message: 'Run',
+      onMessage: (msg) => blurbs.push(msg),
+    });
+
+    await handle;
+
+    expect(blurbs).toEqual(['Finished!']);
+  });
+});
+

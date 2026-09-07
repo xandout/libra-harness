@@ -17,6 +17,8 @@ export interface AgentRequest {
   signal?: AbortSignal;
   /** Max LLM iterations before the turn is stopped. Default: 25. */
   maxIterations?: number;
+  /** Callback fired whenever the model outputs a text message/blurb (even before tool execution). */
+  onMessage?: (message: string) => void;
 }
 
 /** Why a turn ended. */

@@ -295,7 +295,7 @@ export class Agent {
 
     // Kick off the turn. We store the promise on the handle so `handle.done`
     // and `await handle` both resolve to the same result.
-    handle.done = this.executeTurn(turn, maxIter, steeringQueue).finally(() => {
+    handle.done = this.executeTurn(turn, maxIter, steeringQueue, handle).finally(() => {
       this.activeHandles.delete(handle);
     });
 
@@ -312,6 +312,7 @@ export class Agent {
     turn: TurnContext,
     maxIter: number,
     steeringQueue: string[],
+    handle?: RunHandleInternal,
   ): Promise<AgentResponse> {
     let iterations = 0;
     const allToolCalls: ToolCall[] = [];
@@ -379,9 +380,20 @@ export class Agent {
       // Add the assistant message to the conversation.
       turn.messages.push(modelResponse.message);
 
+      // ── Emit text blurb immediately upon arrival ──
+      const blurbText = messageContentToText(modelResponse.message.content);
+      if (blurbText.trim()) {
+        try {
+          turn.request.onMessage?.(blurbText);
+        } catch (err) {
+          console.error('[agent] request.onMessage error:', err);
+        }
+        handle?.emitMessage(blurbText);
+      }
+
       // ── Halt may have been called during afterLLM hooks ──
       if (turn.signal.aborted) {
-        return await this.finishTurn(turn, messageContentToText(modelResponse.message.content), 'halted', iterations, allToolCalls);
+        return await this.finishTurn(turn, blurbText, 'halted', iterations, allToolCalls);
       }
 
       // ── No tool calls → final response (unless steering pending) ──
@@ -744,11 +756,10 @@ export class Agent {
   }
 }
 
-// ── RunHandle Implementation ─────────────────────────────────────────
-
 /** Internal interface shared between Agent and RunHandleImpl. */
 interface RunHandleInternal extends RunHandle {
   done: Promise<AgentResponse>;
+  emitMessage(message: string): void;
 }
 
 /**
@@ -759,6 +770,7 @@ interface RunHandleInternal extends RunHandle {
 class RunHandleImpl implements RunHandleInternal {
   private readonly abort: AbortController;
   private readonly steeringQueue: string[];
+  private readonly messageListeners: ((message: string) => void)[] = [];
   private _done?: Promise<AgentResponse>;
 
   constructor(abort: AbortController, steeringQueue: string[]) {
@@ -793,6 +805,21 @@ class RunHandleImpl implements RunHandleInternal {
 
   halt(reason = 'halted'): void {
     this.abort.abort(reason);
+  }
+
+  onMessage(callback: (message: string) => void): this {
+    this.messageListeners.push(callback);
+    return this;
+  }
+
+  emitMessage(message: string): void {
+    for (const listener of this.messageListeners) {
+      try {
+        listener(message);
+      } catch (err) {
+        console.error('[handle] onMessage listener error:', err);
+      }
+    }
   }
 
   // Thenable — allows `await handle` to work.

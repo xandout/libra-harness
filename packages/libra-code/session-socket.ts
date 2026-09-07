@@ -19,6 +19,7 @@ import type { RunHandle, Extension, TurnContext } from '@xandout/libra-harness';
 export type SocketEventType =
   | 'status'
   | 'text'
+  | 'message'
   | 'tool'
   | 'file'
   | 'steer'
@@ -262,6 +263,26 @@ export function createSocketEventsExtension(): Extension {
       agent.hook('beforeTurn', 'socket-events', async (ctx) => {
         const socketServer = ctx.turn.metadata.__socketServer as SessionSocketServer | undefined;
         socketServer?.broadcast({ type: 'status', message: 'Thinking…', ts: Date.now() });
+      });
+
+      agent.hook('afterLLM', 'socket-events', async (ctx) => {
+        const socketServer = ctx.turn.metadata.__socketServer as SessionSocketServer | undefined;
+        const msg = ctx.modelResponse?.message;
+        if (!msg) return;
+
+        const content = typeof msg.content === 'string'
+          ? msg.content
+          : Array.isArray(msg.content)
+            ? msg.content.filter((p: any) => p.type === 'text').map((p: any) => p.text).join('')
+            : '';
+
+        if (content.trim()) {
+          socketServer?.broadcast({
+            type: 'message',
+            text: content.trim(),
+            ts: Date.now(),
+          });
+        }
       });
 
       agent.hook('beforeTool', 'socket-events', async (ctx) => {

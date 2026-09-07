@@ -55,6 +55,11 @@ export interface RunHandle extends PromiseLike<AgentResponse> {
    */
   halt(reason?: string): void;
 
+  /**
+   * Register a listener for intermediate messages/blurbs as they arrive from the model.
+   */
+  onMessage(callback: (message: string) => void): this;
+
   /** The promise that resolves with the final response. */
   readonly done: Promise<AgentResponse>;
 }
