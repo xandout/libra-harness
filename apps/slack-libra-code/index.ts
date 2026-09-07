@@ -774,9 +774,17 @@ app.command(slashCommand, async ({ command, ack, respond, client }) => {
 
   // 4. Reset
   if (text === 'reset') {
-    const sessionFile = join(libraHome, 'sessions', `${sessionKey}.jsonl`);
-    if (existsSync(sessionFile)) {
-      const backup = join(libraHome, 'sessions', `${sessionKey}-${Date.now()}.jsonl`);
+    const safeKey = sessionKey.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const altKey = sessionKeyFor(channelId, command.thread_ts).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const possiblePaths = [
+      join(libraHome, 'sessions', `${sessionKey}.jsonl`),
+      join(libraHome, 'sessions', `${safeKey}.jsonl`),
+      join(libraHome, 'sessions', `${altKey}.jsonl`),
+    ];
+    const sessionFile = possiblePaths.find((p) => existsSync(p));
+
+    if (sessionFile) {
+      const backup = join(libraHome, 'sessions', `${safeKey}-${Date.now()}.jsonl`);
       renameSync(sessionFile, backup);
       await respond({ text: `🔄 Session \`${sessionKey}\` rotated. New prompt starts fresh!`, response_type: 'in_channel' });
     } else {

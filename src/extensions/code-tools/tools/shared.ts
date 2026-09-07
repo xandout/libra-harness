@@ -60,6 +60,21 @@ export function imageMime(path: string): string {
 }
 
 // ── Shared Utilities ──────────────────────────────────────────────────
+export function getChildProcessEnv(): NodeJS.ProcessEnv {
+  const defaultPaths = ['/usr/local/bin', '/opt/homebrew/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
+  const currentPath = process.env.PATH || '';
+  const currentParts = currentPath.split(':').filter(Boolean);
+  for (const p of defaultPaths) {
+    if (!currentParts.includes(p)) {
+      currentParts.push(p);
+    }
+  }
+  return {
+    ...process.env,
+    PATH: currentParts.join(':'),
+  };
+}
+
 export function isNoiseDir(name: string): boolean {
   return name === 'node_modules' || name === '.git' || name === 'dist' || name === '.next' || name === 'coverage' ||
     name === '.cache' || name === '.npm' || name === '.local' || name === '.config' || name === '.libra';

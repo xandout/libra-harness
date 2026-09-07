@@ -1,6 +1,6 @@
 import { existsSync, statSync } from 'node:fs';
 import { execSync } from 'node:child_process';
-import { makeToolName, type ToolFactory } from './shared.js';
+import { makeToolName, getChildProcessEnv, type ToolFactory } from './shared.js';
 
 export const grepTool: ToolFactory = (cfg) => ({
   name: makeToolName(cfg.toolPrefix, 'grep'),
@@ -71,7 +71,8 @@ export const grepTool: ToolFactory = (cfg) => ({
     cmdArgs.push(`'${pattern.replace(/'/g, "'\\''")}'`, target);
 
     try {
-      const output = execSync(cmdArgs.join(' '), { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] });
+      const env = getChildProcessEnv();
+      const output = execSync(cmdArgs.join(' '), { cwd, env, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] });
       
       const lines = output.trim();
       if (!lines) {

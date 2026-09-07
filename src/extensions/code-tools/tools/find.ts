@@ -1,17 +1,18 @@
 import { existsSync, statSync } from 'node:fs';
 import { execSync } from 'node:child_process';
-import { makeToolName, type ToolFactory } from './shared.js';
+import { makeToolName, getChildProcessEnv, type ToolFactory } from './shared.js';
 
 let fdBinary: string | undefined;
 function getFdCommand(): string {
   if (fdBinary) return fdBinary;
+  const env = getChildProcessEnv();
   try {
-    execSync('fd --version', { stdio: 'ignore' });
+    execSync('fd --version', { stdio: 'ignore', env });
     fdBinary = 'fd';
     return fdBinary;
   } catch {}
   try {
-    execSync('fdfind --version', { stdio: 'ignore' });
+    execSync('fdfind --version', { stdio: 'ignore', env });
     fdBinary = 'fdfind';
     return fdBinary;
   } catch {}
@@ -57,7 +58,8 @@ export const findFileByNameTool: ToolFactory = (cfg) => ({
 
     try {
       const bin = getFdCommand();
-      const output = execSync(`${bin} -g "${pattern}" -c never`, { cwd: searchDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] });
+      const env = getChildProcessEnv();
+      const output = execSync(`${bin} -g "${pattern}" -c never`, { cwd: searchDir, env, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] });
       
       const files = output.split('\n').map(f => f.trim()).filter(Boolean);
       if (files.length === 0) {
