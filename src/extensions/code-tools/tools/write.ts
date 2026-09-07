@@ -32,7 +32,6 @@ export const writeTool: ToolFactory = (cfg) => ({
 
     const content = String(args.content ?? '');
 
-    // Enforce read-before-overwrite for existing files.
     if (existsSync(filePath)) {
       const readSet = getReadSet(ctx.metadata);
       if (!readSet.has(filePath)) {
@@ -68,10 +67,10 @@ export const writeTool: ToolFactory = (cfg) => ({
 export const editTool: ToolFactory = (cfg) => ({
   name: makeToolName(cfg.toolPrefix, 'edit'),
   description:
-    'Replace a string in a file with a new string. The old_string must be unique in the file ' +
-    'unless replace_all is true. You MUST read the file before editing it. ' +
-    'Use absolute paths. Preserve indentation exactly — match the file\'s actual content. ' +
-    'The new_string must differ from old_string.',
+    'Replace a chunk of a file. Use this ONLY when replacing a contiguous block of text. ' +
+    'You MUST read the file before editing it. ' +
+    'Provide the exact existing lines to replace as targetContent, and the replacement as replacementContent. ' +
+    'Specify startLine and endLine to narrow the search scope.',
   parameters: {
     type: 'object',
     properties: {
@@ -79,20 +78,24 @@ export const editTool: ToolFactory = (cfg) => ({
         type: 'string',
         description: 'The absolute path to the file to edit.',
       },
-      old_string: {
-        type: 'string',
-        description: 'The exact string to find in the file. Must be unique unless replace_all is true.',
+      startLine: {
+        type: 'integer',
+        description: 'Starting line number of the block to replace (1-indexed).',
       },
-      new_string: {
-        type: 'string',
-        description: 'The string to replace old_string with. Must differ from old_string.',
+      endLine: {
+        type: 'integer',
+        description: 'Ending line number of the block to replace (1-indexed).',
       },
-      replace_all: {
-        type: 'boolean',
-        description: 'If true, replace all occurrences of old_string. Default: false.',
+      targetContent: {
+        type: 'string',
+        description: 'The exact string to find in the file. Must be unique within the line range.',
+      },
+      replacementContent: {
+        type: 'string',
+        description: 'The string to replace targetContent with.',
       },
     },
-    required: ['file_path', 'old_string', 'new_string'],
+    required: ['file_path', 'startLine', 'endLine', 'targetContent', 'replacementContent'],
   },
   async execute(args, ctx) {
     const filePath = String(args.file_path ?? '');
@@ -100,17 +103,10 @@ export const editTool: ToolFactory = (cfg) => ({
       return { toolCallId: '', content: 'Error: file_path is required' };
     }
 
-    const oldString = String(args.old_string ?? '');
-    const newString = String(args.new_string ?? '');
-    const replaceAll = args.replace_all === true;
-
-    if (oldString === newString) {
-      return {
-        toolCallId: '',
-        content: 'Error: new_string must differ from old_string.',
-        isError: true,
-      };
-    }
+    const startLine = Number(args.startLine);
+    const endLine = Number(args.endLine);
+    const targetContent = String(args.targetContent ?? '');
+    const replacementContent = String(args.replacementContent ?? '');
 
     if (!existsSync(filePath)) {
       return {
@@ -120,7 +116,6 @@ export const editTool: ToolFactory = (cfg) => ({
       };
     }
 
-    // Enforce read-before-edit.
     const readSet = getReadSet(ctx.metadata);
     if (!readSet.has(filePath)) {
       return {
@@ -141,44 +136,46 @@ export const editTool: ToolFactory = (cfg) => ({
       };
     }
 
-    // Count occurrences.
+    const lines = content.split('\n');
+    const startIdx = Math.max(0, startLine - 1);
+    const endIdx = Math.min(lines.length, endLine);
+    const rangeContent = lines.slice(startIdx, endIdx).join('\n');
+
     let count = 0;
     let idx = 0;
-    while ((idx = content.indexOf(oldString, idx)) !== -1) {
+    while ((idx = rangeContent.indexOf(targetContent, idx)) !== -1) {
       count++;
-      idx += oldString.length;
+      idx += targetContent.length;
     }
 
     if (count === 0) {
       return {
         toolCallId: '',
-        content: `Error: old_string not found in ${filePath}. Check for exact whitespace, indentation, and line endings.`,
+        content: `Error: targetContent not found in ${filePath} between lines ${startLine} and ${endLine}. Check for exact whitespace and indentation.`,
         isError: true,
       };
     }
 
-    if (count > 1 && !replaceAll) {
+    if (count > 1) {
       return {
         toolCallId: '',
-        content: `Error: old_string appears ${count} times in ${filePath}. Provide more surrounding context to make it unique, or set replace_all to true.`,
+        content: `Error: targetContent appears ${count} times in the specified range. Provide a more specific targetContent or a narrower line range.`,
         isError: true,
       };
     }
 
-    // Perform the replacement.
-    let newContent: string;
-    if (replaceAll) {
-      newContent = content.split(oldString).join(newString);
-    } else {
-      newContent = content.replace(oldString, newString);
-    }
+    const newRangeContent = rangeContent.replace(targetContent, replacementContent);
+    const newLines = [
+      ...lines.slice(0, startIdx),
+      newRangeContent,
+      ...lines.slice(endIdx)
+    ];
 
     try {
-      writeFileSync(filePath, newContent, 'utf-8');
-      const replaced = replaceAll ? count : 1;
+      writeFileSync(filePath, newLines.join('\n'), 'utf-8');
       return {
         toolCallId: '',
-        content: `Replaced ${replaced} occurrence${replaced === 1 ? '' : 's'} in ${filePath}`,
+        content: `Successfully edited ${filePath} (lines ${startLine}-${endLine}).`,
       };
     } catch (err) {
       return {

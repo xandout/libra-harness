@@ -10,7 +10,10 @@
     "skipLibCheck": true,
     "declaration": true,
     "sourceMap": true,
-    "jsx": "react-jsx"
+    "jsx": "react-jsx",
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "types": ["node"]
   },
-  "include": ["index.tsx", "tui.tsx", "agent-setup.ts", "turn-journal.ts", "file-change-tracker.ts", "session-stats.ts", "context-compaction.ts"]
+  "include": ["index.tsx", "tui.tsx", "agent-setup.ts", "turn-journal.ts", "file-change-tracker.ts", "session-stats.ts"]
 }

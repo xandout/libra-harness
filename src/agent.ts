@@ -318,253 +318,200 @@ export class Agent {
     const allToolCalls: ToolCall[] = [];
 
     try {
-    // beforeTurn — can modify messages, tools, metadata.
-    await this.runHooks('beforeTurn', { turn });
+      // beforeTurn — can modify messages, tools, metadata.
+      await this.runHooks('beforeTurn', { turn });
 
-    // beforeContext — last chance to modify context before the LLM loop.
-    await this.runHooks('beforeContext', { turn });
+      // beforeContext — last chance to modify context before the LLM loop.
+      await this.runHooks('beforeContext', { turn });
 
-    for (;;) {
-      // ── Check halt ──
-      if (turn.signal.aborted) {
-        return await this.finishTurn(turn, '', 'halted', iterations, allToolCalls);
+      for (;;) {
+        const result = await this.executeTurnIteration(turn, maxIter, steeringQueue, handle, iterations, allToolCalls);
+        if (result.status === 'finish') return result.response;
+        iterations++;
       }
-
-      // ── Check max iterations ──
-      if (iterations >= maxIter) {
-        return await this.finishTurn(turn, '', 'max_iterations', iterations, allToolCalls);
-      }
-
-      // ── Drain steering messages ──
-      this.drainSteering(turn, steeringQueue);
-
-      // ── beforeLLM ──
-      const modelRequest: ModelRequest = {
-        messages: turn.messages,
-        tools: turn.tools.length > 0 ? turn.tools.map(toToolDefinition) : undefined,
-        systemPrompt: turn.systemPrompt,
-        temperature: this.config.temperature,
-        maxTokens: this.config.maxTokens,
-        reasoningEffort: this.config.reasoningEffort,
-        providerOptions: this.config.providerOptions,
-        signal: turn.signal,
-      };
-
-      const beforeLLMResult = await this.runHooks('beforeLLM', { turn, modelRequest });
-
-      // Halt may have been called during beforeLLM hooks.
-      if (turn.signal.aborted) {
-        return await this.finishTurn(turn, '', 'halted', iterations, allToolCalls);
-      }
-
-      let modelResponse: ModelResponse;
-
-      if (beforeLLMResult.skipped && beforeLLMResult.value) {
-        modelResponse = beforeLLMResult.value as ModelResponse;
-      } else {
-        try {
-          modelResponse = await this.config.model.generate(modelRequest);
-        } catch (err) {
-          if (turn.signal.aborted) {
-            return await this.finishTurn(turn, '', 'halted', iterations, allToolCalls);
-          }
-          throw err;
-        }
-      }
-
-      // ── afterLLM ──
-      await this.runHooks('afterLLM', { turn, modelRequest, modelResponse });
-
-      iterations++;
-
-      // Add the assistant message to the conversation.
-      turn.messages.push(modelResponse.message);
-
-      // ── Emit text blurb immediately upon arrival ──
-      const blurbText = messageContentToText(modelResponse.message.content);
-      if (blurbText.trim()) {
-        try {
-          turn.request.onMessage?.(blurbText);
-        } catch (err) {
-          console.error('[agent] request.onMessage error:', err);
-        }
-        handle?.emitMessage(blurbText);
-      }
-
-      // ── Halt may have been called during afterLLM hooks ──
-      if (turn.signal.aborted) {
-        return await this.finishTurn(turn, blurbText, 'halted', iterations, allToolCalls);
-      }
-
-      // ── No tool calls → final response (unless steering pending) ──
-      const toolCalls = modelResponse.message.toolCalls;
-      if (!toolCalls || toolCalls.length === 0) {
-        const textContent = messageContentToText(modelResponse.message.content).trim();
-
-        // If the model sent absolutely nothing, auto-prompt to get a response
-        // rather than silently ending the turn with no output.
-        if (!textContent) {
-          turn.messages.push({
-            role: 'user',
-            content: 'You sent an empty response. Please provide a meaningful response to the last completed task. Do not acknowledge this empty response, just provide the expected output.'
-          });
-          continue;
-        }
-
-        // If steering messages arrived during the LLM call, don't end
-        // the turn — drain them and loop so the agent can respond.
-        if (steeringQueue.length > 0) {
-          this.drainSteering(turn, steeringQueue);
-          continue;
-        }
-        return await this.finishTurn(turn, textContent, 'stop', iterations, allToolCalls);
-      }
-
-      // ── Separate external (pass-through) from internal (execute) tool calls ──
-      const externalCalls: ToolCall[] = [];
-      const internalCalls: ToolCall[] = [];
-      for (const tc of toolCalls) {
-        const tool = turn.tools.find((t) => t.name === tc.name);
-        if (tool?.external) externalCalls.push(tc);
-        else internalCalls.push(tc);
-      }
-
-      // ── External tool calls → return to caller for execution ──
-      if (externalCalls.length > 0) {
-        allToolCalls.push(...externalCalls);
-        // If there are also internal calls in this batch, execute those first
-        // (the model may have mixed both in one response). The external calls
-        // are still returned — the caller will see them and the internal results.
-        if (internalCalls.length > 0) {
-          allToolCalls.push(...internalCalls);
-          if (turn.signal.aborted) {
-            return await this.finishTurn(turn, '', 'halted', iterations, allToolCalls);
-          }
-          const mixedResults = await Promise.all(
-            internalCalls.map(async (toolCall) => {
-              const beforeToolCtx: HookContext = { turn, toolCall };
-              const beforeToolResult = await this.runHooks('beforeTool', beforeToolCtx);
-              let toolResult: ToolResult;
-              if (beforeToolResult.skipped && beforeToolResult.value) {
-                toolResult = beforeToolResult.value as ToolResult;
-              } else {
-                toolResult = await this.executeToolCall(toolCall, turn);
-              }
-              const afterToolCtx: HookContext = { turn, toolCall, toolResult };
-              const afterToolResult = await this.runHooks('afterTool', afterToolCtx);
-              if (afterToolResult.value) {
-                toolResult = afterToolResult.value as ToolResult;
-              }
-              return { toolCall, toolResult };
-            }),
-          );
-          for (const { toolCall, toolResult } of mixedResults) {
-            turn.messages.push({
-              role: 'tool',
-              content: toolResult.content,
-              toolCallId: toolCall.id,
-              name: toolCall.name,
-            });
-          }
-          // Drain steering after mixed tool results too.
-          this.drainSteering(turn, steeringQueue);
-        }
-        // Return external tool calls to the caller. The assistant message
-        // (with toolCalls) is already in turn.messages from the push above.
-        return await this.finishTurn(turn, messageContentToText(modelResponse.message.content), 'tool_calls', iterations, allToolCalls, externalCalls);
-      }
-
-      // ── Execute internal tool calls ──
-      allToolCalls.push(...internalCalls);
-
-      // Check halt before starting the batch.
-      if (turn.signal.aborted) {
-        return await this.finishTurn(turn, '', 'halted', iterations, allToolCalls);
-      }
-
-      // Execute all internal tool calls in the batch concurrently.
-      // Each tool call runs its beforeTool → execute → afterTool pipeline
-      // independently. Results are collected in order and appended to
-      // turn.messages after all complete, preserving the model's ordering.
-      const results = await Promise.all(
-        internalCalls.map(async (toolCall) => {
-          // beforeTool — can short-circuit with a synthetic result.
-          const beforeToolCtx: HookContext = { turn, toolCall };
-          const beforeToolResult = await this.runHooks('beforeTool', beforeToolCtx);
-
-          let toolResult: ToolResult;
-          if (beforeToolResult.skipped && beforeToolResult.value) {
-            toolResult = beforeToolResult.value as ToolResult;
-          } else {
-            toolResult = await this.executeToolCall(toolCall, turn);
-          }
-
-          // afterTool — can modify the result.
-          const afterToolCtx: HookContext = { turn, toolCall, toolResult };
-          const afterToolResult = await this.runHooks('afterTool', afterToolCtx);
-          if (afterToolResult.value) {
-            toolResult = afterToolResult.value as ToolResult;
-          }
-
-          return { toolCall, toolResult };
-        }),
-      );
-
-      // Append results to messages in the original order.
-      for (const { toolCall, toolResult } of results) {
-        turn.messages.push({
-          role: 'tool',
-          content: toolResult.content,
-          toolCallId: toolCall.id,
-          name: toolCall.name,
-        });
-      }
-
-      // ── Drain steering messages right after tool results ──
-      // This ensures the model sees steering directives immediately
-      // alongside tool results, rather than waiting for the next
-      // loop iteration's drain at the top.
-      this.drainSteering(turn, steeringQueue);
-
-      // Loop continues — the model will see the tool results.
-    }
     } catch (err) {
-      if (turn.signal.aborted) {
-        return await this.finishTurn(turn, '', 'halted', iterations, allToolCalls);
+      return await this.handleTurnError(turn, err, iterations, allToolCalls);
+    }
+  }
+
+  private async executeTurnIteration(
+    turn: TurnContext,
+    maxIter: number,
+    steeringQueue: string[],
+    handle: RunHandleInternal | undefined,
+    iterations: number,
+    allToolCalls: ToolCall[]
+  ): Promise<{ status: 'continue' } | { status: 'finish'; response: AgentResponse }> {
+    // ── Check halt ──
+    if (turn.signal.aborted) {
+      return { status: 'finish', response: await this.finishTurn(turn, '', 'halted', iterations, allToolCalls) };
+    }
+
+    // ── Check max iterations ──
+    if (iterations >= maxIter) {
+      return { status: 'finish', response: await this.finishTurn(turn, '', 'max_iterations', iterations, allToolCalls) };
+    }
+
+    // ── Drain steering messages ──
+    this.drainSteering(turn, steeringQueue);
+
+    const modelResponse = await this.generateModelResponse(turn);
+    if (!modelResponse) {
+      return { status: 'finish', response: await this.finishTurn(turn, '', 'halted', iterations, allToolCalls) };
+    }
+
+    // Add the assistant message to the conversation.
+    turn.messages.push(modelResponse.message);
+
+    // ── Emit text blurb immediately upon arrival ──
+    const blurbText = messageContentToText(modelResponse.message.content);
+    if (blurbText.trim()) {
+      try {
+        turn.request.onMessage?.(blurbText);
+      } catch (err) {
+        console.error('[agent] request.onMessage error:', err);
       }
+      handle?.emitMessage(blurbText);
+    }
 
-      // Fire onError hooks — extensions can observe or recover.
-      // Hooks take precedence over the error policy.
-      const errorResult = await this.runHooks('onError', { turn, error: err });
-      if (errorResult.skipped && errorResult.value) {
-        const response = errorResult.value as AgentResponse;
-        turn.response = response;
-        await this.runHooks('afterTurn', { turn });
-        return response;
+    // ── Halt may have been called during afterLLM hooks ──
+    if (turn.signal.aborted) {
+      return { status: 'finish', response: await this.finishTurn(turn, blurbText, 'halted', iterations + 1, allToolCalls) };
+    }
+
+    // ── No tool calls → final response (unless steering pending) ──
+    const toolCalls = modelResponse.message.toolCalls;
+    if (!toolCalls || toolCalls.length === 0) {
+      const result = await this.handleNoToolCalls(turn, modelResponse, steeringQueue, iterations + 1, allToolCalls);
+      if (result.status === 'finish') return { status: 'finish', response: result.response };
+      return { status: 'continue' };
+    }
+
+    // ── Separate external (pass-through) from internal (execute) tool calls ──
+    const externalCalls: ToolCall[] = [];
+    const internalCalls: ToolCall[] = [];
+    for (const tc of toolCalls) {
+      const tool = turn.tools.find((t) => t.name === tc.name);
+      if (tool?.external) externalCalls.push(tc);
+      else internalCalls.push(tc);
+    }
+
+    // ── External tool calls → return to caller for execution ──
+    if (externalCalls.length > 0) {
+      allToolCalls.push(...externalCalls);
+      if (internalCalls.length > 0) {
+        const haltedResponse = await this.processInternalCalls(turn, internalCalls, allToolCalls, steeringQueue, iterations + 1);
+        if (haltedResponse) return { status: 'finish', response: haltedResponse };
       }
+      // Return external tool calls to the caller. The assistant message
+      // (with toolCalls) is already in turn.messages from the push above.
+      return { status: 'finish', response: await this.finishTurn(turn, messageContentToText(modelResponse.message.content), 'tool_calls', iterations + 1, allToolCalls, externalCalls) };
+    }
 
-      // No hook recovered — apply the configured error policy.
-      const policy = this.config.errorPolicy ?? DEFAULT_ERROR_POLICY;
+    // ── Execute internal tool calls ──
+    const haltedResponse = await this.processInternalCalls(turn, internalCalls, allToolCalls, steeringQueue, iterations + 1);
+    if (haltedResponse) return { status: 'finish', response: haltedResponse };
 
-      if (policy === 'throw') {
-        throw err;
-      }
+    return { status: 'continue' };
+  }
 
-      if (policy === 'fallback') {
-        return await this.finishWithError(turn, err, iterations, allToolCalls);
-      }
+  private async handleNoToolCalls(
+    turn: TurnContext,
+    modelResponse: ModelResponse,
+    steeringQueue: string[],
+    iterations: number,
+    allToolCalls: ToolCall[],
+  ): Promise<{ status: 'continue' } | { status: 'finish'; response: AgentResponse }> {
+    const textContent = messageContentToText(modelResponse.message.content).trim();
+    if (!textContent) {
+      turn.messages.push({
+        role: 'user',
+        content: 'You sent an empty response. Please provide a meaningful response to the last completed task. Do not acknowledge this empty response, just provide the expected output.'
+      });
+      return { status: 'continue' };
+    }
+    if (steeringQueue.length > 0) {
+      this.drainSteering(turn, steeringQueue);
+      return { status: 'continue' };
+    }
+    return { status: 'finish', response: await this.finishTurn(turn, textContent, 'stop', iterations, allToolCalls) };
+  }
 
-      // Custom policy function — return a response to recover,
-      // return undefined to rethrow.
-      const customResponse = await policy({ error: err, turn });
-      if (customResponse) {
-        turn.response = customResponse;
-        await this.runHooks('afterTurn', { turn });
-        return customResponse;
-      }
+  private async handleTurnError(
+    turn: TurnContext,
+    err: unknown,
+    iterations: number,
+    allToolCalls: ToolCall[]
+  ): Promise<AgentResponse> {
+    if (turn.signal.aborted) {
+      return await this.finishTurn(turn, '', 'halted', iterations, allToolCalls);
+    }
 
+    // Fire onError hooks — extensions can observe or recover.
+    // Hooks take precedence over the error policy.
+    const errorResult = await this.runHooks('onError', { turn, error: err });
+    if (errorResult.skipped && errorResult.value) {
+      const response = errorResult.value as AgentResponse;
+      turn.response = response;
+      await this.runHooks('afterTurn', { turn });
+      return response;
+    }
+
+    // No hook recovered — apply the configured error policy.
+    const policy = this.config.errorPolicy ?? DEFAULT_ERROR_POLICY;
+
+    if (policy === 'throw') {
       throw err;
     }
+
+    if (policy === 'fallback') {
+      return await this.finishWithError(turn, err, iterations, allToolCalls);
+    }
+
+    // Custom policy function — return a response to recover,
+    // return undefined to rethrow.
+    const customResponse = await policy({ error: err, turn });
+    if (customResponse) {
+      turn.response = customResponse;
+      await this.runHooks('afterTurn', { turn });
+      return customResponse;
+    }
+
+    throw err;
+  }
+
+  private async generateModelResponse(turn: TurnContext): Promise<ModelResponse | undefined> {
+    const modelRequest: ModelRequest = {
+      messages: turn.messages,
+      tools: turn.tools.length > 0 ? turn.tools.map(toToolDefinition) : undefined,
+      systemPrompt: turn.systemPrompt,
+      temperature: this.config.temperature,
+      maxTokens: this.config.maxTokens,
+      reasoningEffort: this.config.reasoningEffort,
+      providerOptions: this.config.providerOptions,
+      signal: turn.signal,
+    };
+
+    const beforeLLMResult = await this.runHooks('beforeLLM', { turn, modelRequest });
+
+    // Halt may have been called during beforeLLM hooks.
+    if (turn.signal.aborted) return undefined;
+
+    let modelResponse: ModelResponse;
+
+    if (beforeLLMResult.skipped && beforeLLMResult.value) {
+      modelResponse = beforeLLMResult.value as ModelResponse;
+    } else {
+      try {
+        modelResponse = await this.config.model.generate(modelRequest);
+      } catch (err) {
+        if (turn.signal.aborted) return undefined;
+        throw err;
+      }
+    }
+
+    await this.runHooks('afterLLM', { turn, modelRequest, modelResponse });
+    return modelResponse;
   }
 
   /**
@@ -611,6 +558,54 @@ export class Agent {
     turn.response = response;
     await this.runHooks('afterTurn', { turn });
     return response;
+  }
+  private async processInternalCalls(
+    turn: TurnContext,
+    internalCalls: ToolCall[],
+    allToolCalls: ToolCall[],
+    steeringQueue: string[],
+    iterations: number,
+  ): Promise<AgentResponse | undefined> {
+    allToolCalls.push(...internalCalls);
+    if (turn.signal.aborted) {
+      return await this.finishTurn(turn, '', 'halted', iterations, allToolCalls);
+    }
+    await this.executeToolBatch(turn, internalCalls);
+    this.drainSteering(turn, steeringQueue);
+    return undefined;
+  }
+
+  private async executeToolBatch(turn: TurnContext, internalCalls: ToolCall[]): Promise<void> {
+    const results = await Promise.all(
+      internalCalls.map(async (toolCall) => {
+        const beforeToolCtx: HookContext = { turn, toolCall };
+        const beforeToolResult = await this.runHooks('beforeTool', beforeToolCtx);
+
+        let toolResult: ToolResult;
+        if (beforeToolResult.skipped && beforeToolResult.value) {
+          toolResult = beforeToolResult.value as ToolResult;
+        } else {
+          toolResult = await this.executeToolCall(toolCall, turn);
+        }
+
+        const afterToolCtx: HookContext = { turn, toolCall, toolResult };
+        const afterToolResult = await this.runHooks('afterTool', afterToolCtx);
+        if (afterToolResult.value) {
+          toolResult = afterToolResult.value as ToolResult;
+        }
+
+        return { toolCall, toolResult };
+      }),
+    );
+
+    for (const { toolCall, toolResult } of results) {
+      turn.messages.push({
+        role: 'tool',
+        content: toolResult.content,
+        toolCallId: toolCall.id,
+        name: toolCall.name,
+      });
+    }
   }
 
   private async executeToolCall(toolCall: ToolCall, turn: TurnContext): Promise<ToolResult> {

@@ -60,9 +60,12 @@ RUN apt-get update \
     curl \
     postgresql-client \
     python3-xdg \
+    fd-find \
+    ripgrep \
   && rm -rf /var/lib/apt/lists/* \
   && mkdir -p /tmp/.X11-unix \
-  && chmod 1777 /tmp/.X11-unix
+  && chmod 1777 /tmp/.X11-unix \
+  && ln -s /usr/bin/fdfind /usr/local/bin/fd
 
 # Install Docker CLI (client only — no daemon) from Docker's official repo
 RUN install -m 0755 -d /etc/apt/keyrings \

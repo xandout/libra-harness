@@ -1,6 +1,6 @@
 import { readFileSync, appendFileSync, mkdirSync, readdirSync, writeFileSync, existsSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Extension } from '@xandout/libra-harness';
+import type { Extension, TurnContext } from '@xandout/libra-harness';
 import { messageContentToText } from '@xandout/libra-harness';
 import type { Message, MessageContent, Role, ToolCall } from '@xandout/libra-harness';
 
@@ -328,6 +328,39 @@ export default function createDiskSessionExtension(
     }
   }
 
+  function persistRecords(sessionKey: string, newRecords: SessionRecord[]): void {
+    const records = store.get(sessionKey) ?? [];
+    records.push(...newRecords);
+    if (records.length > maxRecords) {
+      records.splice(0, records.length - maxRecords);
+    }
+    store.set(sessionKey, records);
+    appendToFile(sessionKey, newRecords);
+  }
+
+  function handleCompaction(turn: TurnContext, key: string, messageTs?: string) {
+    const summary = turn.response?.message ?? '';
+    const oldPath = filePath(key);
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const archivedName = `${key.replace(/[^a-zA-Z0-9_-]/g, '_')}_${timestamp}.jsonl`;
+    const archivedPath = join(dir, archivedName);
+
+    if (existsSync(oldPath)) {
+      renameSync(oldPath, archivedPath);
+    }
+
+    const summaryRecord: SessionRecord = {
+      role: 'assistant',
+      content: `[Session summary — prior conversation compacted ${new Date().toISOString()}]\n\n${summary}`,
+      ts: messageTs || String(Date.now() / 1000),
+      recordedAt: new Date().toISOString(),
+    };
+
+    store.set(key, [summaryRecord]);
+    appendToFile(key, [summaryRecord]);
+    turn.metadata['_compactArchivedFile'] = archivedName;
+  }
+
   // ── Convert between Message and SessionRecord ──────────────────
   function toMessage(r: SessionRecord): Message {
     return {
@@ -522,13 +555,7 @@ export default function createDiskSessionExtension(
           ),
           ...(sessionMeta ? { meta: sessionMeta } : {}),
         };
-        const records = store.get(key) ?? [];
-        records.push(userRecord);
-        if (records.length > maxRecords) {
-          records.splice(0, records.length - maxRecords);
-        }
-        store.set(key, records);
-        appendToFile(key, [userRecord]);
+        persistRecords(key, [userRecord]);
 
         // Track how many history messages we prepended so afterTurn
         // knows where new messages start.
@@ -631,13 +658,7 @@ export default function createDiskSessionExtension(
             ),
             ...(sessionMeta ? { meta: sessionMeta } : {}),
           };
-          const records = store.get(key) ?? [];
-          records.push(record);
-          if (records.length > maxRecords) {
-            records.splice(0, records.length - maxRecords);
-          }
-          store.set(key, records);
-          appendToFile(key, [record]);
+          persistRecords(key, [record]);
         }
       });
 
@@ -666,13 +687,7 @@ export default function createDiskSessionExtension(
           recordedAt: new Date().toISOString(),
           ...(sessionMeta ? { meta: sessionMeta } : {}),
         };
-        const records = store.get(key) ?? [];
-        records.push(record);
-        if (records.length > maxRecords) {
-          records.splice(0, records.length - maxRecords);
-        }
-        store.set(key, records);
-        appendToFile(key, [record]);
+        persistRecords(key, [record]);
       });
 
       // ── afterTurn: finalize session turn ──────────────────────────
@@ -695,31 +710,7 @@ export default function createDiskSessionExtension(
         const isCompacting = ctx.turn.request.metadata?.compacting === true;
 
         if (isCompacting) {
-          const summary = ctx.turn.response?.message ?? '';
-
-          // Archive the old file with a timestamp suffix.
-          const oldPath = filePath(key);
-          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-          const archivedName = `${key.replace(/[^a-zA-Z0-9_-]/g, '_')}_${timestamp}.jsonl`;
-          const archivedPath = join(dir, archivedName);
-
-          if (existsSync(oldPath)) {
-            renameSync(oldPath, archivedPath);
-          }
-
-          // Seed the new session with the summary.
-          const summaryRecord: SessionRecord = {
-            role: 'assistant',
-            content: `[Session summary — prior conversation compacted ${new Date().toISOString()}]\n\n${summary}`,
-            ts: messageTs || String(Date.now() / 1000),
-            recordedAt: new Date().toISOString(),
-          };
-
-          store.set(key, [summaryRecord]);
-          appendToFile(key, [summaryRecord]);
-
-          // Store the archived filename so the host can report it.
-          ctx.turn.metadata['_compactArchivedFile'] = archivedName;
+          handleCompaction(ctx.turn, key, messageTs);
           return;
         }
 
@@ -741,13 +732,7 @@ export default function createDiskSessionExtension(
         }
 
         if (unwrittenSteering.length > 0) {
-          const records = store.get(key) ?? [];
-          records.push(...unwrittenSteering);
-          if (records.length > maxRecords) {
-            records.splice(0, records.length - maxRecords);
-          }
-          store.set(key, records);
-          appendToFile(key, unwrittenSteering);
+          persistRecords(key, unwrittenSteering);
         }
 
         // Pull accumulated usage for this turn (set by afterLLM hook).
@@ -806,16 +791,7 @@ export default function createDiskSessionExtension(
         ...(threadTs ? { threadTs } : {}),
         recordedAt: new Date().toISOString(),
       };
-      const records = store.get(sessionKey);
-      if (records) {
-        records.push(record);
-        if (records.length > maxRecords) {
-          store.set(sessionKey, records.slice(-maxRecords));
-        }
-      } else {
-        store.set(sessionKey, [record]);
-      }
-      appendToFile(sessionKey, [record]);
+      persistRecords(sessionKey, [record]);
     },
 
     /**
@@ -847,16 +823,7 @@ export default function createDiskSessionExtension(
         recordedAt: new Date().toISOString(),
         ...(opts?.meta ? { meta: opts.meta } : {}),
       };
-      const records = store.get(sessionKey);
-      if (records) {
-        records.push(record);
-        if (records.length > maxRecords) {
-          store.set(sessionKey, records.slice(-maxRecords));
-        }
-      } else {
-        store.set(sessionKey, [record]);
-      }
-      appendToFile(sessionKey, [record]);
+      persistRecords(sessionKey, [record]);
     },
 
     /** List all session keys. */

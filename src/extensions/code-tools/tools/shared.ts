@@ -59,6 +59,58 @@ export function imageMime(path: string): string {
   return MIME_MAP[extname(path).toLowerCase()] ?? 'application/octet-stream';
 }
 
+// ── Shared Utilities ──────────────────────────────────────────────────
+export function isNoiseDir(name: string): boolean {
+  return name === 'node_modules' || name === '.git' || name === 'dist' || name === '.next' || name === 'coverage' ||
+    name === '.cache' || name === '.npm' || name === '.local' || name === '.config' || name === '.libra';
+}
+
+export function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function globToRegex(pattern: string): RegExp {
+  let i = 0;
+  let regex = '';
+
+  while (i < pattern.length) {
+    const c = pattern[i];
+
+    if (c === '*' && pattern[i + 1] === '*') {
+      regex += '.*';
+      i += 2;
+      if (pattern[i] === '/') i++;
+    } else if (c === '*') {
+      regex += '[^/]*';
+      i++;
+    } else if (c === '?') {
+      regex += '[^/]';
+      i++;
+    } else if (c === '{') {
+      const end = pattern.indexOf('}', i);
+      if (end === -1) {
+        regex += '\\{';
+        i++;
+      } else {
+        const options = pattern.slice(i + 1, end).split(',').map((s) => escapeRegex(s));
+        regex += `(?:${options.join('|')})`;
+        i = end + 1;
+      }
+    } else if (c === '.') {
+      regex += '\\.';
+      i++;
+    } else if ('+()|^$\\'.includes(c)) {
+      regex += '\\' + c;
+      i++;
+    } else {
+      regex += c;
+      i++;
+    }
+  }
+
+  return new RegExp(`^${regex}$`);
+}
+
 // ── Shared config resolved from the extension config ─────────────────
 export interface ResolvedConfig {
   toolPrefix: string;

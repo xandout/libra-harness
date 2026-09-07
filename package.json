@@ -166,6 +166,7 @@
     "@opentelemetry/sdk-trace-base": "^2.10.0",
     "@types/node": "^26.2.0",
     "@vitest/coverage-v8": "^4.1.10",
+    "fallow": "^3.22.0",
     "quickjs-emscripten": "^0.32.0",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"

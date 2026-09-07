@@ -22,15 +22,14 @@ import { createSkillExtension } from '@xandout/libra-harness/extensions/skills';
 import { createFileChangeTracker } from './file-change-tracker.js';
 import { createSessionStats, type SessionStats } from './session-stats.js';
 import { createSocketEventsExtension } from './session-socket.js';
-import type { FileChange } from './tui.js';
 
 // ── Paths ────────────────────────────────────────────────────────────
 // LIBRA_HOME can be overridden via env var (e.g. for containerized use
 // where state must live on a mounted volume). Defaults to ~/.libra.
-export const LIBRA_HOME = process.env.LIBRA_HOME || join(homedir(), '.libra');
+const LIBRA_HOME = process.env.LIBRA_HOME || join(homedir(), '.libra');
 export const SESSIONS_DIR = join(LIBRA_HOME, 'sessions');
 export const SOCKETS_DIR = join(LIBRA_HOME, 'sockets');
-export const SHELLS_DIR = join(LIBRA_HOME, 'shells');
+const SHELLS_DIR = join(LIBRA_HOME, 'shells');
 export const TODOS_DIR = join(LIBRA_HOME, 'todos');
 export const CONFIG_FILE = join(LIBRA_HOME, 'config.json');
 
@@ -73,6 +72,7 @@ export function sessionKeyForCwd(cwd: string): string {
 }
 
 // ── System prompt ────────────────────────────────────────────────────
+// fallow-ignore-next-line unused-export
 export const SYSTEM_PROMPT = `You are a direct, practical coding agent.
 
 You have tools for reading, writing, editing files, searching code, running shell commands, and tracking tasks.
@@ -84,7 +84,7 @@ Principles:
 - Keep responses concise and focused on results.
 - Do not push to git or commit secrets unless explicitly requested.`;
 
-export interface InstructionFile {
+interface InstructionFile {
   filename: string;
   path: string;
   content: string;
@@ -97,6 +97,7 @@ export interface InstructionFile {
  * 3. .libra/SYSTEM.md
  * 4. .libra/AGENTS.md
  */
+// fallow-ignore-next-line unused-export
 export function loadInstructionFile(dir: string): InstructionFile | undefined {
   const candidates = ['SYSTEM.md', 'AGENTS.md', join('.libra', 'SYSTEM.md'), join('.libra', 'AGENTS.md')];
   for (const rel of candidates) {
@@ -117,11 +118,13 @@ export function loadInstructionFile(dir: string): InstructionFile | undefined {
  * Backwards-compatibility helper: load project-specific instructions from
  * SYSTEM.md or AGENTS.md in the given directory.
  */
+// fallow-ignore-next-line unused-export
 export function loadAgentsMd(dir: string): string | undefined {
   return loadInstructionFile(dir)?.content;
 }
 
-export function getLibraHome(): string {
+
+function getLibraHome(): string {
   return process.env.LIBRA_HOME || LIBRA_HOME;
 }
 
@@ -186,6 +189,7 @@ export interface ThinkingResolvedConfig {
  * - 'high': standard reasoning (default for reasoning models)
  * - 'max': maximum reasoning effort
  */
+// fallow-ignore-next-line complexity
 export function resolveThinkingConfig(thinkingInput?: string): ThinkingResolvedConfig {
   const config = loadConfig();
   const raw =
@@ -289,7 +293,6 @@ export interface BuildAgentOptions {
 
 export interface BuiltAgent {
   agent: Agent;
-  fileChanges: FileChange[];
   sessionStats: SessionStats;
   todoFile: string;
 }
@@ -418,7 +421,6 @@ export async function buildAgent(opts: BuildAgentOptions = {}): Promise<BuiltAge
   const sessionKey = sessionKeyForCwd(cwd);
   const todoFile = join(TODOS_DIR, `${sessionKey}.json`);
 
-  const fileChanges: FileChange[] = [];
   const sessionStats: SessionStats = {
     promptTokens: 0, completionTokens: 0, cachedPromptTokens: 0,
     cacheWriteTokens: 0, reasoningTokens: 0, llmCalls: 0, turns: 0,
@@ -444,7 +446,7 @@ export async function buildAgent(opts: BuildAgentOptions = {}): Promise<BuiltAge
     verbose: false,
   }));
   agent.use(createStreamingExtension());
-  agent.use(createFileChangeTracker(fileChanges));
+  agent.use(createFileChangeTracker());
   agent.use(createSessionStats(sessionStats));
   agent.use(createCodeToolsExtension({
     shellsDir: SHELLS_DIR,
@@ -468,5 +470,5 @@ export async function buildAgent(opts: BuildAgentOptions = {}): Promise<BuiltAge
     agent.use(skillsExt);
   }
 
-  return { agent, fileChanges, sessionStats, todoFile };
+  return { agent, sessionStats, todoFile };
 }

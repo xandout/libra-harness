@@ -9,6 +9,7 @@ import type {
   LanguageModelV4TextPart,
   LanguageModelV4ToolCallPart,
   LanguageModelV4Usage,
+  LanguageModelV4StreamPart,
 } from '@ai-sdk/provider';
 import type { Model, ModelRequest, ModelResponse, FinishReason } from './model.js';
 import {
@@ -50,95 +51,20 @@ export class AISdkModel implements Model {
   private async generateStream(request: ModelRequest): Promise<ModelResponse> {
     const onDelta = request.onDelta!;
     const { stream } = await this.model.doStream(this.toCallOptions(request));
-    const content: Array<{ type: 'text'; text: string } | FileContentPart> = [];
-    const textById = new Map<string, string>();
-    const textOrder: string[] = [];
-    const toolCalls: ToolCall[] = [];
-    let finishReason: FinishReason = 'stop';
-    let usage: NonNullable<ModelResponse['usage']> | undefined;
-
-    const toolInputBuffers = new Map<string, { name: string; input: string; providerExecuted: boolean }>();
+    const state = new StreamState(onDelta);
 
     const reader = stream.getReader();
     try {
       while (true) {
         const { done, value: part } = await reader.read();
         if (done) break;
-
-        switch (part.type) {
-          case 'text-start':
-            if (!textById.has(part.id)) {
-              textById.set(part.id, '');
-              textOrder.push(part.id);
-            }
-            break;
-          case 'text-delta':
-            if (!textById.has(part.id)) textOrder.push(part.id);
-            textById.set(part.id, (textById.get(part.id) ?? '') + part.delta);
-            onDelta({ type: 'text', content: part.delta });
-            break;
-          case 'reasoning-delta':
-            onDelta({ type: 'reasoning', content: part.delta });
-            break;
-          case 'tool-input-start':
-            toolInputBuffers.set(part.id, {
-              name: part.toolName,
-              input: '',
-              providerExecuted: part.providerExecuted === true,
-            });
-            break;
-          case 'tool-input-delta': {
-            const buffer = toolInputBuffers.get(part.id);
-            if (buffer) {
-              buffer.input += part.delta;
-              if (!buffer.providerExecuted) {
-                onDelta({ type: 'tool-input', content: part.delta, toolCallId: part.id, toolName: buffer.name });
-              }
-            }
-            break;
-          }
-          case 'tool-input-end': {
-            const buffer = toolInputBuffers.get(part.id);
-            if (buffer && !buffer.providerExecuted) {
-              toolCalls.push({ id: part.id, name: buffer.name, arguments: buffer.input || '{}' });
-            }
-            toolInputBuffers.delete(part.id);
-            break;
-          }
-          case 'tool-call':
-            if (!part.providerExecuted && !toolCalls.some((toolCall) => toolCall.id === part.toolCallId)) {
-              toolCalls.push({ id: part.toolCallId, name: part.toolName, arguments: typeof part.input === 'string' ? part.input : JSON.stringify(part.input ?? {}) });
-            }
-            break;
-          case 'file':
-            content.push(fromAISdkFile(part));
-            break;
-          case 'finish':
-            finishReason = mapFinishReason(part.finishReason.unified);
-            usage = extractUsage(part.usage);
-            break;
-          case 'error':
-            throw part.error;
-          default:
-            break;
-        }
+        state.processPart(part);
       }
     } finally {
       reader.releaseLock();
     }
 
-    const text = textOrder.map((id) => textById.get(id) ?? '').join('');
-    if (text) content.unshift({ type: 'text', text });
-
-    return {
-      message: {
-        role: 'assistant',
-        content: content.length > 1 || content.some((part) => part.type === 'file') ? content : text,
-        ...(toolCalls.length > 0 && { toolCalls }),
-      },
-      finishReason,
-      ...(usage && { usage }),
-    };
+    return state.finalize();
   }
 
   private toCallOptions(request: ModelRequest): LanguageModelV4CallOptions {
@@ -289,5 +215,92 @@ function mapFinishReason(reason: LanguageModelV4GenerateResult['finishReason']['
       return 'content_filter';
     default:
       return 'stop';
+  }
+}
+
+class StreamState {
+  public content: Array<{ type: 'text'; text: string } | FileContentPart> = [];
+  public textById = new Map<string, string>();
+  public textOrder: string[] = [];
+  public toolCalls: ToolCall[] = [];
+  public finishReason: FinishReason = 'stop';
+  public usage?: NonNullable<ModelResponse['usage']>;
+  public toolInputBuffers = new Map<string, { name: string; input: string; providerExecuted: boolean }>();
+
+  constructor(private onDelta: (delta: any) => void) {}
+
+  public processPart(part: LanguageModelV4StreamPart): void {
+    switch (part.type) {
+      case 'text-start':
+        if (!this.textById.has(part.id)) {
+          this.textById.set(part.id, '');
+          this.textOrder.push(part.id);
+        }
+        break;
+      case 'text-delta':
+        if (!this.textById.has(part.id)) this.textOrder.push(part.id);
+        this.textById.set(part.id, (this.textById.get(part.id) ?? '') + part.delta);
+        this.onDelta({ type: 'text', content: part.delta });
+        break;
+      case 'reasoning-delta':
+        this.onDelta({ type: 'reasoning', content: part.delta });
+        break;
+      case 'tool-input-start':
+        this.toolInputBuffers.set(part.id, {
+          name: part.toolName,
+          input: '',
+          providerExecuted: part.providerExecuted === true,
+        });
+        break;
+      case 'tool-input-delta': {
+        const buffer = this.toolInputBuffers.get(part.id);
+        if (buffer) {
+          buffer.input += part.delta;
+          if (!buffer.providerExecuted) {
+            this.onDelta({ type: 'tool-input', content: part.delta, toolCallId: part.id, toolName: buffer.name });
+          }
+        }
+        break;
+      }
+      case 'tool-input-end': {
+        const buffer = this.toolInputBuffers.get(part.id);
+        if (buffer && !buffer.providerExecuted) {
+          this.toolCalls.push({ id: part.id, name: buffer.name, arguments: buffer.input || '{}' });
+        }
+        this.toolInputBuffers.delete(part.id);
+        break;
+      }
+      case 'tool-call':
+        if (!part.providerExecuted && !this.toolCalls.some((toolCall) => toolCall.id === part.toolCallId)) {
+          this.toolCalls.push({ id: part.toolCallId, name: part.toolName, arguments: typeof part.input === 'string' ? part.input : JSON.stringify(part.input ?? {}) });
+        }
+        break;
+      case 'file':
+        this.content.push(fromAISdkFile(part));
+        break;
+      case 'finish':
+        this.finishReason = mapFinishReason(part.finishReason.unified);
+        this.usage = extractUsage(part.usage);
+        break;
+      case 'error':
+        throw part.error;
+      default:
+        break;
+    }
+  }
+
+  public finalize(): ModelResponse {
+    const text = this.textOrder.map((id) => this.textById.get(id) ?? '').join('');
+    if (text) this.content.unshift({ type: 'text', text });
+
+    return {
+      message: {
+        role: 'assistant',
+        content: this.content.length > 1 || this.content.some((part) => part.type === 'file') ? this.content : text,
+        ...(this.toolCalls.length > 0 && { toolCalls: this.toolCalls }),
+      },
+      finishReason: this.finishReason,
+      ...(this.usage && { usage: this.usage }),
+    };
   }
 }

@@ -63,15 +63,7 @@ export class TodoStore {
     this.save();
   }
 
-  /** Get a snapshot of the current todos. */
-  getAll(): Todo[] {
-    return [...this.todos];
-  }
 
-  clear(): void {
-    this.todos = [];
-    this.save();
-  }
 }
 
 // ── todo_write tool ──────────────────────────────────────────────────

@@ -14,7 +14,7 @@
 import net from 'node:net';
 import { existsSync, unlinkSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import type { RunHandle, Extension, TurnContext } from '@xandout/libra-harness';
+import type { RunHandle, Extension } from '@xandout/libra-harness';
 
 export type SocketEventType =
   | 'status'

@@ -1,6 +1,5 @@
 export { default as createMemoryExtension } from './extension.js';
 export { createLlmExtractor } from './llm-extractor.js';
-export type { LlmExtractorConfig } from './llm-extractor.js';
 export type {
   Memory,
   MemoryInput,
@@ -10,7 +9,5 @@ export type {
   ExtractorInput,
   ExtractedMemory,
   MemoryExtractor,
-  RetrievalInput,
   MemoryRetriever,
-  MemoryExtensionConfig,
 } from './types.js';

@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, appendFileSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, appendFileSync, existsSync, statSync, renameSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import net from 'node:net';
@@ -58,6 +58,7 @@ interface ResolvedCommand {
   description: string;
 }
 
+// fallow-ignore-next-line complexity
 function resolveLcCommand(source?: string): ResolvedCommand {
   // 1. URL (e.g. tarball or git repo: https://... or http://...)
   if (source && /^https?:\/\//.test(source)) {
@@ -522,6 +523,7 @@ async function runTurn(opts: {
 }
 
 // ── Slack message listener ───────────────────────────────────────────
+// fallow-ignore-next-line complexity
 app.message(async ({ message, client }) => {
   // Ignore unsupported subtypes
   const subtype = 'subtype' in message ? String(message.subtype || '') : '';
@@ -581,7 +583,9 @@ app.message(async ({ message, client }) => {
 
 // ── Slash Command: /ronny ───────────────────────────────────────────────
 // OpenClaw style slash command supporting halt, steer, status, and prompts
-app.command('/ronny', async ({ command, ack, respond, client }) => {
+// fallow-ignore-next-line complexity
+const slashCommand = process.env.SLACK_SLASH_COMMAND || '/ronny';
+app.command(slashCommand, async ({ command, ack, respond, client }) => {
   await ack();
   const text = (command.text || '').trim();
   const channelId = command.channel_id;
@@ -653,7 +657,20 @@ app.command('/ronny', async ({ command, ack, respond, client }) => {
     return;
   }
 
-  // 4. Help
+  // 4. Reset
+  if (text === 'reset') {
+    const sessionFile = join(libraHome, 'sessions', `${sessionKey}.jsonl`);
+    if (existsSync(sessionFile)) {
+      const backup = join(libraHome, 'sessions', `${sessionKey}-${Date.now()}.jsonl`);
+      renameSync(sessionFile, backup);
+      await respond({ text: `🔄 Session \`${sessionKey}\` rotated. New prompt starts fresh!`, response_type: 'in_channel' });
+    } else {
+      await respond({ text: `Session \`${sessionKey}\` is already fresh (no history found).`, response_type: 'ephemeral' });
+    }
+    return;
+  }
+
+  // 5. Help
   if (text === 'help' || text === '') {
     await respond({
       text: 'Usage:\n• `/ronny <prompt>` — Run a code agent turn\n• `/ronny steer <message>` — Steer running turn\n• `/ronny halt [reason]` — Stop running turn\n• `/ronny status` — Check agent status',
