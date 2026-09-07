@@ -681,7 +681,19 @@ app.command(slashCommand, async ({ command, ack, respond, client }) => {
 
     if (sessionFile) {
       const lines = readFileSync(sessionFile, 'utf-8').split('\n').filter((l) => l.trim());
-      let messageCount = 0;
+      const records: any[] = [];
+      for (const line of lines) {
+        try { records.push(JSON.parse(line)); } catch {}
+      }
+
+      // Filter conversation messages (exclude control)
+      const convRecords = records.filter((r) => r.role !== 'control');
+      const totalHistoryCount = convRecords.length;
+
+      // Active context window: up to maxContextMessages
+      const activeWindowRecords = convRecords.slice(-maxContextMessages);
+      const activeWindowCount = activeWindowRecords.length;
+
       let isCompacted = false;
       let compactedCycles = 0;
       let lastPromptTokens: number | undefined;
@@ -691,52 +703,50 @@ app.command(slashCommand, async ({ command, ack, respond, client }) => {
       let totalPromptTokens = 0;
       let totalCachedTokens = 0;
       let totalCompletionTokens = 0;
+      let totalReasoningTokens = 0;
+      let turnsWithUsage = 0;
       let turnsCount = 0;
 
-      for (const line of lines) {
-        try {
-          const rec = JSON.parse(line);
-          if (rec.role !== 'control') {
-            messageCount++;
+      for (const rec of records) {
+        if (rec.role === 'assistant') {
+          turnsCount++;
+          const contentStr = typeof rec.content === 'string' ? rec.content : '';
+          if (contentStr.startsWith('[Session summary') || contentStr.startsWith('[Conversation summary')) {
+            isCompacted = true;
+            compactedCycles++;
           }
-          if (rec.role === 'assistant') {
-            turnsCount++;
-            const contentStr = typeof rec.content === 'string' ? rec.content : '';
-            if (contentStr.startsWith('[Session summary') || contentStr.startsWith('[Conversation summary')) {
-              isCompacted = true;
-              compactedCycles++;
-            }
-            if (rec.usage) {
-              lastPromptTokens = rec.usage.promptTokens;
-              lastCachedTokens = rec.usage.cachedPromptTokens;
-              lastCompletionTokens = rec.usage.completionTokens;
-              lastReasoningTokens = rec.usage.reasoningTokens;
+          if (rec.usage) {
+            turnsWithUsage++;
+            lastPromptTokens = rec.usage.promptTokens;
+            lastCachedTokens = rec.usage.cachedPromptTokens;
+            lastCompletionTokens = rec.usage.completionTokens;
+            lastReasoningTokens = rec.usage.reasoningTokens;
 
-              totalPromptTokens += rec.usage.promptTokens || 0;
-              totalCachedTokens += rec.usage.cachedPromptTokens || 0;
-              totalCompletionTokens += rec.usage.completionTokens || 0;
-            }
+            totalPromptTokens += rec.usage.promptTokens || 0;
+            totalCachedTokens += rec.usage.cachedPromptTokens || 0;
+            totalCompletionTokens += rec.usage.completionTokens || 0;
+            totalReasoningTokens += rec.usage.reasoningTokens || 0;
           }
-        } catch {}
+        }
       }
 
-      const pct = Math.min(100, Math.round((messageCount / maxContextMessages) * 100));
-      statusLines.push(`• Context Messages: *${messageCount}* / ${maxContextMessages} (${pct}% of limit)`);
+      statusLines.push(`• Active Context Window: *${activeWindowCount}* / ${maxContextMessages} messages`);
+      statusLines.push(`• Total Session History: *${totalHistoryCount}* messages across *${turnsCount}* turn${turnsCount === 1 ? '' : 's'}`);
 
       if (isCompacted) {
         statusLines.push(`• Compaction: *Active* (${compactedCycles} auto-summarization cycle${compactedCycles > 1 ? 's' : ''} completed)`);
-      } else if (messageCount >= maxContextMessages) {
+      } else if (totalHistoryCount >= maxContextMessages) {
         statusLines.push(`• Compaction: *At threshold* (auto-summarization next turn)`);
       } else {
-        statusLines.push(`• Compaction: *Standard* (${maxContextMessages - messageCount} message${maxContextMessages - messageCount === 1 ? '' : 's'} remaining)`);
+        statusLines.push(`• Compaction: *Standard* (${maxContextMessages - totalHistoryCount} message${maxContextMessages - totalHistoryCount === 1 ? '' : 's'} remaining until threshold)`);
       }
 
       if (lastPromptTokens !== undefined) {
         if (lastCachedTokens && lastCachedTokens > 0) {
           const cachePct = ((lastCachedTokens / lastPromptTokens) * 100).toFixed(1);
-          statusLines.push(`• Last Turn Context: *${lastPromptTokens.toLocaleString()}* prompt tokens (*${lastCachedTokens.toLocaleString()}* cached, *${cachePct}%* cache hit rate)`);
+          statusLines.push(`• Last Turn Prompt: *${lastPromptTokens.toLocaleString()}* tokens (*${lastCachedTokens.toLocaleString()}* cached, *${cachePct}%* cache hit rate)`);
         } else {
-          statusLines.push(`• Last Turn Context: *${lastPromptTokens.toLocaleString()}* prompt tokens (no cache hit)`);
+          statusLines.push(`• Last Turn Prompt: *${lastPromptTokens.toLocaleString()}* tokens (0% cached)`);
         }
       }
 
@@ -745,14 +755,15 @@ app.command(slashCommand, async ({ command, ack, respond, client }) => {
         statusLines.push(`• Last Turn Output: *${lastCompletionTokens.toLocaleString()}* completion tokens${reasoning}`);
       }
 
-      if (turnsCount > 0) {
-        const overallCachePct = totalPromptTokens > 0
-          ? ((totalCachedTokens / totalPromptTokens) * 100).toFixed(1)
-          : '0.0';
-        statusLines.push(`• Session Totals (${turnsCount} turn${turnsCount > 1 ? 's' : ''}): *${totalPromptTokens.toLocaleString()}* prompt (*${overallCachePct}%* cached), *${totalCompletionTokens.toLocaleString()}* completion`);
+      if (totalPromptTokens > 0) {
+        const overallCachePct = ((totalCachedTokens / totalPromptTokens) * 100).toFixed(1);
+        const reasoningTotal = totalReasoningTokens > 0 ? ` (${totalReasoningTokens.toLocaleString()} thinking)` : '';
+        statusLines.push(`• Session Cumulative: *${totalPromptTokens.toLocaleString()}* prompt (*${overallCachePct}%* cached), *${totalCompletionTokens.toLocaleString()}* completion${reasoningTotal}`);
+      } else if (turnsCount > 0 && turnsWithUsage === 0) {
+        statusLines.push(`• Tokens: No model metrics recorded yet in this session (will appear on next turn).`);
       }
     } else {
-      statusLines.push(`• Context Messages: *0* / ${maxContextMessages} (fresh session)`);
+      statusLines.push(`• Active Context Window: *0* / ${maxContextMessages} messages`);
       statusLines.push(`• Compaction: *Standard* (no compaction needed)`);
       statusLines.push(`• Tokens: No turns recorded yet in this session.`);
     }

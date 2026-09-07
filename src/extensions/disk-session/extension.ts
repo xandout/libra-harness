@@ -820,12 +820,20 @@ export default function createDiskSessionExtension(
           const sessionMeta = ctx.turn.metadata.sessionMeta as
             | Record<string, unknown>
             | undefined;
+          const usage = modelResponse.usage;
           const record = {
             ...toRecord(
               modelResponse.message as Message,
               messageTs,
               threadTs,
             ),
+            ...(usage ? { usage: {
+              promptTokens: usage.promptTokens,
+              completionTokens: usage.completionTokens,
+              iterations: 1,
+              ...(usage.cachedPromptTokens !== undefined && { cachedPromptTokens: usage.cachedPromptTokens }),
+              ...(usage.reasoningTokens !== undefined && { reasoningTokens: usage.reasoningTokens }),
+            } } : {}),
             ...(sessionMeta ? { meta: sessionMeta } : {}),
           };
           persistRecords(key, [record]);
