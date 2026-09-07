@@ -648,12 +648,116 @@ app.command(slashCommand, async ({ command, ack, respond, client }) => {
   // 3. Status
   if (text === 'status') {
     const activeList = Array.from(inFlight.keys());
-    const statusMsg = [
+
+    let configuredModel = process.env.LIBRA_MODEL || process.env.MODEL || '(default)';
+    let maxContextMessages = process.env.LIBRA_MAX_CONTEXT_MESSAGES ? parseInt(process.env.LIBRA_MAX_CONTEXT_MESSAGES, 10) : 100;
+    try {
+      const cfgPath = join(libraHome, 'config.json');
+      if (existsSync(cfgPath)) {
+        const cfg = JSON.parse(readFileSync(cfgPath, 'utf-8'));
+        if (cfg.model) configuredModel = cfg.model;
+        if (cfg.maxContextMessages) maxContextMessages = Number(cfg.maxContextMessages);
+      }
+    } catch {}
+
+    const statusLines = [
       `*Slack-Libra-Code Status*`,
-      `• Active Turns: ${activeList.length ? activeList.join(', ') : 'None (idle)'}`,
+      `• Active Turns: ${activeList.length ? activeList.map((k) => `\`${k}\``).join(', ') : 'None (idle)'}`,
       `• Target CWD: \`${lcCwd}\``,
-    ].join('\n');
-    await respond({ text: statusMsg, response_type: 'ephemeral' });
+      `• Model: \`${configuredModel}\``,
+    ];
+
+    const safeKey = sessionKey.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const altKey = sessionKeyFor(channelId, command.thread_ts).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const possiblePaths = [
+      join(libraHome, 'sessions', `${sessionKey}.jsonl`),
+      join(libraHome, 'sessions', `${safeKey}.jsonl`),
+      join(libraHome, 'sessions', `${altKey}.jsonl`),
+    ];
+    const sessionFile = possiblePaths.find((p) => existsSync(p));
+
+    statusLines.push('');
+    statusLines.push(`*Context Window & Token Stats*`);
+
+    if (sessionFile) {
+      const lines = readFileSync(sessionFile, 'utf-8').split('\n').filter((l) => l.trim());
+      let messageCount = 0;
+      let isCompacted = false;
+      let compactedCycles = 0;
+      let lastPromptTokens: number | undefined;
+      let lastCachedTokens: number | undefined;
+      let lastCompletionTokens: number | undefined;
+      let lastReasoningTokens: number | undefined;
+      let totalPromptTokens = 0;
+      let totalCachedTokens = 0;
+      let totalCompletionTokens = 0;
+      let turnsCount = 0;
+
+      for (const line of lines) {
+        try {
+          const rec = JSON.parse(line);
+          if (rec.role !== 'control') {
+            messageCount++;
+          }
+          if (rec.role === 'assistant') {
+            turnsCount++;
+            const contentStr = typeof rec.content === 'string' ? rec.content : '';
+            if (contentStr.startsWith('[Session summary') || contentStr.startsWith('[Conversation summary')) {
+              isCompacted = true;
+              compactedCycles++;
+            }
+            if (rec.usage) {
+              lastPromptTokens = rec.usage.promptTokens;
+              lastCachedTokens = rec.usage.cachedPromptTokens;
+              lastCompletionTokens = rec.usage.completionTokens;
+              lastReasoningTokens = rec.usage.reasoningTokens;
+
+              totalPromptTokens += rec.usage.promptTokens || 0;
+              totalCachedTokens += rec.usage.cachedPromptTokens || 0;
+              totalCompletionTokens += rec.usage.completionTokens || 0;
+            }
+          }
+        } catch {}
+      }
+
+      const pct = Math.min(100, Math.round((messageCount / maxContextMessages) * 100));
+      statusLines.push(`• Context Messages: *${messageCount}* / ${maxContextMessages} (${pct}% of limit)`);
+
+      if (isCompacted) {
+        statusLines.push(`• Compaction: *Active* (${compactedCycles} auto-summarization cycle${compactedCycles > 1 ? 's' : ''} completed)`);
+      } else if (messageCount >= maxContextMessages) {
+        statusLines.push(`• Compaction: *At threshold* (auto-summarization next turn)`);
+      } else {
+        statusLines.push(`• Compaction: *Standard* (${maxContextMessages - messageCount} message${maxContextMessages - messageCount === 1 ? '' : 's'} remaining)`);
+      }
+
+      if (lastPromptTokens !== undefined) {
+        if (lastCachedTokens && lastCachedTokens > 0) {
+          const cachePct = ((lastCachedTokens / lastPromptTokens) * 100).toFixed(1);
+          statusLines.push(`• Last Turn Context: *${lastPromptTokens.toLocaleString()}* prompt tokens (*${lastCachedTokens.toLocaleString()}* cached, *${cachePct}%* cache hit rate)`);
+        } else {
+          statusLines.push(`• Last Turn Context: *${lastPromptTokens.toLocaleString()}* prompt tokens (no cache hit)`);
+        }
+      }
+
+      if (lastCompletionTokens !== undefined) {
+        const reasoning = lastReasoningTokens ? ` (${lastReasoningTokens.toLocaleString()} thinking)` : '';
+        statusLines.push(`• Last Turn Output: *${lastCompletionTokens.toLocaleString()}* completion tokens${reasoning}`);
+      }
+
+      if (turnsCount > 0) {
+        const overallCachePct = totalPromptTokens > 0
+          ? ((totalCachedTokens / totalPromptTokens) * 100).toFixed(1)
+          : '0.0';
+        statusLines.push(`• Session Totals (${turnsCount} turn${turnsCount > 1 ? 's' : ''}): *${totalPromptTokens.toLocaleString()}* prompt (*${overallCachePct}%* cached), *${totalCompletionTokens.toLocaleString()}* completion`);
+      }
+    } else {
+      statusLines.push(`• Context Messages: *0* / ${maxContextMessages} (fresh session)`);
+      statusLines.push(`• Compaction: *Standard* (no compaction needed)`);
+      statusLines.push(`• Tokens: No turns recorded yet in this session.`);
+    }
+
+    await respond({ text: statusLines.join('\n'), response_type: 'ephemeral' });
     return;
   }
 
