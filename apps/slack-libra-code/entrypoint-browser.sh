@@ -63,11 +63,14 @@ if [ "${VNC_ENABLED:-true}" = "true" ]; then
   fi
 fi
 
+# Proxy Chrome CDP (which binds to 127.0.0.1 in headed mode) to 0.0.0.0
+socat TCP-LISTEN:${CHROME_DEBUG_PORT:-18800},fork,bind=0.0.0.0 TCP:127.0.0.1:18801 &
+
 # Start headed Chrome on :99 with persistent profile and remote debugging
 touch /tmp/chrome.log
 google-chrome-stable \
-  --remote-debugging-port=${CHROME_DEBUG_PORT:-18800} \
-  --remote-debugging-address=0.0.0.0 \
+  --remote-debugging-port=18801 \
+  --remote-allow-origins=* \
   --user-data-dir="$CHROME_PROFILE_DIR" \
   --no-first-run \
   --no-default-browser-check \

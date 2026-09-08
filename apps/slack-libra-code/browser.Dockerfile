@@ -25,6 +25,7 @@ RUN apt-get update \
     scrot \
     xterm \
     menu \
+    socat \
   && rm -rf /var/lib/apt/lists/* \
   && mkdir -p /tmp/.X11-unix \
   && chmod 1777 /tmp/.X11-unix
