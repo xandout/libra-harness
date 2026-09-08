@@ -54,6 +54,9 @@ RUN apt-get update \
     ghostscript \
     imagemagick \
     postgresql-client \
+    python3 \
+    python3-pip \
+    python3-venv \
   && rm -rf /var/lib/apt/lists/* \
   && ln -s /usr/bin/fdfind /usr/local/bin/fd
 
