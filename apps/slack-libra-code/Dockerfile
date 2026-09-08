@@ -60,6 +60,13 @@ RUN apt-get update \
     curl \
     postgresql-client \
     python3-xdg \
+    xdg-utils \
+    dbus-x11 \
+    x11-utils \
+    x11-xserver-utils \
+    xautomation \
+    xinput \
+    scrot \
     fd-find \
     ripgrep \
   && rm -rf /var/lib/apt/lists/* \

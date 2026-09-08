@@ -28,6 +28,11 @@ if ! pgrep -x "Xvfb" >/dev/null; then
   export DISPLAY=:99
 fi
 
+# Start DBUS if not running (critical for XDG and many GUI apps)
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+  eval $(dbus-launch --sh-syntax)
+fi
+
 if ! pgrep -x "openbox" >/dev/null; then
   openbox &
 fi
