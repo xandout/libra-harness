@@ -72,102 +72,47 @@ export class ShellRegistry {
   ): Promise<ShellEntry> {
     const id = this.nextId();
     const shellsDir = this.shellsDir;
+    mkdirSync(shellsDir, { recursive: true });
 
-    if (background) {
-      mkdirSync(shellsDir, { recursive: true });
-      const outputFile = join(shellsDir, `${id}.output`);
-      const exitFile = join(shellsDir, `${id}.exit`);
-      const inputFifo = join(shellsDir, `${id}.in`);
-      const metaFile = this.metaPath(id);
+    const outputFile = join(shellsDir, `${id}.output`);
+    const exitFile = join(shellsDir, `${id}.exit`);
+    const inputFifo = join(shellsDir, `${id}.in`);
+    const metaFile = this.metaPath(id);
 
-      writeFileSync(outputFile, '');
+    writeFileSync(outputFile, '');
 
-      try {
-        if (existsSync(inputFifo)) unlinkSync(inputFifo);
-        execFileSync('mkfifo', [inputFifo], { stdio: 'ignore' });
-      } catch {}
+    try {
+      if (existsSync(inputFifo)) unlinkSync(inputFifo);
+      execFileSync('mkfifo', [inputFifo], { stdio: 'ignore' });
+    } catch {}
 
-      // Locate the wrapper script next to this module.
-      const wrapperPath = join(dirname(fileURLToPath(import.meta.url)), 'task-wrapper.sh');
+    // Always use the wrapper script — it handles stdin (fifo or /dev/null),
+    // captures exit code to file, fires the lc callback on exit, and writes
+    // output to the output file. No inline shell strings, no escaping bugs.
+    const wrapperPath = join(dirname(fileURLToPath(import.meta.url)), 'task-wrapper.sh');
 
-      // Spawn the wrapper script — it handles stdin (fifo or /dev/null),
-      // captures exit code, and fires the lc callback on exit. Output goes
-      // to the output file via fd redirection; nothing is lost.
-      const outFd = openSync(outputFile, 'a');
-      const nullFd = openSync('/dev/null', 'r');
+    const outFd = openSync(outputFile, 'a');
+    const nullFd = openSync('/dev/null', 'r');
 
-      const child = spawn(wrapperPath, [], {
-        cwd,
-        env: {
-          ...process.env,
-          ...env,
-          TASK_ID: id,
-          TASK_EXIT_FILE: exitFile,
-          TASK_OUTPUT: outputFile,
-          TASK_INPUT_FIFO: existsSync(inputFifo) ? inputFifo : '',
-          TASK_COMMAND: command,
-          LC_BIN: this.callback?.lcBin ?? '',
-          LC_SESSION: this.callback?.sessionKey ?? '',
-        },
-        stdio: [nullFd, outFd, outFd],
-        detached: true,
-      });
-
-      closeSync(outFd);
-      try { closeSync(nullFd); } catch {}
-
-      const entry: ShellEntry = {
-        id,
-        process: child,
-        pid: child.pid ?? -1,
-        output: '',
-        done: false,
-        exitCode: null,
-        startedAt: Date.now(),
-        command,
-        cwd,
-        outputFile,
-        inputFifo: existsSync(inputFifo) ? inputFifo : undefined,
-        detached: true,
-        readOffset: 0,
-      };
-
-      child.on('exit', (code) => {
-        entry.done = true;
-        entry.exitCode = code;
-        if (this.onTaskComplete) {
-          let finalOutput = '';
-          if (entry.outputFile && existsSync(entry.outputFile)) {
-            try { finalOutput = readFileSync(entry.outputFile, 'utf-8'); } catch {}
-          }
-          this.onTaskComplete(entry.id, code ?? 0, finalOutput);
-        }
-      });
-
-      child.unref();
-
-      const meta: ShellMeta = {
-        id,
-        pid: child.pid ?? -1,
-        command,
-        cwd,
-        startedAt: entry.startedAt,
-        outputFile,
-        inputFifo,
-      };
-      try { writeFileSync(metaFile, JSON.stringify(meta, null, 2)); } catch {}
-
-      this.shells.set(id, entry);
-      return entry;
-    }
-
-    // ── Foreground: direct in-memory pipes, parent owns the process ──
-    const child = spawn(command, {
-      shell: '/bin/bash',
+    const child = spawn(wrapperPath, [], {
       cwd,
-      env: { ...process.env, ...env },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        ...env,
+        TASK_ID: id,
+        TASK_EXIT_FILE: exitFile,
+        TASK_OUTPUT: outputFile,
+        TASK_INPUT_FIFO: existsSync(inputFifo) ? inputFifo : '',
+        TASK_COMMAND: command,
+        LC_BIN: this.callback?.lcBin ?? '',
+        LC_SESSION: this.callback?.sessionKey ?? '',
+      },
+      stdio: [nullFd, outFd, outFd],
+      detached: background,
     });
+
+    closeSync(outFd);
+    try { closeSync(nullFd); } catch {}
 
     const entry: ShellEntry = {
       id,
@@ -179,24 +124,44 @@ export class ShellRegistry {
       startedAt: Date.now(),
       command,
       cwd,
-      detached: false,
+      outputFile,
+      inputFifo: existsSync(inputFifo) ? inputFifo : undefined,
+      detached: background,
+      readOffset: 0,
     };
 
-    child.stdout?.on('data', (data) => {
-      entry.output += data.toString();
-    });
-    child.stderr?.on('data', (data) => {
-      entry.output += data.toString();
-    });
     child.on('exit', (code) => {
       entry.done = true;
       entry.exitCode = code;
+      // Read final output from file.
+      if (entry.outputFile && existsSync(entry.outputFile)) {
+        try { entry.output = readFileSync(entry.outputFile, 'utf-8'); } catch {}
+      }
+      if (this.onTaskComplete) {
+        this.onTaskComplete(entry.id, code ?? 0, entry.output);
+      }
     });
+
     child.on('error', (err) => {
-      entry.output += `\nError: ${err.message}\n`;
       entry.done = true;
       entry.exitCode = -1;
+      entry.output = `Error: ${err.message}\n`;
     });
+
+    if (background) {
+      child.unref();
+    }
+
+    const meta: ShellMeta = {
+      id,
+      pid: child.pid ?? -1,
+      command,
+      cwd,
+      startedAt: entry.startedAt,
+      outputFile,
+      inputFifo,
+    };
+    try { writeFileSync(metaFile, JSON.stringify(meta, null, 2)); } catch {}
 
     this.shells.set(id, entry);
     return entry;
@@ -369,6 +334,7 @@ export const runCommandTool: ShellToolFactory = (cfg) => ({
       return { toolCallId: '', content: 'Error: CommandLine is required' };
     }
 
+    // Daemons and zero-wait commands go straight to background.
     if (isDaemon || waitMs <= 0) {
       const entry = await cfg.registry.create(command, cwd, {}, true);
       return {
@@ -377,10 +343,9 @@ export const runCommandTool: ShellToolFactory = (cfg) => ({
       };
     }
 
-    // Foreground execution with direct pipes
+    // Foreground: spawn via wrapper, wait up to waitMs for exit.
     const entry = await cfg.registry.create(command, cwd, {}, false);
 
-    // Wait up to waitMs
     const start = Date.now();
     while (!entry.done && (Date.now() - start) < waitMs) {
       await new Promise((r) => setTimeout(r, 50));
@@ -388,7 +353,7 @@ export const runCommandTool: ShellToolFactory = (cfg) => ({
 
     if (entry.done) {
       cfg.registry.delete(entry.id);
-      const output = entry.output;
+      const output = entry.output || (entry.outputFile && existsSync(entry.outputFile) ? readFileSync(entry.outputFile, 'utf-8') : '');
       const truncated = output.length > 50000 ? output.slice(0, 50000) + '\n[output truncated]' : output;
       return {
         toolCallId: '',
@@ -396,7 +361,10 @@ export const runCommandTool: ShellToolFactory = (cfg) => ({
       };
     }
 
-    // Didn't finish in time, report backgrounded
+    // Didn't finish in time — unref so lc can exit. The wrapper will fire
+    // the lc callback when the command exits.
+    entry.detached = true;
+    if (entry.process) entry.process.unref();
     return {
       toolCallId: '',
       content: `Command still running after ${waitMs}ms. Sent to background. Task ID: ${entry.id}`,
