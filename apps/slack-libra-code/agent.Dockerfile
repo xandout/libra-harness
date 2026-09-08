@@ -47,6 +47,12 @@ RUN apt-get update \
     curl \
     fd-find \
     ripgrep \
+    poppler-utils \
+    poppler-data \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    ghostscript \
+    imagemagick \
   && rm -rf /var/lib/apt/lists/* \
   && ln -s /usr/bin/fdfind /usr/local/bin/fd
 

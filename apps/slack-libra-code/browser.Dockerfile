@@ -5,12 +5,6 @@ USER root
 # Install system utilities, imaging, OCR, and X11 tools
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
-    poppler-utils \
-    poppler-data \
-    tesseract-ocr \
-    tesseract-ocr-eng \
-    ghostscript \
-    imagemagick \
     tini \
     xvfb \
     xdotool \
