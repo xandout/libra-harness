@@ -24,6 +24,10 @@ export function renderAxTree(nodes: any[], maxDepth = 8): string {
     const desc = node.description?.value ? String(node.description.value).trim() : '';
     const isIgnored = node.ignored === true;
     const backendDOMNodeId = node.backendDOMNodeId;
+    const properties = node.properties || [];
+
+    const urlProp = properties.find((p: any) => p.name === 'url');
+    const href = urlProp?.value?.value || '';
 
     const childIds = node.childIds || [];
 
@@ -35,19 +39,16 @@ export function renderAxTree(nodes: any[], maxDepth = 8): string {
       let line = `${indent}- ${role}`;
 
       if (name) {
-        const cleanName = name.replace(/\s+/g, ' ');
-        const truncated = cleanName.length > 90 ? cleanName.slice(0, 87) + '...' : cleanName;
-        line += ` "${truncated}"`;
+        line += ` "${name.replace(/\s+/g, ' ')}"`;
       }
       if (value) {
-        const cleanVal = value.replace(/\s+/g, ' ');
-        const truncated = cleanVal.length > 50 ? cleanVal.slice(0, 47) + '...' : cleanVal;
-        line += ` [value: "${truncated}"]`;
+        line += ` [value: "${value.replace(/\s+/g, ' ')}"]`;
       }
       if (desc && desc !== name) {
-        const cleanDesc = desc.replace(/\s+/g, ' ');
-        const truncated = cleanDesc.length > 50 ? cleanDesc.slice(0, 47) + '...' : cleanDesc;
-        line += ` (${truncated})`;
+        line += ` (${desc.replace(/\s+/g, ' ')})`;
+      }
+      if (href && href !== name) {
+        line += ` [href: ${href}]`;
       }
 
       const isInteractive = INTERACTIVE_ROLES.has(role) || (name && ['button', 'link'].includes(role));
@@ -116,16 +117,29 @@ export async function extractDomSemanticTree(client: CdpClient, maxDepth = 8): P
       const name = getAccessibleName(node);
       const isInteractive = INTERACTIVE.has(tag) || node.hasAttribute('onclick') || node.getAttribute('role') === 'button';
 
-      if (role || isInteractive || (name && name.length < 100)) {
+      if (role || isInteractive || name) {
         const indent = '  '.repeat(depth);
         let line = \`\${indent}- \${role || tag}\`;
+        
         if (name) {
-          const truncated = name.length > 80 ? name.slice(0, 77) + '...' : name;
-          line += \` "\${truncated}"\`;
+          line += \` "\${name}"\`;
         }
         if (node.value && tag === 'input' && !['submit', 'button'].includes(node.type)) {
           line += \` [value: "\${node.value}"]\`;
         }
+        if (node.href) {
+          let href = node.getAttribute('href');
+          if (href && !href.startsWith('javascript:')) {
+            line += \` [href: \${href}]\`;
+          }
+        }
+        if (node.tagName === 'IMG' && node.getAttribute('alt')) {
+          line += \` [alt: "\${node.getAttribute('alt')}"]\`;
+        }
+        if (node.tagName === 'IMG' && node.getAttribute('src')) {
+          line += \` [src: \${node.getAttribute('src')}]\`;
+        }
+
         if (isInteractive) {
           refCounter++;
           line += \` [@\${refCounter}]\`;
