@@ -15,5 +15,5 @@
     "noUnusedParameters": true,
     "types": ["node"]
   },
-  "include": ["index.tsx", "tui.tsx", "agent-setup.ts", "turn-journal.ts", "file-change-tracker.ts", "session-stats.ts"]
+  "include": ["src/cdp/**/*", "index.tsx", "tui.tsx", "agent-setup.ts", "turn-journal.ts", "file-change-tracker.ts", "session-stats.ts"]
 }
