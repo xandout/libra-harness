@@ -67,6 +67,8 @@ RUN apt-get update \
     xautomation \
     xinput \
     scrot \
+    xterm \
+    menu \
     fd-find \
     ripgrep \
   && rm -rf /var/lib/apt/lists/* \

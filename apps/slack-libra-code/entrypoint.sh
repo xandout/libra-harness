@@ -33,6 +33,30 @@ if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
   eval $(dbus-launch --sh-syntax)
 fi
 
+# Generate a convenient Openbox menu for debugging/VNC
+mkdir -p "$HOME/.config/openbox"
+cat << 'EOF' > "$HOME/.config/openbox/menu.xml"
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_menu xmlns="http://openbox.org/3.4/menu">
+  <menu id="root-menu" label="Openbox">
+    <item label="Terminal (xterm)">
+      <action name="Execute">
+        <command>xterm</command>
+      </action>
+    </item>
+    <item label="Google Chrome">
+      <action name="Execute">
+        <command>google-chrome --no-sandbox</command>
+      </action>
+    </item>
+    <separator />
+    <item label="Reconfigure">
+      <action name="Reconfigure" />
+    </item>
+  </menu>
+</openbox_menu>
+EOF
+
 if ! pgrep -x "openbox" >/dev/null; then
   openbox &
 fi
