@@ -1044,7 +1044,7 @@ Tab Management:
         }
       })()`);
       
-      console.log(\`Selected all text\${target ? ' in ' + target : ''}\`);
+      console.log(`Selected all text${target ? ' in ' + target : ''}`);
 
     } else if (cmd === 'scroll') {
       const dir = args[1] === 'up' ? -1 : 1;
