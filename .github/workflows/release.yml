@@ -67,3 +67,19 @@ jobs:
           pnpm publish --access public --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Pack tarballs
+        run: |
+          pnpm pack
+          cd packages/libra-code
+          pnpm pack
+          mv *.tgz ../..
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: v${{ env.VERSION }}
+          files: |
+            *.tgz
+          generate_release_notes: true
