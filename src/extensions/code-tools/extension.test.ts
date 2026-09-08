@@ -678,10 +678,20 @@ describe('code-tools extension', () => {
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
 
+      const lifecycleFile = join(shellsDir, `${taskId}.output.lifecycle`);
+      for (let i = 0; i < 20 && (!existsSync(lifecycleFile) || !readFileSync(lifecycleFile, 'utf-8').includes('callback-exited')); i++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
       expect(readFileSync(join(shellsDir, `${taskId}.output`), 'utf-8')).toContain('finished');
       const callback = readFileSync(callbackFile, 'utf-8');
       expect(callback).toContain(`--session slack-session FYI: Background task ${taskId} finished`);
       expect(callback).toContain('send it with slack-post');
+      const lifecycle = readFileSync(lifecycleFile, 'utf-8');
+      expect(lifecycle).toMatch(/^\[\d{4}-\d{2}-\d{2}T.*Z\] \[shell\]/m);
+      expect(lifecycle).toContain('command-exited code=0');
+      expect(lifecycle).toContain('callback-started pid=');
+      expect(lifecycle).toContain('callback-exited');
     });
 
     it('handles run_command and manage_task error conditions', async () => {

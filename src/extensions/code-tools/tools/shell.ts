@@ -45,6 +45,12 @@ export interface ShellCallbackConfig {
   sessionKey: string;
 }
 
+function logShellEvent(entry: ShellEntry, message: string): void {
+  const line = `[${new Date().toISOString()}] [shell] task=${entry.id} ${message}\n`;
+  if (entry.outputFile) appendFileSync(`${entry.outputFile}.lifecycle`, line);
+  process.stderr.write(line);
+}
+
 export class ShellRegistry {
   private shells = new Map<string, ShellEntry>();
   private counter = 0;
@@ -348,6 +354,7 @@ export const runCommandTool: ShellToolFactory = (cfg) => ({
     // Daemons and zero-wait commands go straight to background.
     if (isDaemon || waitMs <= 0) {
       const entry = await cfg.registry.create(command, cwd, {}, true, sessionId);
+      logShellEvent(entry, `backgrounded-immediately session=${sessionId ?? 'default'}`);
       return {
         toolCallId: '',
         content: `Command sent to background. Task ID: ${entry.id}`,
@@ -377,6 +384,7 @@ export const runCommandTool: ShellToolFactory = (cfg) => ({
     entry.detached = true;
     if (entry.notifyFile) writeFileSync(entry.notifyFile, '');
     if (entry.process) entry.process.unref();
+    logShellEvent(entry, `backgrounded-after timeoutMs=${waitMs} session=${sessionId ?? 'default'}`);
     return {
       toolCallId: '',
       content: `Command still running after ${waitMs}ms. Sent to background. Task ID: ${entry.id}`,

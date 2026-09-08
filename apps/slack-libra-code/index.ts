@@ -5,6 +5,33 @@ import net from 'node:net';
 import { App } from '@slack/bolt';
 import type { WebClient } from '@slack/web-api';
 
+const timestamp = () => new Date().toISOString();
+const originalConsole = {
+  log: console.log.bind(console),
+  warn: console.warn.bind(console),
+  error: console.error.bind(console),
+};
+console.log = (...args: unknown[]) => originalConsole.log(`[${timestamp()}]`, ...args);
+console.warn = (...args: unknown[]) => originalConsole.warn(`[${timestamp()}]`, ...args);
+console.error = (...args: unknown[]) => originalConsole.error(`[${timestamp()}]`, ...args);
+
+function createTimestampedWriter(write: (text: string) => void): (text: string) => void {
+  let lineStart = true;
+  return (text) => {
+    let output = '';
+    for (const part of text.split(/(?<=\n)/)) {
+      if (!part) continue;
+      if (lineStart && !/^\[\d{4}-\d{2}-\d{2}T/.test(part)) output += `[${timestamp()}] `;
+      output += part;
+      lineStart = part.endsWith('\n');
+    }
+    write(output);
+  };
+}
+
+const writeLcStdout = createTimestampedWriter((text) => process.stdout.write(text));
+const writeLcStderr = createTimestampedWriter((text) => process.stderr.write(text));
+
 // ── Load .env ────────────────────────────────────────────────────────
 function loadEnv(): void {
   const envPaths = [
@@ -369,7 +396,7 @@ async function executeLc(
     proc.stdout?.on('data', (data) => {
       const text = data.toString();
       stdout += text;
-      process.stdout.write(text);
+      writeLcStdout(text);
 
       stdoutBuffer += text;
       const lines = stdoutBuffer.split('\n');
@@ -392,7 +419,7 @@ async function executeLc(
     proc.stderr?.on('data', (data) => {
       const text = data.toString();
       stderr += text;
-      process.stderr.write(text);
+      writeLcStderr(text);
       if (onProgress) {
         const lines = text.split('\n');
         for (const line of lines) {
