@@ -10,8 +10,7 @@ export async function typeCommand(client: CdpClient, args: string[]) {
   await new Promise((r) => setTimeout(r, 50));
   for (const char of text) {
     await client.send('Input.dispatchKeyEvent', { type: 'keyDown', text: char });
-    await client.send('Input.dispatchKeyEvent', { type: 'char', text: char });
-    await client.send('Input.dispatchKeyEvent', { type: 'keyUp', text: char });
+    await client.send('Input.dispatchKeyEvent', { type: 'keyUp' });
     await new Promise((r) => setTimeout(r, 10));
   }
   const info = point.ref ? `[@${point.ref} ${point.matchedRole || point.tagName}]` : `[${point.tagName}${point.id ? '#' + point.id : ''}]`;
