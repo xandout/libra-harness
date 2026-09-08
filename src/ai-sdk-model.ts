@@ -100,11 +100,20 @@ export class AISdkModel implements Model {
           ...toAISdkContent(message.content),
         ];
         for (const toolCall of message.toolCalls ?? []) {
+          let parsedArgs = {};
+          if (toolCall.arguments) {
+            try {
+              parsedArgs = JSON.parse(toolCall.arguments);
+            } catch (err) {
+              // Gracefully handle malformed historical tool calls
+              console.error(`[ai-sdk-model] Failed to parse toolCall arguments for ${toolCall.name}:`, err);
+            }
+          }
           content.push({
             type: 'tool-call',
             toolCallId: toolCall.id,
             toolName: toolCall.name,
-            input: toolCall.arguments ? JSON.parse(toolCall.arguments) : {},
+            input: parsedArgs,
           });
         }
         return { role: 'assistant', content };
