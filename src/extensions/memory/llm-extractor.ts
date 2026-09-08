@@ -1,6 +1,7 @@
 import type { Model } from '../../model.js';
 import { messageContentToText } from '../../types.js';
 import type { MemoryExtractor, ExtractedMemory, ExtractorInput } from './types.js';
+import { parsePartialJson } from 'ai';
 
 /**
  * Configuration for the LLM-based memory extractor.
@@ -105,14 +106,10 @@ Return only the JSON array, no other text.`;
         return [];
       }
 
-      try {
-        const parsed = JSON.parse(messageContentToText(response.message.content));
-        if (!Array.isArray(parsed)) return [];
-        return parsed as ExtractedMemory[];
-      } catch {
-        // Malformed JSON — skip extraction.
-        return [];
-      }
+      const result = await parsePartialJson(messageContentToText(response.message.content));
+      if (result.state !== 'successful-parse' && result.state !== 'repaired-parse') return [];
+      if (!Array.isArray(result.value)) return [];
+      return result.value as unknown as ExtractedMemory[];
     },
   };
 }

@@ -1832,7 +1832,7 @@ describe('24. Agent edge cases for coverage', () => {
 
   it('returns error result when tool arguments are invalid JSON', async () => {
     const model = new MockModel([
-      toolCallResponse([{ id: 'tc1', name: 'my_tool', arguments: '{invalid json' }]),
+      toolCallResponse([{ id: 'tc1', name: 'my_tool', arguments: '}{' }]),
       textResponse('ok'),
     ]);
     const agent = new Agent({

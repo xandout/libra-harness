@@ -11,7 +11,7 @@ import type {
   LanguageModelV4Usage,
   LanguageModelV4StreamPart,
 } from '@ai-sdk/provider';
-import { parsePartialJson, smoothStream } from 'ai';
+import { parsePartialJson } from 'ai';
 import type { Model, ModelRequest, ModelResponse, FinishReason } from './model.js';
 import {
   messageContentToText,
@@ -57,49 +57,15 @@ export class AISdkModel implements Model {
     const { stream } = await this.model.doStream(callOptions);
     const state = new StreamState(onDelta);
 
-    // smoothStream expects { type, text, id } shaped chunks; our text-delta
-    // parts use `delta` instead of `text`. We adapt, pipe through the smoother
-    // for word-by-word pacing, then restore. Non-text parts bypass entirely.
-    // smoothStream() returns a middleware fn; calling it with {tools:{}} yields the TransformStream.
-    const smoother: TransformStream<any, any> = smoothStream()({ tools: {} } as any);
-    const smoothWriter = smoother.writable.getWriter();
-    const smoothReader = smoother.readable.getReader();
-
     const reader = stream.getReader();
     try {
-      // Pump: read raw parts, feed text-delta through smoother, process rest directly.
-      const pump = async () => {
-        while (true) {
-          const { done, value: part } = await reader.read();
-          if (done) {
-            await smoothWriter.close();
-            break;
-          }
-          if (part.type === 'text-delta') {
-            // Adapt to smoothStream's expected shape, then drain.
-            await smoothWriter.write({ type: 'text', text: part.delta, id: part.id } as any);
-            // Drain any buffered smooth chunks immediately.
-            while (true) {
-              const { done: sdone, value: schunk } = await smoothReader.read().catch(() => ({ done: true, value: undefined }));
-              if (sdone || !schunk) break;
-              // Restore to our text-delta shape.
-              state.processPart({ type: 'text-delta', id: (schunk as any).id ?? part.id, delta: (schunk as any).text ?? '' });
-            }
-          } else {
-            state.processPart(part);
-          }
-        }
-        // Drain any remaining smooth output after stream ends.
-        while (true) {
-          const { done: sdone, value: schunk } = await smoothReader.read().catch(() => ({ done: true, value: undefined }));
-          if (sdone || !schunk) break;
-          state.processPart({ type: 'text-delta', id: (schunk as any).id ?? '', delta: (schunk as any).text ?? '' });
-        }
-      };
-      await pump();
+      while (true) {
+        const { done, value: part } = await reader.read();
+        if (done) break;
+        state.processPart(part);
+      }
     } finally {
       reader.releaseLock();
-      smoothReader.releaseLock();
     }
 
     return state.finalize();
@@ -142,14 +108,11 @@ export class AISdkModel implements Model {
             let parsedArgs: any = {};
             if (toolCall.arguments) {
               const parsed = await parsePartialJson(toolCall.arguments);
+              // parsePartialJson is strictly more lenient than JSON.parse, so a
+              // `failed-parse` here means the input is genuinely unparseable —
+              // default to an empty object rather than retrying with JSON.parse.
               if (parsed.state === 'successful-parse' || parsed.state === 'repaired-parse') {
                 parsedArgs = parsed.value ?? {};
-              } else {
-                try {
-                  parsedArgs = JSON.parse(toolCall.arguments);
-                } catch {
-                  parsedArgs = {};
-                }
               }
             }
             content.push({

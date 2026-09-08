@@ -12,6 +12,12 @@ import type { ModelDelta } from '../../model.js';
  *
  * When no `streamCallbacks` are in metadata, the extension is a no-op
  * and the model uses `doGenerate` (no streaming overhead).
+ *
+ * The core model adapter forwards raw provider deltas directly — this is
+ * stable and matches Vercel's default streaming behavior. Word-by-word
+ * smoothing (Vercel's `smoothStream`) is an optional display concern that
+ * could be layered here via a buffering transform if pacing is ever
+ * needed; it is intentionally not in the core adapter.
  */
 export default function createStreamingExtension(): Extension {
   return {

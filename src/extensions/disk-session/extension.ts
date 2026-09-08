@@ -383,12 +383,21 @@ export default function createDiskSessionExtension(
         try {
           const raw = readFileSync(join(dir, file), 'utf-8');
           const lines = raw.split('\n').filter((l) => l.trim());
-          const records = lines.map((l) => JSON.parse(l) as SessionRecord);
+          // Parse per-line so a single corrupt record doesn't discard the
+          // entire session file — bad lines are skipped, good ones kept.
+          const records: SessionRecord[] = [];
+          for (const line of lines) {
+            try {
+              records.push(JSON.parse(line) as SessionRecord);
+            } catch {
+              // Skip corrupt line, keep the rest of the session.
+            }
+          }
           const sessionKey = file.replace(/\.jsonl$/, '');
           store.set(sessionKey, records.slice(-maxRecords));
           totalRecords += records.length;
         } catch {
-          // Skip corrupt files.
+          // Skip unreadable files.
         }
       }
       if (store.size > 0 && config?.verbose !== false) {

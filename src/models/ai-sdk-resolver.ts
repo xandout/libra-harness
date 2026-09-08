@@ -74,9 +74,17 @@ export async function resolveModel(modelId: string, options: ResolveModelOptions
 
   // Lazy-load the provider and wrap it in a single-entry registry so we get
   // Vercel's provider resolution logic (middleware support, error messages, etc.)
+  // The wrapper declares `specificationVersion: 'v4'` so `asProviderV4` returns
+  // it as-is — without this, the registry wraps models in a v2-compat adapter
+  // that double-transforms usage (inputTokens.total becomes { total: <n> }).
   const providerFactory = await definition.load();
   const registry = createProviderRegistry(
-    { [providerId]: { languageModel: (id: string) => providerFactory(id) } as any },
+    {
+      [providerId]: {
+        specificationVersion: 'v4' as const,
+        languageModel: (id: string) => providerFactory(id),
+      } as any,
+    },
     { separator: '/' },
   );
 

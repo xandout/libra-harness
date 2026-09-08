@@ -8,6 +8,7 @@ import type { AgentRequest, AgentResponse, TurnContext } from './context.js';
 import { messageContentToText, type ToolCall, type ToolResult } from './types.js';
 import { HookError } from './errors.js';
 import type { RunHandle } from './handle.js';
+import { parsePartialJson } from 'ai';
 
 /**
  * Context passed to a custom {@link ErrorPolicy} function.
@@ -624,14 +625,19 @@ export class Agent {
     }
 
     let args: Record<string, unknown>;
-    try {
-      args = toolCall.arguments ? JSON.parse(toolCall.arguments) : {};
-    } catch {
-      return {
-        toolCallId: toolCall.id,
-        content: `Error: invalid JSON arguments: ${toolCall.arguments}`,
-        isError: true,
-      };
+    if (toolCall.arguments) {
+      const parsed = await parsePartialJson(toolCall.arguments);
+      if (parsed.state === 'successful-parse' || parsed.state === 'repaired-parse') {
+        args = (parsed.value ?? {}) as Record<string, unknown>;
+      } else {
+        return {
+          toolCallId: toolCall.id,
+          content: `Error: invalid JSON arguments: ${toolCall.arguments}`,
+          isError: true,
+        };
+      }
+    } else {
+      args = {};
     }
 
     const toolCtx: ToolContext = {
