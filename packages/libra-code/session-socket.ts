@@ -290,15 +290,18 @@ export function createSocketEventsExtension(): Extension {
         if (!ctx.toolCall) return;
 
         const parsed = (() => { try { return JSON.parse(ctx.toolCall.arguments); } catch { return {}; } })();
-        let file: string | undefined;
-        if (parsed.file_path) file = String(parsed.file_path);
-        else if (parsed.TargetFile) file = String(parsed.TargetFile);
-        else if (parsed.AbsolutePath) file = String(parsed.AbsolutePath);
-        else if (parsed.pattern) file = parsed.path ? `${parsed.pattern} in ${parsed.path}` : String(parsed.pattern);
-        else if (parsed.Pattern) file = parsed.SearchDirectory ? `${parsed.Pattern} in ${parsed.SearchDirectory}` : String(parsed.Pattern);
-        else if (parsed.command) file = String(parsed.command);
-        else if (parsed.CommandLine) file = String(parsed.CommandLine);
-        else if (parsed.Query) file = parsed.SearchPath ? `"${parsed.Query}" in ${parsed.SearchPath}` : `"${parsed.Query}"`;
+        
+        let file = '';
+        const args = Object.entries(parsed);
+        if (args.length > 0) {
+          file = args.map(([k, v]) => {
+            let valStr = typeof v === 'string' ? v : JSON.stringify(v);
+            if (!valStr) valStr = '';
+            // Strip newlines to keep logs strictly single-line
+            valStr = valStr.replace(/[\r\n]+/g, ' ');
+            return `${k}=${valStr.length > 40 ? valStr.slice(0, 37) + '...' : valStr}`;
+          }).join(', ');
+        }
 
         const label = file ? `${ctx.toolCall.name}(${file})` : ctx.toolCall.name;
         // Write to stderr so the Slack adapter (and any observer watching stderr) can parse
