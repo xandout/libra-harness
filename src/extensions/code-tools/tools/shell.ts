@@ -89,12 +89,13 @@ export class ShellRegistry {
     // Always use the wrapper script — it handles stdin (fifo or /dev/null),
     // captures exit code to file, fires the lc callback on exit, and writes
     // output to the output file. No inline shell strings, no escaping bugs.
+    // Spawn via `bash` so we don't depend on the execute bit (npm strips it).
     const wrapperPath = join(dirname(fileURLToPath(import.meta.url)), 'task-wrapper.sh');
 
     const outFd = openSync(outputFile, 'a');
     const nullFd = openSync('/dev/null', 'r');
 
-    const child = spawn(wrapperPath, [], {
+    const child = spawn('bash', [wrapperPath], {
       cwd,
       env: {
         ...process.env,
