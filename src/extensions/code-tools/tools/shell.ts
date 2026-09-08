@@ -68,7 +68,8 @@ export class ShellRegistry {
     command: string,
     cwd: string,
     env: Record<string, string>,
-    background: boolean = false
+    background = false,
+    callbackSessionKey?: string,
   ): Promise<ShellEntry> {
     const id = this.nextId();
     const shellsDir = this.shellsDir;
@@ -110,7 +111,7 @@ export class ShellRegistry {
         TASK_COMMAND: command,
         LC_BIN: this.callback?.lcBin ?? '',
         LC_ENTRY: this.callback?.lcEntry ?? '',
-        LC_SESSION: this.callback?.sessionKey ?? '',
+        LC_SESSION: callbackSessionKey ?? this.callback?.sessionKey ?? '',
       },
       stdio: [nullFd, outFd, outFd],
       detached: background,
@@ -331,13 +332,14 @@ export const runCommandTool: ShellToolFactory = (cfg) => ({
     },
     required: ['CommandLine'],
   },
-  async execute(args) {
+  async execute(args, ctx) {
     const command = String(args.CommandLine ?? args.command ?? '');
     const cwd = String(args.Cwd ?? args.cwd ?? process.cwd());
     const waitMs = args.WaitMsBeforeAsync !== undefined
       ? Number(args.WaitMsBeforeAsync)
       : (args.timeout !== undefined ? Number(args.timeout) : 30000);
     const isDaemon = args.IsDaemon === true;
+    const sessionId = typeof ctx.metadata.sessionId === 'string' ? ctx.metadata.sessionId : undefined;
 
     if (!command) {
       return { toolCallId: '', content: 'Error: CommandLine is required' };
@@ -345,7 +347,7 @@ export const runCommandTool: ShellToolFactory = (cfg) => ({
 
     // Daemons and zero-wait commands go straight to background.
     if (isDaemon || waitMs <= 0) {
-      const entry = await cfg.registry.create(command, cwd, {}, true);
+      const entry = await cfg.registry.create(command, cwd, {}, true, sessionId);
       return {
         toolCallId: '',
         content: `Command sent to background. Task ID: ${entry.id}`,
@@ -353,7 +355,7 @@ export const runCommandTool: ShellToolFactory = (cfg) => ({
     }
 
     // Foreground: spawn via wrapper, wait up to waitMs for exit.
-    const entry = await cfg.registry.create(command, cwd, {}, false);
+    const entry = await cfg.registry.create(command, cwd, {}, false, sessionId);
 
     const start = Date.now();
     while (!entry.done && (Date.now() - start) < waitMs) {

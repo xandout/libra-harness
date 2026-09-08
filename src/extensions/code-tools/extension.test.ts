@@ -670,7 +670,7 @@ describe('code-tools extension', () => {
 
       const result = await runTool.execute(
         { CommandLine: 'sleep 0.1; echo finished', Cwd: tmpDir, WaitMsBeforeAsync: 0 },
-        { signal: new AbortController().signal, metadata: {} },
+        { signal: new AbortController().signal, metadata: { sessionId: 'slack-session' } },
       );
       const taskId = result.content.match(/Task ID: (task_[\w-]+)/)![1];
 
@@ -679,7 +679,7 @@ describe('code-tools extension', () => {
       }
 
       expect(readFileSync(join(shellsDir, `${taskId}.output`), 'utf-8')).toContain('finished');
-      expect(readFileSync(callbackFile, 'utf-8')).toContain(`--session test-session FYI: Background task ${taskId} finished`);
+      expect(readFileSync(callbackFile, 'utf-8')).toContain(`--session slack-session FYI: Background task ${taskId} finished`);
     });
 
     it('handles run_command and manage_task error conditions', async () => {
