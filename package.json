@@ -38,29 +38,9 @@
       "types": "./dist/openai-provider/index.d.ts",
       "import": "./dist/openai-provider/index.js"
     },
-    "./extensions/logger": {
-      "types": "./dist/extensions/logger/index.d.ts",
-      "import": "./dist/extensions/logger/index.js"
-    },
     "./extensions/disk-session": {
       "types": "./dist/extensions/disk-session/index.d.ts",
       "import": "./dist/extensions/disk-session/index.js"
-    },
-    "./extensions/mem-session": {
-      "types": "./dist/extensions/mem-session/index.d.ts",
-      "import": "./dist/extensions/mem-session/index.js"
-    },
-    "./extensions/timestamp": {
-      "types": "./dist/extensions/timestamp/index.d.ts",
-      "import": "./dist/extensions/timestamp/index.js"
-    },
-    "./extensions/emoji": {
-      "types": "./dist/extensions/emoji/index.d.ts",
-      "import": "./dist/extensions/emoji/index.js"
-    },
-    "./extensions/weather-tool": {
-      "types": "./dist/extensions/weather-tool/index.d.ts",
-      "import": "./dist/extensions/weather-tool/index.js"
     },
     "./extensions/code-tools": {
       "types": "./dist/extensions/code-tools/index.d.ts",
@@ -70,45 +50,9 @@
       "types": "./dist/extensions/streaming/index.d.ts",
       "import": "./dist/extensions/streaming/index.js"
     },
-    "./extensions/structured-output": {
-      "types": "./dist/extensions/structured-output/index.d.ts",
-      "import": "./dist/extensions/structured-output/index.js"
-    },
-    "./extensions/mcp": {
-      "types": "./dist/extensions/mcp/index.d.ts",
-      "import": "./dist/extensions/mcp/index.js"
-    },
     "./extensions/skills": {
       "types": "./dist/extensions/skills/index.d.ts",
       "import": "./dist/extensions/skills/index.js"
-    },
-    "./extensions/auto-steer": {
-      "types": "./dist/extensions/auto-steer/index.d.ts",
-      "import": "./dist/extensions/auto-steer/index.js"
-    },
-    "./extensions/filesystem": {
-      "types": "./dist/extensions/filesystem/index.d.ts",
-      "import": "./dist/extensions/filesystem/index.js"
-    },
-    "./extensions/keyword-extractor": {
-      "types": "./dist/extensions/keyword-extractor/index.d.ts",
-      "import": "./dist/extensions/keyword-extractor/index.js"
-    },
-    "./extensions/otel": {
-      "types": "./dist/extensions/otel/index.d.ts",
-      "import": "./dist/extensions/otel/index.js"
-    },
-    "./extensions/tool-buffer": {
-      "types": "./dist/extensions/tool-buffer/index.d.ts",
-      "import": "./dist/extensions/tool-buffer/index.js"
-    },
-    "./extensions/token-stats": {
-      "types": "./dist/extensions/token-stats/index.d.ts",
-      "import": "./dist/extensions/token-stats/index.js"
-    },
-    "./extensions/scripts": {
-      "types": "./dist/extensions/scripts/index.d.ts",
-      "import": "./dist/extensions/scripts/index.js"
     },
     "./skills": {
       "types": "./dist/extensions/skills/index.d.ts",
@@ -125,14 +69,6 @@
     "./streaming": {
       "types": "./dist/extensions/streaming/index.d.ts",
       "import": "./dist/extensions/streaming/index.js"
-    },
-    "./mcp": {
-      "types": "./dist/extensions/mcp/index.d.ts",
-      "import": "./dist/extensions/mcp/index.js"
-    },
-    "./logger": {
-      "types": "./dist/extensions/logger/index.d.ts",
-      "import": "./dist/extensions/logger/index.js"
     }
   },
   "files": [
@@ -201,6 +137,7 @@
     "@ai-sdk/google": "^4.0.39",
     "@ai-sdk/openai": "^4.0.36",
     "@ai-sdk/provider": "^4.0.7",
+    "ai": "^7.0.84",
     "wink-eng-lite-web-model": "^1.8.1",
     "wink-nlp": "^2.4.0"
   }

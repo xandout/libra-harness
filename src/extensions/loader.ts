@@ -9,21 +9,21 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
  * Computed at runtime from `import.meta.url`, so it always resolves to
  * the correct location regardless of where libra is installed.
  *
- * Use with {@link loadExtensions} to load built-in extensions (logging,
- * session, timestamp, emoji, weather-tool, streaming, structured-output,
- * mcp, skills) alongside your own local extensions in a single call:
+ * Use with {@link loadExtensions} to load built-in extensions (disk-session,
+ * code-tools, streaming, skills) alongside your own local extensions in a
+ * single call:
  *
  * ```typescript
- * import { loadExtensions, sharedExtensionsDir } from '@xandout/libra-harness/extras';
+ * import { loadExtensions, sharedExtensionsDir } from '@xandout/libra-harness/extensions';
  *
  * const loaded = await loadExtensions(
  *   [sharedExtensionsDir, './extensions'],
- *   { skillsDirs: './skills', mcpConfigPaths: './mcpServers.json' },
+ *   { skillsDirs: './skills' },
  * );
  * ```
  *
  * For simpler cases, you can also import individual extensions directly:
- * `import { createLoggerExtension } from '@xandout/libra-harness/extras/logger'`.
+ * `import { createDiskSessionExtension } from '@xandout/libra-harness/extensions/disk-session'`.
  */
 export const sharedExtensionsDir = fileURLToPath(
   new URL('.', import.meta.url),
@@ -276,12 +276,12 @@ export type ExtensionInput = string | ExtensionFactory | Extension;
  *
  * @example
  * // Mix built-in factories with local directory discovery.
- * import { createLoggerExtension } from '@xandout/libra-harness/extras/logger';
- * import { createMcpExtension } from '@xandout/libra-harness/extras/mcp';
+ * import { createDiskSessionExtension } from '@xandout/libra-harness/extensions/disk-session';
+ * import { createStreamingExtension } from '@xandout/libra-harness/extensions/streaming';
  *
  * const loaded = await loadExtensions(
- *   [createLoggerExtension, createMcpExtension, './extensions'],
- *   { mcpConfigPaths: './mcpServers.json' },
+ *   [createDiskSessionExtension, createStreamingExtension, './extensions'],
+ *   { skillsDirs: './skills' },
  * );
  *
  * @example
