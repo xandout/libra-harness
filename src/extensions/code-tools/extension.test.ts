@@ -679,7 +679,9 @@ describe('code-tools extension', () => {
       }
 
       expect(readFileSync(join(shellsDir, `${taskId}.output`), 'utf-8')).toContain('finished');
-      expect(readFileSync(callbackFile, 'utf-8')).toContain(`--session slack-session FYI: Background task ${taskId} finished`);
+      const callback = readFileSync(callbackFile, 'utf-8');
+      expect(callback).toContain(`--session slack-session FYI: Background task ${taskId} finished`);
+      expect(callback).toContain('send it with slack-post');
     });
 
     it('handles run_command and manage_task error conditions', async () => {

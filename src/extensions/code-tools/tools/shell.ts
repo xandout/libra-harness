@@ -114,7 +114,7 @@ export class ShellRegistry {
         LC_SESSION: callbackSessionKey ?? this.callback?.sessionKey ?? '',
       },
       stdio: [nullFd, outFd, outFd],
-      detached: background,
+      detached: true,
     });
 
     closeSync(outFd);

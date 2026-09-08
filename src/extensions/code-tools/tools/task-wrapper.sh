@@ -43,11 +43,11 @@ if [ -e "$TASK_NOTIFY_FILE" ] && [ -n "$LC_BIN" ] && [ -n "$LC_SESSION" ]; then
   callback_output="${TASK_OUTPUT}.callback"
   if [ -n "$LC_ENTRY" ]; then
     nohup "$LC_BIN" "$LC_ENTRY" --session "$LC_SESSION" \
-      "FYI: Background task $TASK_ID finished (exit code $__code). Output file: $TASK_OUTPUT" \
+      "FYI: Background task $TASK_ID finished (exit code $__code). Output file: $TASK_OUTPUT. This is a detached callback turn: your normal reply is archived but is not delivered to Slack. Inspect the output and continue the task as appropriate. If you decide the user should receive an update, send it with slack-post." \
       </dev/null >"$callback_output" 2>&1 &
   else
     nohup "$LC_BIN" --session "$LC_SESSION" \
-      "FYI: Background task $TASK_ID finished (exit code $__code). Output file: $TASK_OUTPUT" \
+      "FYI: Background task $TASK_ID finished (exit code $__code). Output file: $TASK_OUTPUT. This is a detached callback turn: your normal reply is archived but is not delivered to Slack. Inspect the output and continue the task as appropriate. If you decide the user should receive an update, send it with slack-post." \
       </dev/null >"$callback_output" 2>&1 &
   fi
 fi
