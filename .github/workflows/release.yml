@@ -37,6 +37,12 @@ jobs:
 
       - run: pnpm build
 
+      - name: Install ripgrep and fd
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep fd-find
+          sudo ln -s $(which fdfind) /usr/local/bin/fd
+
       - run: pnpm test
         env:
           CI: true
