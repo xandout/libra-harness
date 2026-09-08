@@ -16,9 +16,23 @@
 
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { resolve as pathResolve, basename as pathBasename, extname as pathExtname } from 'node:path';
+import { lookup } from 'node:dns/promises';
 
 const CDP_PORT = process.env.CHROME_DEBUG_PORT || 18800;
-const CDP_URL = process.env.CHROME_CDP_URL || `http://127.0.0.1:${CDP_PORT}`;
+let CDP_URL = process.env.CHROME_CDP_URL || `http://127.0.0.1:${CDP_PORT}`;
+
+try {
+  const urlObj = new URL(CDP_URL);
+  // Chrome CDP refuses connections if the Host header is not an IP or localhost
+  if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(urlObj.hostname) && urlObj.hostname !== 'localhost') {
+    const { address } = await lookup(urlObj.hostname);
+    urlObj.hostname = address;
+    CDP_URL = urlObj.toString().replace(/\/$/, '');
+  }
+} catch (e) {
+  // Ignore URL parsing or resolution errors, let fetch handle them
+}
+
 const REFS_FILE = '/tmp/cdp_ax_refs.json';
 const DEFAULT_DOWNLOAD_DIR = process.env.CHROME_DOWNLOAD_DIR || (existsSync('/home/node/workspace') ? '/home/node/workspace/downloads' : pathResolve(process.cwd(), 'downloads'));
 
