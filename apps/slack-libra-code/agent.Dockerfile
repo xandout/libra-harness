@@ -53,6 +53,7 @@ RUN apt-get update \
     tesseract-ocr-eng \
     ghostscript \
     imagemagick \
+    postgresql-client \
   && rm -rf /var/lib/apt/lists/* \
   && ln -s /usr/bin/fdfind /usr/local/bin/fd
 

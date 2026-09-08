@@ -39,13 +39,11 @@ if [ -n "$TARGET" ] && [[ "$TARGET" =~ ^https?:// ]]; then
   sleep 3
 fi
 
-# Capture the visible X11 display :99 so you see exactly what is on the screen in VNC
-if command -v import >/dev/null 2>&1; then
-  import -display "$DISPLAY" -window root "$OUTPUT"
-elif command -v xwd >/dev/null 2>&1; then
-  xwd -display "$DISPLAY" -root -silent | convert - "$OUTPUT"
+# Since X11 is isolated in the browser container, use CDP to take the screenshot
+if command -v cdp >/dev/null 2>&1; then
+  cdp screenshot "$OUTPUT" >/dev/null
 else
-  echo "Error: neither 'import' (ImageMagick) nor 'xwd' is installed" >&2
+  echo "Error: cdp tool not found" >&2
   exit 1
 fi
 
