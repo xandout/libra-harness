@@ -68,26 +68,34 @@ socat TCP-LISTEN:${CHROME_DEBUG_PORT:-18800},fork,bind=0.0.0.0 TCP:127.0.0.1:188
 
 # Start headed Chrome on :99 with persistent profile and remote debugging
 touch /tmp/chrome.log
-google-chrome-stable \
-  --remote-debugging-port=18801 \
-  --remote-allow-origins=* \
-  --user-data-dir="$CHROME_PROFILE_DIR" \
-  --no-first-run \
-  --no-default-browser-check \
-  --disable-sync \
-  --disable-background-networking \
-  --disable-component-update \
-  --disable-features=Translate,MediaRouter \
-  --disable-session-crashed-bubble \
-  --hide-crash-restore-bubble \
-  --password-store=basic \
-  --no-sandbox \
-  --disable-dev-shm-usage \
-  --disable-gpu \
-  --no-proxy-server \
-  --disable-blink-features=AutomationControlled \
-  --safebrowsing-disable-download-protection \
-  --window-size=1920,1080 \
-  about:blank >/tmp/chrome.log 2>&1 &
+
+(
+  while true; do
+    echo "Starting Google Chrome..." >> /tmp/chrome.log
+    google-chrome-stable \
+      --remote-debugging-port=18801 \
+      --remote-allow-origins=* \
+      --user-data-dir="$CHROME_PROFILE_DIR" \
+      --no-first-run \
+      --no-default-browser-check \
+      --disable-sync \
+      --disable-background-networking \
+      --disable-component-update \
+      --disable-features=Translate,MediaRouter \
+      --disable-session-crashed-bubble \
+      --hide-crash-restore-bubble \
+      --password-store=basic \
+      --no-sandbox \
+      --disable-dev-shm-usage \
+      --disable-gpu \
+      --no-proxy-server \
+      --disable-blink-features=AutomationControlled \
+      --safebrowsing-disable-download-protection \
+      --window-size=1920,1080 \
+      about:blank >> /tmp/chrome.log 2>&1
+    echo "Google Chrome exited with code $?. Restarting in 2 seconds..." >> /tmp/chrome.log
+    sleep 2
+  done
+) &
 
 exec "$@"
