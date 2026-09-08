@@ -954,26 +954,17 @@ Tab Management:
       await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
       await new Promise((r) => setTimeout(r, 50));
 
-      // Attempt native value setter for React / controlled inputs in active element
-      await evalJs(`(() => {
-        const el = document.activeElement;
-        if (!el) return;
-        const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-        const desc = Object.getOwnPropertyDescriptor(proto, 'value');
-        if (desc && desc.set) {
-          desc.set.call(el, ${JSON.stringify(text)});
-        } else {
-          el.value = ${JSON.stringify(text)};
-        }
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-      })()`);
+      // Delete the existing JS eval block that forces the value
+      // We will purely simulate real keyboard input so React and standard inputs don't double up
 
-      // Also dispatch keystrokes for listeners monitoring key events
+      // Type the text as a real user would, properly triggering all framework event listeners
       for (const char of text) {
+        await client.send('Input.dispatchKeyEvent', { type: 'keyDown', text: char });
         await client.send('Input.dispatchKeyEvent', { type: 'char', text: char });
-        await new Promise((r) => setTimeout(r, 10));
+        await client.send('Input.dispatchKeyEvent', { type: 'keyUp', text: char });
+        await new Promise((r) => setTimeout(r, 10)); // tiny delay for natural typing
       }
+      
       const info = point.ref ? `[@${point.ref} ${point.matchedRole || point.tagName}]` : `[${point.tagName}${point.id ? '#' + point.id : ''}]`;
       console.log(`Typed into ${target} ${info}`);
 
