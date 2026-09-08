@@ -8,6 +8,14 @@ import {
 import {
   SessionSocketServer, SessionSocketClient, isSessionActive, getSocketPath, type SocketEvent,
 } from './session-socket.js';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+// Inject our own bin directory into the PATH so spawned tools (like cdp)
+// are always available without requiring global symlinks.
+const __filename = fileURLToPath(import.meta.url);
+const binPath = join(dirname(__filename), '..', 'bin');
+process.env.PATH = `${binPath}:${process.env.PATH || ''}`;
 
 // ── CLI ──────────────────────────────────────────────────────────────
 async function main() {
