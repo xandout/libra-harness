@@ -1013,6 +1013,39 @@ Tab Management:
       const info = point.ref ? `[@${point.ref} select]` : `[select${point.id ? '#' + point.id : ''}]`;
       console.log(`Selected "${resVal?.selectedText || value}" (value: "${resVal?.selectedValue || value}") in ${target} ${info}`);
 
+    } else if (cmd === 'select-all') {
+      const target = args[1];
+      if (target) {
+        const point = await getElementPoint(target);
+        const x = point.x;
+        const y = point.y;
+        // Focus element
+        await client.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+        await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+        await new Promise((r) => setTimeout(r, 50));
+      }
+
+      await evalJs(`(() => {
+        const el = document.activeElement;
+        if (el && (el.tagName.toLowerCase() === 'input' || el.tagName.toLowerCase() === 'textarea')) {
+          el.select();
+        } else if (el && el.isContentEditable) {
+          const selection = window.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(el);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        } else {
+          const selection = window.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(document.body);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+      })()`);
+      
+      console.log(\`Selected all text\${target ? ' in ' + target : ''}\`);
+
     } else if (cmd === 'scroll') {
       const dir = args[1] === 'up' ? -1 : 1;
       const amount = args[2] ? parseInt(args[2], 10) : 500;

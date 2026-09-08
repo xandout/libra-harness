@@ -19,6 +19,7 @@ All browser interactions are driven by `cdp` commands connecting to a headed Chr
   - Alternative: exact text (e.g. `cdp click "text=Search"`). Exact matches take priority over partial matches.
 - `cdp type <target> <text>`: Focus element and type text (e.g. `cdp type @3 28601` or `cdp type "textbox:Zip" 28601`). Fully supports React and controlled inputs by invoking native property setters and triggering input/change events.
 - `cdp select <target> <value>`: Select dropdown option in `<select>` elements by option value, exact text, or substring text (e.g. `cdp select @4 50`).
+- `cdp select-all [target]`: Select all text. If target is provided, it focuses the target first. In an input, it selects the input text. Outside an input, it selects all page text. Useful before `cdp press Backspace`.
 - `cdp press <key>`: Press a key: `Enter`, `Tab`, `Escape`, `Backspace`, `ArrowDown`, etc.
 - `cdp goto <url> [--timeout ms]`: Navigate to a URL (default timeout: 15s).
 - `cdp download <url> [--dir DIR] [--by-anchor] [--timeout ms]`: Download a web resource via Chrome with full cookie/session authentication. Files default to `~/workspace/downloads`. Use `--by-anchor` to force downloads of PDFs/PNGs that Chrome would otherwise render inline.
