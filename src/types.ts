@@ -73,6 +73,19 @@ export function messageContentToText(content: MessageContent): string {
   }).join('\n');
 }
 
+/**
+ * Extract only the visible text from message content — excludes reasoning
+ * (`<thinking>`) parts. Used for blurbs and user-facing output where the
+ * model's internal reasoning should not be shown.
+ */
+export function messageContentToVisibleText(content: MessageContent): string {
+  if (typeof content === 'string') return content;
+  return content
+    .filter((part) => part.type === 'text')
+    .map((part) => (part as TextContentPart).text)
+    .join('');
+}
+
 /** Whether message content contains at least one file attachment. */
 export function hasFileContent(content: MessageContent, mediaTypePrefix?: string): boolean {
   return Array.isArray(content) && content.some((part) =>

@@ -37,11 +37,19 @@ interface ShellMeta {
   inputFifo?: string;
 }
 
+export interface ShellCallbackConfig {
+  /** Path to the `lc` binary (or npx command) to invoke when a backgrounded task exits. */
+  lcBin: string;
+  /** Session key to pass via `--session` so the callback reaches the right session. */
+  sessionKey: string;
+}
+
 export class ShellRegistry {
   private shells = new Map<string, ShellEntry>();
   private counter = 0;
   private shellsDir: string;
   public onTaskComplete?: (id: string, code: number, output: string) => void;
+  public callback?: ShellCallbackConfig;
 
   constructor(shellsDir?: string) {
     this.shellsDir = shellsDir ?? join(process.cwd(), '.libra-shells');
@@ -85,9 +93,15 @@ export class ShellRegistry {
 
       // Wrap in parentheses `( command )` so internal pipes (`a | b | head`)
       // do NOT have the right-hand command stdin redirected to `<&3`!
+      // After the command exits, fire a callback into `lc` so the agent can
+      // react (steer if a turn is active, or start a new turn). The callback
+      // is detached — it does not keep `lc` alive.
+      const cb = this.callback
+        ? `${this.callback.lcBin} --session ${this.callback.sessionKey} "Background task ${id} finished (exit code $__code). Output file: ${outputFile}" 2>/dev/null &`
+        : '';
       const fullCommand = fifoReady
-        ? `exec 3<>"${inputFifo}"; ( ${command} ) <&3; echo $? > "${exitFile}" 2>/dev/null`
-        : `( ${command} ) < /dev/null; echo $? > "${exitFile}" 2>/dev/null`;
+        ? `exec 3<>"${inputFifo}"; ( ${command} ) <&3; __code=$?; echo $__code > "${exitFile}" 2>/dev/null; ${cb}`
+        : `( ${command} ) < /dev/null; __code=$?; echo $__code > "${exitFile}" 2>/dev/null; ${cb}`;
 
       const child = spawn(fullCommand, {
         shell: '/bin/bash',
@@ -187,8 +201,7 @@ export class ShellRegistry {
   }
 
   get(id: string): ShellEntry | undefined {
-    const cached = this.shells.get(id);
-    if (cached) {
+    const cached = this.shells.get(id);    if (cached) {
       if (!cached.done && cached.detached) {
         const exitFile = join(this.shellsDir, `${id}.exit`);
         if (existsSync(exitFile)) {

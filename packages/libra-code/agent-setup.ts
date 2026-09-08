@@ -460,6 +460,8 @@ export async function buildAgent(opts: BuildAgentOptions = {}): Promise<BuiltAge
     model,
     visionModel,
     codeSearchMaxIterations: 10,
+    callbackBin: 'lc',
+    callbackSessionKey: sessionKey,
   }));
   agent.use(createSocketEventsExtension());
 

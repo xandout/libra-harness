@@ -5,7 +5,7 @@ import type { Extension } from './extension.js';
 import type { HookContext, HookHandler, HookName, HookResult } from './hooks.js';
 import { HookRegistry } from './hooks.js';
 import type { AgentRequest, AgentResponse, TurnContext } from './context.js';
-import { messageContentToText, type ToolCall, type ToolResult } from './types.js';
+import { messageContentToText, messageContentToVisibleText, type ToolCall, type ToolResult } from './types.js';
 import { HookError } from './errors.js';
 import type { RunHandle } from './handle.js';
 import { parsePartialJson } from 'ai';
@@ -370,7 +370,9 @@ export class Agent {
     turn.messages.push(modelResponse.message);
 
     // ── Emit text blurb immediately upon arrival ──
-    const blurbText = messageContentToText(modelResponse.message.content);
+    // Use visible text only (no <thinking> reasoning parts) so hosts
+    // like Slack don't display the model's internal reasoning.
+    const blurbText = messageContentToVisibleText(modelResponse.message.content);
     if (blurbText.trim()) {
       try {
         turn.request.onMessage?.(blurbText);

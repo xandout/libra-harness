@@ -1,5 +1,4 @@
 import type { Extension } from '../../extension.js';
-import type { TurnContext } from '../../context.js';
 import type { Model } from '../../model.js';
 import type { ToolFactory, ResolvedConfig } from './tools/shared.js';
 import { readTool } from './tools/read.js';
@@ -22,6 +21,10 @@ export interface CodeToolsConfig {
   model?: Model;
   codeSearchMaxIterations?: number;
   visionModel?: Model;
+  /** Path to the `lc` binary for background-task callbacks. */
+  callbackBin?: string;
+  /** Session key for background-task callbacks. */
+  callbackSessionKey?: string;
 }
 
 export default function createCodeToolsExtension(config?: CodeToolsConfig): Extension {
@@ -33,6 +36,9 @@ export default function createCodeToolsExtension(config?: CodeToolsConfig): Exte
   };
 
   const registry = new ShellRegistry(config?.shellsDir);
+  if (config?.callbackBin && config?.callbackSessionKey) {
+    registry.callback = { lcBin: config.callbackBin, sessionKey: config.callbackSessionKey };
+  }
   const todoStore = new TodoStore(config?.todoFile);
 
   const toolFactories: ToolFactory[] = [
@@ -49,27 +55,11 @@ export default function createCodeToolsExtension(config?: CodeToolsConfig): Exte
     manageTaskTool,
   ];
 
-  let activeTurn: TurnContext | undefined;
-
-  registry.onTaskComplete = (id, code, output) => {
-    if (activeTurn) {
-      const truncated = output.length > 50000 ? output.slice(0, 50000) + '\n[output truncated]' : output;
-      activeTurn.steer(`Background task ${id} finished (exit code ${code}).\nOutput:\n${truncated}`);
-    }
-  };
-
   return {
     name: 'code-tools',
     priority: 50,
 
     install(agent) {
-      agent.hook('beforeTurn', 'code-tools', async (ctx) => {
-        activeTurn = ctx.turn;
-      });
-      agent.hook('afterTurn', 'code-tools', async () => {
-        activeTurn = undefined;
-      });
-
       for (const factory of toolFactories) {
         agent.tool(factory(resolved));
       }
