@@ -59,6 +59,7 @@ if [ "${VNC_ENABLED:-true}" = "true" ]; then
 fi
 
 # Start headed Chrome on :99 with persistent profile and remote debugging
+touch /tmp/chrome.log
 google-chrome-stable \
   --remote-debugging-port=${CHROME_DEBUG_PORT:-18800} \
   --remote-debugging-address=0.0.0.0 \

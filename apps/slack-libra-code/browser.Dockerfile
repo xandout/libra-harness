@@ -54,4 +54,4 @@ USER node
 WORKDIR /home/node/workspace
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
-CMD ["tail", "-f", "/dev/null"]
+CMD ["tail", "-f", "/tmp/chrome.log"]
