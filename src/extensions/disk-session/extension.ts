@@ -1,5 +1,6 @@
 import { readFileSync, appendFileSync, mkdirSync, readdirSync, writeFileSync, existsSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
+import { pruneMessages } from 'ai';
 import type { Extension, TurnContext, Model } from '@xandout/libra-harness';
 import { messageContentToText } from '@xandout/libra-harness';
 import type { Message, MessageContent, Role, ToolCall } from '@xandout/libra-harness';
@@ -599,7 +600,11 @@ export default function createDiskSessionExtension(
     }
 
     const messages = rawRecords.map(toMessage);
-    const sanitized = sanitizeConversationMessages(messages);
+    // pruneMessages strips reasoning parts from older assistant messages —
+    // we store reasoning in the JSONL for the record, but the model doesn't
+    // need its own old thinking tokens re-sent to it each turn.
+    const pruned = pruneMessages({ messages: messages as any[], reasoning: 'all' }) as Message[];
+    const sanitized = sanitizeConversationMessages(pruned);
     return dropIncompleteTrailingMessages(sanitized);
   }
 

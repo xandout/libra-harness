@@ -11,12 +11,13 @@ import type {
   LanguageModelV4Usage,
   LanguageModelV4StreamPart,
 } from '@ai-sdk/provider';
-import { parsePartialJson } from 'ai';
+import { parsePartialJson, smoothStream } from 'ai';
 import type { Model, ModelRequest, ModelResponse, FinishReason } from './model.js';
 import {
   messageContentToText,
   type FileContentData,
   type FileContentPart,
+  type ReasoningContentPart,
   type Message,
   type MessageContent,
   type ToolCall,
@@ -56,15 +57,49 @@ export class AISdkModel implements Model {
     const { stream } = await this.model.doStream(callOptions);
     const state = new StreamState(onDelta);
 
+    // smoothStream expects { type, text, id } shaped chunks; our text-delta
+    // parts use `delta` instead of `text`. We adapt, pipe through the smoother
+    // for word-by-word pacing, then restore. Non-text parts bypass entirely.
+    // smoothStream() returns a middleware fn; calling it with {tools:{}} yields the TransformStream.
+    const smoother: TransformStream<any, any> = smoothStream()({ tools: {} } as any);
+    const smoothWriter = smoother.writable.getWriter();
+    const smoothReader = smoother.readable.getReader();
+
     const reader = stream.getReader();
     try {
-      while (true) {
-        const { done, value: part } = await reader.read();
-        if (done) break;
-        state.processPart(part);
-      }
+      // Pump: read raw parts, feed text-delta through smoother, process rest directly.
+      const pump = async () => {
+        while (true) {
+          const { done, value: part } = await reader.read();
+          if (done) {
+            await smoothWriter.close();
+            break;
+          }
+          if (part.type === 'text-delta') {
+            // Adapt to smoothStream's expected shape, then drain.
+            await smoothWriter.write({ type: 'text', text: part.delta, id: part.id } as any);
+            // Drain any buffered smooth chunks immediately.
+            while (true) {
+              const { done: sdone, value: schunk } = await smoothReader.read().catch(() => ({ done: true, value: undefined }));
+              if (sdone || !schunk) break;
+              // Restore to our text-delta shape.
+              state.processPart({ type: 'text-delta', id: (schunk as any).id ?? part.id, delta: (schunk as any).text ?? '' });
+            }
+          } else {
+            state.processPart(part);
+          }
+        }
+        // Drain any remaining smooth output after stream ends.
+        while (true) {
+          const { done: sdone, value: schunk } = await smoothReader.read().catch(() => ({ done: true, value: undefined }));
+          if (sdone || !schunk) break;
+          state.processPart({ type: 'text-delta', id: (schunk as any).id ?? '', delta: (schunk as any).text ?? '' });
+        }
+      };
+      await pump();
     } finally {
       reader.releaseLock();
+      smoothReader.releaseLock();
     }
 
     return state.finalize();
@@ -177,15 +212,22 @@ export class AISdkModel implements Model {
 
 function toAISdkContent(content: MessageContent): Array<LanguageModelV4TextPart | LanguageModelV4FilePart> {
   if (typeof content === 'string') return content ? [{ type: 'text', text: content }] : [];
-  return content.map((part) => {
-    if (part.type === 'text') return part;
-    return {
-      type: 'file',
-      ...(part.filename && { filename: part.filename }),
-      mediaType: part.mediaType,
-      data: toAISdkFileData(part.data),
-    };
-  });
+  const result: Array<LanguageModelV4TextPart | LanguageModelV4FilePart> = [];
+  for (const part of content) {
+    if (part.type === 'text') {
+      result.push(part);
+    } else if (part.type === 'reasoning') {
+      // stored for the record, not re-sent to the model
+    } else {
+      result.push({
+        type: 'file',
+        ...(part.filename && { filename: part.filename }),
+        mediaType: part.mediaType,
+        data: toAISdkFileData(part.data),
+      });
+    }
+  }
+  return result;
 }
 
 function toAISdkFileData(data: FileContentData): LanguageModelV4FilePart['data'] {
@@ -237,13 +279,14 @@ function mapFinishReason(reason: LanguageModelV4GenerateResult['finishReason']['
 }
 
 class StreamState {
-  public content: Array<{ type: 'text'; text: string } | FileContentPart> = [];
+  public content: Array<{ type: 'text'; text: string } | FileContentPart | ReasoningContentPart> = [];
   public textById = new Map<string, string>();
   public textOrder: string[] = [];
   public toolCalls: ToolCall[] = [];
   public finishReason: FinishReason = 'stop';
   public usage?: NonNullable<ModelResponse['usage']>;
   public toolInputBuffers = new Map<string, { name: string; input: string; providerExecuted: boolean }>();
+  public reasoningBuffer = '';
 
   constructor(private onDelta: (delta: any) => void) {}
 
@@ -261,6 +304,7 @@ class StreamState {
         this.onDelta({ type: 'text', content: part.delta });
         break;
       case 'reasoning-delta':
+        this.reasoningBuffer += part.delta;
         this.onDelta({ type: 'reasoning', content: part.delta });
         break;
       case 'tool-input-start':
@@ -310,11 +354,14 @@ class StreamState {
   public finalize(): ModelResponse {
     const text = this.textOrder.map((id) => this.textById.get(id) ?? '').join('');
     if (text) this.content.unshift({ type: 'text', text });
+    // Prepend reasoning before text so the record reads: [reasoning, text, ...files]
+    if (this.reasoningBuffer) this.content.unshift({ type: 'reasoning', text: this.reasoningBuffer });
 
+    const hasComplexContent = this.content.length > 1 || this.content.some((p) => p.type === 'file' || p.type === 'reasoning');
     return {
       message: {
         role: 'assistant',
-        content: this.content.length > 1 || this.content.some((part) => part.type === 'file') ? this.content : text,
+        content: hasComplexContent ? this.content : text,
         ...(this.toolCalls.length > 0 && { toolCalls: this.toolCalls }),
       },
       finishReason: this.finishReason,
@@ -322,3 +369,4 @@ class StreamState {
     };
   }
 }
+

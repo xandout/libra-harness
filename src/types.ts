@@ -34,6 +34,18 @@ export interface TextContentPart {
   text: string;
 }
 
+/**
+ * Reasoning/thinking content produced by a model during generation.
+ *
+ * Stored verbatim so the full record of what the model thought is preserved.
+ * Stripped from LLM context by the session extension (via `pruneMessages`)
+ * before being re-sent — the model doesn't need its own old thinking tokens.
+ */
+export interface ReasoningContentPart {
+  type: 'reasoning';
+  text: string;
+}
+
 /** Provider-independent file data. */
 export type FileContentData =
   | { type: 'data'; data: string | Uint8Array }
@@ -49,13 +61,14 @@ export interface FileContentPart {
 }
 
 /** Message content. Strings remain supported as the text-only shorthand. */
-export type MessageContent = string | Array<TextContentPart | FileContentPart>;
+export type MessageContent = string | Array<TextContentPart | FileContentPart | ReasoningContentPart>;
 
 /** Convert message content to a text representation for logs and text-only extensions. */
 export function messageContentToText(content: MessageContent): string {
   if (typeof content === 'string') return content;
   return content.map((part) => {
     if (part.type === 'text') return part.text;
+    if (part.type === 'reasoning') return `<thinking>\n${part.text}\n</thinking>`;
     return part.filename ? `[File: ${part.filename} (${part.mediaType})]` : `[File: ${part.mediaType}]`;
   }).join('\n');
 }

@@ -1,4 +1,5 @@
 import type { LanguageModelV4 } from '@ai-sdk/provider';
+import { createProviderRegistry } from 'ai';
 import { AISdkModel } from '../ai-sdk-model.js';
 import type { Model } from '../model.js';
 
@@ -45,6 +46,14 @@ export const nativeAISdkProviders: Readonly<Record<string, AISdkProviderDefiniti
   },
 };
 
+/**
+ * Resolve a libra `Model` from a `provider/model` string using Vercel AI SDK's
+ * `createProviderRegistry`. Providers are lazy-loaded on first use.
+ *
+ * Model IDs use the existing `provider/model` format (e.g. `openai/gpt-4o`,
+ * `google/gemini-2.5-pro`) — the registry is configured with `separator: '/'`
+ * so no changes to existing IDs are required.
+ */
 export async function resolveModel(modelId: string, options: ResolveModelOptions = {}): Promise<Model> {
   const separator = modelId.indexOf('/');
   if (separator <= 0 || separator === modelId.length - 1) {
@@ -52,11 +61,10 @@ export async function resolveModel(modelId: string, options: ResolveModelOptions
   }
 
   const providerId = modelId.slice(0, separator);
-  const providerModelId = modelId.slice(separator + 1);
-  const providers = options.providers ?? nativeAISdkProviders;
-  const definition = providers[providerId];
+  const definitions = options.providers ?? nativeAISdkProviders;
+  const definition = definitions[providerId];
   if (!definition) {
-    throw new Error(`Unsupported provider "${providerId}". Supported providers: ${Object.keys(providers).sort().join(', ')}.`);
+    throw new Error(`Unsupported provider "${providerId}". Supported providers: ${Object.keys(definitions).sort().join(', ')}.`);
   }
 
   const env = options.env ?? process.env;
@@ -64,8 +72,15 @@ export async function resolveModel(modelId: string, options: ResolveModelOptions
     throw new Error(`Cannot resolve "${modelId}": ${definition.envVar} is not configured.`);
   }
 
-  const provider = await definition.load();
-  return new AISdkModel(provider(providerModelId));
+  // Lazy-load the provider and wrap it in a single-entry registry so we get
+  // Vercel's provider resolution logic (middleware support, error messages, etc.)
+  const providerFactory = await definition.load();
+  const registry = createProviderRegistry(
+    { [providerId]: { languageModel: (id: string) => providerFactory(id) } as any },
+    { separator: '/' },
+  );
+
+  return new AISdkModel(registry.languageModel(modelId as `${string}/${string}`));
 }
 
 export function configuredProviders(
