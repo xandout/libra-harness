@@ -59,6 +59,26 @@ if [ "${VNC_ENABLED:-true}" = "true" ]; then
 fi
 
 # Start headed Chrome on :99 with persistent profile and remote debugging
-google-chrome-stable --no-sandbox --remote-debugging-port=${CHROME_DEBUG_PORT:-18800} --remote-debugging-address=0.0.0.0 --user-data-dir="$CHROME_PROFILE_DIR" --window-size=1920,1080 --disable-dev-shm-usage &
+google-chrome-stable \
+  --remote-debugging-port=${CHROME_DEBUG_PORT:-18800} \
+  --remote-debugging-address=0.0.0.0 \
+  --user-data-dir="$CHROME_PROFILE_DIR" \
+  --no-first-run \
+  --no-default-browser-check \
+  --disable-sync \
+  --disable-background-networking \
+  --disable-component-update \
+  --disable-features=Translate,MediaRouter \
+  --disable-session-crashed-bubble \
+  --hide-crash-restore-bubble \
+  --password-store=basic \
+  --no-sandbox \
+  --disable-dev-shm-usage \
+  --disable-gpu \
+  --no-proxy-server \
+  --disable-blink-features=AutomationControlled \
+  --safebrowsing-disable-download-protection \
+  --window-size=1920,1080 \
+  about:blank >/tmp/chrome.log 2>&1 &
 
 exec "$@"
