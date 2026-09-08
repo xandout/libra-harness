@@ -79,7 +79,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc && for d in src/extensions/*/; do name=$(basename \"$d\") && if [ -f \"$d\"extension.json ]; then cp \"$d\"extension.json dist/extensions/\"$name\"/; fi; done",
+    "build": "tsc && for d in src/extensions/*/; do name=$(basename \"$d\") && if [ -f \"$d\"extension.json ]; then cp \"$d\"extension.json dist/extensions/\"$name\"/; fi; done && cp src/extensions/code-tools/tools/task-wrapper.sh dist/extensions/code-tools/tools/task-wrapper.sh && chmod +x dist/extensions/code-tools/tools/task-wrapper.sh",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

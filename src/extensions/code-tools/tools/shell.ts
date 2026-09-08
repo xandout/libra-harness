@@ -1,7 +1,8 @@
 import { spawn, execFileSync } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { existsSync, writeFileSync, openSync, closeSync, readFileSync, mkdirSync, appendFileSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { makeToolName, type ToolFactory } from './shared.js';
 
 export interface ShellToolConfig {
@@ -86,28 +87,29 @@ export class ShellRegistry {
         execFileSync('mkfifo', [inputFifo], { stdio: 'ignore' });
       } catch {}
 
+      // Locate the wrapper script next to this module.
+      const wrapperPath = join(dirname(fileURLToPath(import.meta.url)), 'task-wrapper.sh');
+
+      // Spawn the wrapper script — it handles stdin (fifo or /dev/null),
+      // captures exit code, and fires the lc callback on exit. Output goes
+      // to the output file via fd redirection; nothing is lost.
       const outFd = openSync(outputFile, 'a');
-      const errFd = outFd;
-      const fifoReady = existsSync(inputFifo);
       const nullFd = openSync('/dev/null', 'r');
 
-      // Wrap in parentheses `( command )` so internal pipes (`a | b | head`)
-      // do NOT have the right-hand command stdin redirected to `<&3`!
-      // After the command exits, fire a callback into `lc` so the agent can
-      // react (steer if a turn is active, or start a new turn). The callback
-      // is detached — it does not keep `lc` alive.
-      const cb = this.callback
-        ? `${this.callback.lcBin} --session ${this.callback.sessionKey} "Background task ${id} finished (exit code $__code). Output file: ${outputFile}" 2>/dev/null &`
-        : '';
-      const fullCommand = fifoReady
-        ? `exec 3<>"${inputFifo}"; ( ${command} ) <&3; __code=$?; echo $__code > "${exitFile}" 2>/dev/null; ${cb}`
-        : `( ${command} ) < /dev/null; __code=$?; echo $__code > "${exitFile}" 2>/dev/null; ${cb}`;
-
-      const child = spawn(fullCommand, {
-        shell: '/bin/bash',
+      const child = spawn(wrapperPath, [], {
         cwd,
-        env: { ...process.env, ...env },
-        stdio: [nullFd, outFd, errFd],
+        env: {
+          ...process.env,
+          ...env,
+          TASK_ID: id,
+          TASK_EXIT_FILE: exitFile,
+          TASK_OUTPUT: outputFile,
+          TASK_INPUT_FIFO: existsSync(inputFifo) ? inputFifo : '',
+          TASK_COMMAND: command,
+          LC_BIN: this.callback?.lcBin ?? '',
+          LC_SESSION: this.callback?.sessionKey ?? '',
+        },
+        stdio: [nullFd, outFd, outFd],
         detached: true,
       });
 
