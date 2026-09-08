@@ -16,7 +16,6 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
-    # Skip commits made by the bot (version bumps) to avoid release loops.
     if: github.event.head_commit.author.name != 'github-actions[bot]'
     steps:
       - uses: actions/checkout@v4
@@ -37,227 +36,34 @@ jobs:
 
       - run: pnpm build
 
-      - name: Install ripgrep and fd
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ripgrep fd-find
-          sudo ln -s $(which fdfind) /usr/local/bin/fd
-
-      - run: pnpm test
-        env:
-          CI: true
-
-      - name: Bump versions and commit
+      - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git fetch --tags --force
 
-          VERSION=$(node <<'EOF'
-          const fs = require('fs');
-          const { execSync } = require('child_process');
-
-          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
-          let [major, minor, patch] = pkg.version.split('.').map(Number);
-
-          function tagExists(tag) {
-            try {
-              const res = execSync(`git tag -l "${tag}"`, { encoding: 'utf-8' }).trim();
-              return res.length > 0;
-            } catch {
-              return false;
-            }
-          }
-
-          function npmVersionExists(pkgName, ver) {
-            try {
-              const res = execSync(`npm view "${pkgName}@${ver}" version`, { encoding: 'utf-8' }).trim();
-              return res === ver;
-            } catch {
-              return false;
-            }
-          }
-
-          let nextPatch = patch + 1;
-          let targetVer = `${major}.${minor}.${nextPatch}`;
-
-          while (true) {
-            const tag = `v${targetVer}`;
-            const harnessOnNpm = npmVersionExists('@xandout/libra-harness', targetVer);
-            const codeOnNpm = npmVersionExists('@xandout/libra-code', targetVer);
-            const hasTag = tagExists(tag);
-
-            if (!hasTag && !harnessOnNpm && !codeOnNpm) {
-              break;
-            }
-            console.error(`Version ${targetVer} already exists (tag: ${hasTag}, harness: ${harnessOnNpm}, code: ${codeOnNpm}). Incrementing...`);
-            nextPatch++;
-            targetVer = `${major}.${minor}.${nextPatch}`;
-          }
-
-          console.log(targetVer);
-          EOF
-          )
-
-          echo "Selected VERSION=$VERSION"
+      - name: Bump Version
+        run: |
+          npm version patch --no-git-tag-version
+          VERSION=$(node -e "console.log(require('./package.json').version)")
           echo "VERSION=$VERSION" >> $GITHUB_ENV
-
-          # Set package.json versions (keep workspace dependency in git so pnpm lockfile stays valid)
-          VERSION="$VERSION" node -e "
-            const fs = require('fs');
-            const ver = process.env.VERSION;
-
-            const p1 = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
-            p1.version = ver;
-            fs.writeFileSync('package.json', JSON.stringify(p1, null, 2) + '\n');
-
-            const p2 = JSON.parse(fs.readFileSync('packages/libra-code/package.json', 'utf-8'));
-            p2.version = ver;
-            p2.dependencies['@xandout/libra-harness'] = 'link:../..';
-            fs.writeFileSync('packages/libra-code/package.json', JSON.stringify(p2, null, 2) + '\n');
-          "
-
-          git add package.json packages/libra-code/package.json
-          if ! git diff --staged --quiet; then
-            git commit -m "chore: release v${VERSION}"
-          fi
-          git tag -f "v${VERSION}"
-
-      - name: Push version tags
-        run: git push --follow-tags
-
-      - name: Build release tarballs (.tgz)
-        run: |
-          pnpm build
-          npm pack
+          
           cd packages/libra-code
-          pnpm build
-          # Temporarily swap link dep to versioned range for the tarball manifest only,
-          # then restore link:../.. so the working tree stays lockfile-compatible.
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
-            pkg.dependencies['@xandout/libra-harness'] = '^' + process.env.VERSION;
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
-          npm pack
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
-            pkg.dependencies['@xandout/libra-harness'] = 'link:../..';
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
-          mv *.tgz ../..
+          npm version $VERSION --no-git-tag-version
           cd ../..
+          
+          git add package.json packages/libra-code/package.json
+          git commit -m "chore: release v$VERSION"
+          git tag -f "v$VERSION"
+          git push --follow-tags
 
-      - name: Create GitHub release with tarball assets (INSTANT)
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ env.VERSION }}
-          name: v${{ env.VERSION }}
-          files: |
-            *.tgz
-          generate_release_notes: true
-
-      - name: Setup Node for GitHub Packages
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          registry-url: https://npm.pkg.github.com
-          scope: '@xandout'
+      - name: Publish to npm (libra-harness)
+        run: pnpm publish --access public --no-git-checks
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Publish libra-harness to GitHub Packages (INSTANT)
-        run: |
-          VERSION="${{ env.VERSION }}"
-          if npm view "@xandout/libra-harness@${VERSION}" --registry=https://npm.pkg.github.com version 2>/dev/null | grep -q "$VERSION"; then
-            echo "@xandout/libra-harness@${VERSION} already published on GitHub Packages. Skipping."
-          else
-            npm publish --registry=https://npm.pkg.github.com --access public || true
-          fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Publish libra-code to GitHub Packages (INSTANT)
+      - name: Publish to npm (libra-code)
         run: |
           cd packages/libra-code
-          VERSION="${{ env.VERSION }}"
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
-            pkg.dependencies['@xandout/libra-harness'] = '^' + process.env.VERSION;
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
-          if npm view "@xandout/libra-code@${VERSION}" --registry=https://npm.pkg.github.com version 2>/dev/null | grep -q "$VERSION"; then
-            echo "@xandout/libra-code@${VERSION} already published on GitHub Packages. Skipping."
-          else
-            npm publish --registry=https://npm.pkg.github.com --access public || true
-          fi
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
-            pkg.dependencies['@xandout/libra-harness'] = 'link:../..';
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # ── Slow public npm publishing tasks run LAST ──
-
-      - name: Setup Node for public npm
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          registry-url: https://registry.npmjs.org
+          pnpm publish --access public --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish libra-harness to public npm
-        run: |
-          VERSION="${{ env.VERSION }}"
-          if npm view "@xandout/libra-harness@${VERSION}" version 2>/dev/null | grep -q "$VERSION"; then
-            echo "@xandout/libra-harness@${VERSION} already published on npm. Skipping."
-          else
-            npm config set //registry.npmjs.org/:_authToken "${NODE_AUTH_TOKEN}"
-            npm publish --provenance --access public || echo "::warning::Failed to publish @xandout/libra-harness to public npm (check NPM_TOKEN permissions/scope)"
-          fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Check harness availability on public npm
-        run: |
-          VERSION="${{ env.VERSION }}"
-          echo "Checking if @xandout/libra-harness@${VERSION} is on public npm..."
-          if npm view "@xandout/libra-harness@${VERSION}" version 2>/dev/null | grep -q "$VERSION"; then
-            echo "Found @xandout/libra-harness@${VERSION} on public npm"
-          else
-            echo "::warning::@xandout/libra-harness@${VERSION} not yet visible on public npm (continuing workflow)"
-          fi
-
-      - name: Build and publish libra-code to public npm
-        run: |
-          cd packages/libra-code
-          pnpm build
-          VERSION="${{ env.VERSION }}"
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
-            pkg.dependencies['@xandout/libra-harness'] = '^' + process.env.VERSION;
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
-          if npm view "@xandout/libra-code@${VERSION}" version 2>/dev/null | grep -q "$VERSION"; then
-            echo "@xandout/libra-code@${VERSION} already published on npm. Skipping."
-          else
-            npm config set //registry.npmjs.org/:_authToken "${NODE_AUTH_TOKEN}"
-            npm publish --provenance --access public || echo "::warning::Failed to publish @xandout/libra-code to public npm (check NPM_TOKEN permissions/scope)"
-          fi
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
-            pkg.dependencies['@xandout/libra-harness'] = 'link:../..';
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          VERSION: ${{ env.VERSION }}
