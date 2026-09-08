@@ -515,7 +515,12 @@ Tab Management:
       }
     }
 
-    mkdirSync(downloadDir, { recursive: true });
+    try { mkdirSync(downloadDir, { recursive: true }); } catch {}
+    
+    if (process.env.CHROME_CDP_URL && !downloadDir.startsWith('/home/node/workspace')) {
+      console.warn(`\nWARNING: Download directory ${downloadDir} is outside the shared /home/node/workspace volume!`);
+      console.warn(`Because Chrome runs in a remote container, files downloaded here will NOT be visible to the agent.\n`);
+    }
 
     // Connect to Browser WebSocket endpoint for global download events
     const version = await fetchJson(`${CDP_URL}/json/version`);
