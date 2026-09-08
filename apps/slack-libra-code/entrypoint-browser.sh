@@ -15,6 +15,11 @@ if ! pgrep -x "Xvfb" >/dev/null; then
   rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
   Xvfb :99 -screen 0 1920x1080x24 -ac &
   export DISPLAY=:99
+  # Wait for X server to accept connections
+  for i in {1..20}; do
+    xdpyinfo -display :99 >/dev/null 2>&1 && break
+    sleep 0.1
+  done
 fi
 
 # Start DBUS if not running (critical for XDG and many GUI apps)
