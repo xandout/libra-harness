@@ -1,3 +1,4 @@
+import { parsePartialJson } from 'ai';
 import type { Extension } from '../../extension.js';
 
 export interface StructuredOutputConfig {
@@ -5,8 +6,6 @@ export interface StructuredOutputConfig {
   schema: Record<string, unknown>;
   /** Field name in metadata to store the parsed JSON. Default: "structured". */
   metadataKey?: string;
-  /** Whether to strip markdown code fences from the response. Default: true. */
-  stripCodeFences?: boolean;
 }
 
 export default function createStructuredOutputExtension(
@@ -18,7 +17,6 @@ export default function createStructuredOutputExtension(
   }
   const { schema } = config;
   const metadataKey = config.metadataKey ?? 'structured';
-  const stripCodeFences = config.stripCodeFences ?? true;
 
   return {
     name: 'structured-output',
@@ -27,21 +25,10 @@ export default function createStructuredOutputExtension(
       agent.hook('beforeResponse', 'structured-output', async (ctx) => {
         if (!ctx.turn.response) return;
 
-        let raw = ctx.turn.response.message;
-
-        // Strip markdown code fences if present (LLMs often wrap JSON in ```json ... ```).
-        if (stripCodeFences) {
-          const fenceMatch = raw.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-          if (fenceMatch) {
-            raw = fenceMatch[1].trim();
-          }
-        }
-
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(raw);
-        } catch {
-          // Not valid JSON — replace the response with an error that includes the schema.
+        // parsePartialJson handles code-fence stripping, partial JSON repair,
+        // and malformed input — replacing both the fence regex and JSON.parse try/catch.
+        const result = await parsePartialJson(ctx.turn.response.message);
+        if (result.state !== 'successful-parse' && result.state !== 'repaired-parse') {
           ctx.turn.response = {
             ...ctx.turn.response,
             message: JSON.stringify({
@@ -52,6 +39,8 @@ export default function createStructuredOutputExtension(
           };
           return;
         }
+
+        let parsed: unknown = result.value;
 
         // Validate against the schema's required fields.
         const required = (schema.required as string[]) ?? [];

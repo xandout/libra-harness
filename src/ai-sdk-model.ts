@@ -11,6 +11,7 @@ import type {
   LanguageModelV4Usage,
   LanguageModelV4StreamPart,
 } from '@ai-sdk/provider';
+import { parsePartialJson } from 'ai';
 import type { Model, ModelRequest, ModelResponse, FinishReason } from './model.js';
 import {
   messageContentToText,
@@ -44,13 +45,15 @@ export class AISdkModel implements Model {
   }
 
   private async generateBatch(request: ModelRequest): Promise<ModelResponse> {
-    const result = await this.model.doGenerate(this.toCallOptions(request));
+    const callOptions = await this.toCallOptions(request);
+    const result = await this.model.doGenerate(callOptions);
     return this.fromAISdkResult(result);
   }
 
   private async generateStream(request: ModelRequest): Promise<ModelResponse> {
     const onDelta = request.onDelta!;
-    const { stream } = await this.model.doStream(this.toCallOptions(request));
+    const callOptions = await this.toCallOptions(request);
+    const { stream } = await this.model.doStream(callOptions);
     const state = new StreamState(onDelta);
 
     const reader = stream.getReader();
@@ -67,8 +70,8 @@ export class AISdkModel implements Model {
     return state.finalize();
   }
 
-  private toCallOptions(request: ModelRequest): LanguageModelV4CallOptions {
-    const prompt = this.toAISdkPrompt(request.messages);
+  private async toCallOptions(request: ModelRequest): Promise<LanguageModelV4CallOptions> {
+    const prompt = await this.toAISdkPrompt(request.messages);
     if (request.systemPrompt) prompt.unshift({ role: 'system', content: request.systemPrompt });
     return {
       prompt,
@@ -85,50 +88,56 @@ export class AISdkModel implements Model {
     };
   }
 
-  private toAISdkPrompt(messages: Message[]): LanguageModelV4Prompt {
-    return messages.map((message) => {
-      if (message.role === 'system') {
-        return { role: 'user', content: [{ type: 'text', text: `[System]: ${messageContentToText(message.content)}` }] };
-      }
-
-      if (message.role === 'user') {
-        return { role: 'user', content: toAISdkContent(message.content) };
-      }
-
-      if (message.role === 'assistant') {
-        const content: Array<LanguageModelV4TextPart | LanguageModelV4FilePart | LanguageModelV4ToolCallPart> = [
-          ...toAISdkContent(message.content),
-        ];
-        for (const toolCall of message.toolCalls ?? []) {
-          let parsedArgs = {};
-          if (toolCall.arguments) {
-            try {
-              parsedArgs = JSON.parse(toolCall.arguments);
-            } catch (err) {
-              // Gracefully handle malformed historical tool calls
-              console.error(`[ai-sdk-model] Failed to parse toolCall arguments for ${toolCall.name}:`, err);
-            }
-          }
-          content.push({
-            type: 'tool-call',
-            toolCallId: toolCall.id,
-            toolName: toolCall.name,
-            input: parsedArgs,
-          });
+  private async toAISdkPrompt(messages: Message[]): Promise<LanguageModelV4Prompt> {
+    return Promise.all(
+      messages.map(async (message) => {
+        if (message.role === 'system') {
+          return { role: 'user', content: [{ type: 'text', text: `[System]: ${messageContentToText(message.content)}` }] };
         }
-        return { role: 'assistant', content };
-      }
 
-      return {
-        role: 'tool',
-        content: [{
-          type: 'tool-result',
-          toolCallId: message.toolCallId ?? '',
-          toolName: message.name ?? '',
-          output: { type: 'text', value: messageContentToText(message.content) },
-        }],
-      };
-    });
+        if (message.role === 'user') {
+          return { role: 'user', content: toAISdkContent(message.content) };
+        }
+
+        if (message.role === 'assistant') {
+          const content: Array<LanguageModelV4TextPart | LanguageModelV4FilePart | LanguageModelV4ToolCallPart> = [
+            ...toAISdkContent(message.content),
+          ];
+          for (const toolCall of message.toolCalls ?? []) {
+            let parsedArgs: any = {};
+            if (toolCall.arguments) {
+              const parsed = await parsePartialJson(toolCall.arguments);
+              if (parsed.state === 'successful-parse' || parsed.state === 'repaired-parse') {
+                parsedArgs = parsed.value ?? {};
+              } else {
+                try {
+                  parsedArgs = JSON.parse(toolCall.arguments);
+                } catch {
+                  parsedArgs = {};
+                }
+              }
+            }
+            content.push({
+              type: 'tool-call',
+              toolCallId: toolCall.id,
+              toolName: toolCall.name,
+              input: parsedArgs,
+            });
+          }
+          return { role: 'assistant', content };
+        }
+
+        return {
+          role: 'tool',
+          content: [{
+            type: 'tool-result',
+            toolCallId: message.toolCallId ?? '',
+            toolName: message.name ?? '',
+            output: { type: 'text', value: messageContentToText(message.content) },
+          }],
+        };
+      }),
+    );
   }
 
   private fromAISdkResult(result: LanguageModelV4GenerateResult): ModelResponse {
