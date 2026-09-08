@@ -24,6 +24,7 @@ export interface ShellEntry {
   cwd: string;
   outputFile?: string;
   inputFifo?: string;
+  notifyFile?: string;
   detached: boolean;
   readOffset?: number;
 }
@@ -39,9 +40,8 @@ interface ShellMeta {
 }
 
 export interface ShellCallbackConfig {
-  /** Path to the `lc` binary (or npx command) to invoke when a backgrounded task exits. */
   lcBin: string;
-  /** Session key to pass via `--session` so the callback reaches the right session. */
+  lcEntry?: string;
   sessionKey: string;
 }
 
@@ -57,7 +57,7 @@ export class ShellRegistry {
   }
 
   private nextId(): string {
-    return `task_${++this.counter}`;
+    return `task_${Date.now()}_${process.pid}_${++this.counter}`;
   }
 
   private metaPath(id: string): string {
@@ -77,9 +77,11 @@ export class ShellRegistry {
     const outputFile = join(shellsDir, `${id}.output`);
     const exitFile = join(shellsDir, `${id}.exit`);
     const inputFifo = join(shellsDir, `${id}.in`);
+    const notifyFile = join(shellsDir, `${id}.notify`);
     const metaFile = this.metaPath(id);
 
     writeFileSync(outputFile, '');
+    if (background) writeFileSync(notifyFile, '');
 
     try {
       if (existsSync(inputFifo)) unlinkSync(inputFifo);
@@ -104,8 +106,10 @@ export class ShellRegistry {
         TASK_EXIT_FILE: exitFile,
         TASK_OUTPUT: outputFile,
         TASK_INPUT_FIFO: existsSync(inputFifo) ? inputFifo : '',
+        TASK_NOTIFY_FILE: notifyFile,
         TASK_COMMAND: command,
         LC_BIN: this.callback?.lcBin ?? '',
+        LC_ENTRY: this.callback?.lcEntry ?? '',
         LC_SESSION: this.callback?.sessionKey ?? '',
       },
       stdio: [nullFd, outFd, outFd],
@@ -127,6 +131,7 @@ export class ShellRegistry {
       cwd,
       outputFile,
       inputFifo: existsSync(inputFifo) ? inputFifo : undefined,
+      notifyFile,
       detached: background,
       readOffset: 0,
     };
@@ -259,7 +264,9 @@ export class ShellRegistry {
     const outputFile = join(this.shellsDir, `${id}.output`);
     const exitFile = join(this.shellsDir, `${id}.exit`);
     const inputFifo = join(this.shellsDir, `${id}.in`);
-    for (const f of [metaFile, outputFile, exitFile, inputFifo]) {
+    const notifyFile = join(this.shellsDir, `${id}.notify`);
+    const callbackFile = `${outputFile}.callback`;
+    for (const f of [metaFile, outputFile, exitFile, inputFifo, notifyFile, callbackFile]) {
       try { if (existsSync(f)) unlinkSync(f); } catch {}
     }
     return removed;
@@ -267,6 +274,7 @@ export class ShellRegistry {
 
   close() {
     for (const entry of this.shells.values()) {
+      if (entry.detached && !entry.done) continue;
       if (!entry.done) {
         try {
           if (entry.process) {
@@ -365,6 +373,7 @@ export const runCommandTool: ShellToolFactory = (cfg) => ({
     // Didn't finish in time — unref so lc can exit. The wrapper will fire
     // the lc callback when the command exits.
     entry.detached = true;
+    if (entry.notifyFile) writeFileSync(entry.notifyFile, '');
     if (entry.process) entry.process.unref();
     return {
       toolCallId: '',

@@ -21,8 +21,10 @@ export interface CodeToolsConfig {
   model?: Model;
   codeSearchMaxIterations?: number;
   visionModel?: Model;
-  /** Path to the `lc` binary for background-task callbacks. */
+  /** Runtime executable for background-task callbacks. */
   callbackBin?: string;
+  /** Optional lc entry script passed to the runtime executable. */
+  callbackEntry?: string;
   /** Session key for background-task callbacks. */
   callbackSessionKey?: string;
 }
@@ -37,7 +39,11 @@ export default function createCodeToolsExtension(config?: CodeToolsConfig): Exte
 
   const registry = new ShellRegistry(config?.shellsDir);
   if (config?.callbackBin && config?.callbackSessionKey) {
-    registry.callback = { lcBin: config.callbackBin, sessionKey: config.callbackSessionKey };
+    registry.callback = {
+      lcBin: config.callbackBin,
+      lcEntry: config.callbackEntry,
+      sessionKey: config.callbackSessionKey,
+    };
   }
   const todoStore = new TodoStore(config?.todoFile);
 

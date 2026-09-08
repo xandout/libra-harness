@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Agent } from '../../agent.js';
@@ -595,6 +595,20 @@ describe('code-tools extension', () => {
       expect(result.content).toContain('hello from bash');
     });
 
+    it('preserves shell quoting, substitution, and command separators', async () => {
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension());
+      const runTool = (agent as any).tools.get('run_command');
+
+      const result = await runTool.execute(
+        { CommandLine: 'printf "quoted value\\n"; echo "stamp-$(printf 123)"', Cwd: tmpDir, WaitMsBeforeAsync: 3000 },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+
+      expect(result.content).toContain('quoted value\nstamp-123');
+      expect(result.content).not.toContain('"quoted value');
+    });
+
     it('captures failing commands with non-zero exit code', async () => {
       const agent = new Agent({ model: mockModel() as any });
       agent.use(createCodeToolsExtension());
@@ -620,7 +634,7 @@ describe('code-tools extension', () => {
       );
 
       expect(result.content).toContain('Command sent to background. Task ID:');
-      const match = result.content.match(/Task ID: (task_\d+)/);
+      const match = result.content.match(/Task ID: (task_[\w-]+)/);
       expect(match).toBeTruthy();
       const taskId = match![1];
 
@@ -637,6 +651,35 @@ describe('code-tools extension', () => {
         { signal: new AbortController().signal, metadata: {} },
       );
       expect(killRes.content).toContain(`Killed task ${taskId}`);
+    });
+
+    it('fires the configured callback after a background task exits', async () => {
+      const callbackFile = join(tmpDir, 'callback.txt');
+      const callbackScript = join(tmpDir, 'callback.sh');
+      const shellsDir = join(tmpDir, 'shells');
+      writeFileSync(callbackScript, `printf '%s\\n' "$*" > "${callbackFile}"\n`);
+
+      const agent = new Agent({ model: mockModel() as any });
+      agent.use(createCodeToolsExtension({
+        shellsDir,
+        callbackBin: '/bin/bash',
+        callbackEntry: callbackScript,
+        callbackSessionKey: 'test-session',
+      }));
+      const runTool = (agent as any).tools.get('run_command');
+
+      const result = await runTool.execute(
+        { CommandLine: 'sleep 0.1; echo finished', Cwd: tmpDir, WaitMsBeforeAsync: 0 },
+        { signal: new AbortController().signal, metadata: {} },
+      );
+      const taskId = result.content.match(/Task ID: (task_[\w-]+)/)![1];
+
+      for (let i = 0; i < 20 && !existsSync(callbackFile); i++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      expect(readFileSync(join(shellsDir, `${taskId}.output`), 'utf-8')).toContain('finished');
+      expect(readFileSync(callbackFile, 'utf-8')).toContain(`--session test-session FYI: Background task ${taskId} finished`);
     });
 
     it('handles run_command and manage_task error conditions', async () => {
