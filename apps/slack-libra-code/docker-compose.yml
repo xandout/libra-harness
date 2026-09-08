@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  agent:
+    build:
+      context: ../../
+      dockerfile: apps/slack-libra-code/agent.Dockerfile
+    environment:
+      - CHROME_CDP_URL=http://browser:18800
+      # Pass through your credentials here:
+      # - SLACK_APP_TOKEN
+      # - SLACK_BOT_TOKEN
+      # - OPENAI_API_KEY
+      # - ANTHROPIC_API_KEY
+    volumes:
+      - workspace-data:/home/node/workspace
+    depends_on:
+      - browser
+
+  browser:
+    build:
+      context: ../../
+      dockerfile: apps/slack-libra-code/browser.Dockerfile
+    environment:
+      - VNC_PASSWORD=connie
+    volumes:
+      - workspace-data:/home/node/workspace
+    ports:
+      - "5900:5900"
+      - "18800:18800"
+
+volumes:
+  workspace-data:

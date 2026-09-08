@@ -18,7 +18,7 @@ import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { resolve as pathResolve, basename as pathBasename, extname as pathExtname } from 'node:path';
 
 const CDP_PORT = process.env.CHROME_DEBUG_PORT || 18800;
-const CDP_URL = `http://127.0.0.1:${CDP_PORT}`;
+const CDP_URL = process.env.CHROME_CDP_URL || `http://127.0.0.1:${CDP_PORT}`;
 const REFS_FILE = '/tmp/cdp_ax_refs.json';
 const DEFAULT_DOWNLOAD_DIR = process.env.CHROME_DOWNLOAD_DIR || (existsSync('/home/node/workspace') ? '/home/node/workspace/downloads' : pathResolve(process.cwd(), 'downloads'));
 
