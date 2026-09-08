@@ -5,7 +5,8 @@
   "type": "module",
   "bin": {
     "lc": "dist/index.js",
-    "cdp": "bin/cdp",
+    "cdp": "dist/src/cdp-entry.js",
+    "fallow-cdp": "src/cdp-entry.ts",
     "screenshot": "bin/screenshot",
     "start-browser": "bin/start-browser"
   },
