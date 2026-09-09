@@ -302,6 +302,14 @@ async function runStdout(
       if (err?.stack) {
         process.stderr.write(`${err.stack}\n`);
       }
+      let cause = err?.cause;
+      const seen = new Set<unknown>();
+      while (cause && !seen.has(cause)) {
+        seen.add(cause);
+        const message = cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause);
+        process.stderr.write(`[caused by] ${message}\n`);
+        cause = cause instanceof Error ? cause.cause : undefined;
+      }
     }
   } finally {
     socketServer.close();

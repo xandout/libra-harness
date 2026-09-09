@@ -1,3 +1,4 @@
+import { APICallError } from '@ai-sdk/provider';
 import type {
   LanguageModelV4,
   LanguageModelV4CallOptions,
@@ -47,28 +48,36 @@ export class AISdkModel implements Model {
 
   private async generateBatch(request: ModelRequest): Promise<ModelResponse> {
     const callOptions = await this.toCallOptions(request);
-    const result = await this.model.doGenerate(callOptions);
+    const result = await retryProviderCall(() => this.model.doGenerate(callOptions), request.signal);
     return this.fromAISdkResult(result);
   }
 
   private async generateStream(request: ModelRequest): Promise<ModelResponse> {
     const onDelta = request.onDelta!;
     const callOptions = await this.toCallOptions(request);
-    const { stream } = await this.model.doStream(callOptions);
-    const state = new StreamState(onDelta);
 
-    const reader = stream.getReader();
-    try {
-      while (true) {
-        const { done, value: part } = await reader.read();
-        if (done) break;
-        state.processPart(part);
+    for (let attempt = 0; ; attempt++) {
+      const state = new StreamState(onDelta);
+      try {
+        const { stream } = await this.model.doStream(callOptions);
+        const reader = stream.getReader();
+        try {
+          while (true) {
+            const { done, value: part } = await reader.read();
+            if (done) break;
+            state.processPart(part);
+          }
+        } finally {
+          reader.releaseLock();
+        }
+        return state.finalize();
+      } catch (error) {
+        if (attempt >= 2 || state.hasOutput() || !isRetryableProviderError(error) || request.signal?.aborted) {
+          throw error;
+        }
+        await retryDelay(attempt, request.signal);
       }
-    } finally {
-      reader.releaseLock();
     }
-
-    return state.finalize();
   }
 
   private async toCallOptions(request: ModelRequest): Promise<LanguageModelV4CallOptions> {
@@ -173,6 +182,34 @@ export class AISdkModel implements Model {
   }
 }
 
+async function retryProviderCall<T>(operation: () => PromiseLike<T>, signal?: AbortSignal): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (attempt >= 2 || !isRetryableProviderError(error) || signal?.aborted) throw error;
+      await retryDelay(attempt, signal);
+    }
+  }
+}
+
+function isRetryableProviderError(error: unknown): boolean {
+  return APICallError.isInstance(error) && error.isRetryable === true;
+}
+
+async function retryDelay(attempt: number, signal?: AbortSignal): Promise<void> {
+  const delayMs = 2000 * 2 ** attempt;
+  await new Promise<void>((resolve) => {
+    const timeout = setTimeout(resolve, delayMs);
+    if (signal) {
+      signal.addEventListener('abort', () => {
+        clearTimeout(timeout);
+        resolve();
+      }, { once: true });
+    }
+  });
+}
+
 function toAISdkContent(content: MessageContent): Array<LanguageModelV4TextPart | LanguageModelV4FilePart> {
   if (typeof content === 'string') return content ? [{ type: 'text', text: content }] : [];
   const result: Array<LanguageModelV4TextPart | LanguageModelV4FilePart> = [];
@@ -252,6 +289,14 @@ class StreamState {
   public reasoningBuffer = '';
 
   constructor(private onDelta: (delta: any) => void) {}
+
+  public hasOutput(): boolean {
+    return this.reasoningBuffer.length > 0
+      || this.content.length > 0
+      || this.toolCalls.length > 0
+      || [...this.textById.values()].some((text) => text.length > 0)
+      || [...this.toolInputBuffers.values()].some((buffer) => buffer.input.length > 0);
+  }
 
   public processPart(part: LanguageModelV4StreamPart): void {
     switch (part.type) {

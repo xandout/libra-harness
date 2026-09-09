@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { APICallError } from '@ai-sdk/provider';
 import { AISdkModel, type Message, type MessageContent, type ToolDefinition } from '@xandout/libra-harness';
 
 // ── Fake V4 LanguageModel ───────────────────────────────────────────
@@ -40,6 +41,16 @@ function fakeModel(opts: {
 
 function user(content: MessageContent): Message {
   return { role: 'user', content };
+}
+
+function retryableError(): APICallError {
+  return new APICallError({
+    message: 'Failed to process successful response',
+    url: 'https://api.example.com/chat',
+    requestBodyValues: {},
+    statusCode: 200,
+    isRetryable: true,
+  });
 }
 
 // ── Batch generation ────────────────────────────────────────────────
@@ -377,6 +388,54 @@ describe('AISdkModel streaming', () => {
     });
 
     expect(response.message.toolCalls).toBeUndefined();
+  });
+
+  it('retries a retryable provider failure before stream output', async () => {
+    let calls = 0;
+    const model = new AISdkModel(fakeModel({
+      doStream: async () => {
+        calls++;
+        if (calls === 1) {
+          return { stream: new ReadableStream({ start(controller) { controller.error(retryableError()); } }) };
+        }
+        return {
+          stream: new ReadableStream({
+            start(controller) {
+              controller.enqueue({ type: 'text-start', id: 't1' });
+              controller.enqueue({ type: 'text-delta', id: 't1', delta: 'recovered' });
+              controller.enqueue({ type: 'finish', finishReason: { unified: 'stop' }, usage: { inputTokens: { total: 1 }, outputTokens: { total: 1 } } });
+              controller.close();
+            },
+          }),
+        };
+      },
+    }));
+
+    const response = await model.generate({ messages: [user('hi')], onDelta: () => {} });
+
+    expect(calls).toBe(2);
+    expect(response.message.content).toBe('recovered');
+  }, 5000);
+
+  it('does not retry after stream output has started', async () => {
+    let calls = 0;
+    const model = new AISdkModel(fakeModel({
+      doStream: async () => {
+        calls++;
+        return {
+          stream: new ReadableStream({
+            start(controller) {
+              controller.enqueue({ type: 'text-start', id: 't1' });
+              controller.enqueue({ type: 'text-delta', id: 't1', delta: 'partial' });
+              setTimeout(() => controller.error(retryableError()), 0);
+            },
+          }),
+        };
+      },
+    }));
+
+    await expect(model.generate({ messages: [user('hi')], onDelta: () => {} })).rejects.toThrow('Failed to process successful response');
+    expect(calls).toBe(1);
   });
 
   it('throws on stream error parts', async () => {
