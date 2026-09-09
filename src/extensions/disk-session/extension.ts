@@ -1,1107 +1,313 @@
-import { readFileSync, appendFileSync, mkdirSync, readdirSync, writeFileSync, existsSync, renameSync } from 'node:fs';
-import { join } from 'node:path';
-import { pruneMessages } from 'ai';
-import type { Extension, TurnContext, Model } from '@xandout/libra-harness';
-import { messageContentToText } from '@xandout/libra-harness';
-import type { Message, MessageContent, Role, ToolCall } from '@xandout/libra-harness';
+import type { Extension } from '../../extension.js';
+import type { Model } from '../../model.js';
+import type { Message } from '../../types.js';
+import { messageContentToText } from '../../types.js';
+import {
+  SessionLedger,
+  type LedgerUsage,
+  type MessageLedgerRecord,
+  type SessionRecord,
+} from './ledger.js';
+import {
+  applyCheckpoint,
+  compactionChunk,
+  latestCheckpoint,
+  projectContext,
+  scopeKey,
+  selectScope,
+  transcriptForSummary,
+  type ProjectionPolicy,
+} from './projector.js';
 
-/**
- * A single record in a session's JSONL log.
- *
- * Maps directly to a Message plus correlation metadata. The system
- * prompt that was active for a turn is captured on the user record's
- * `systemPrompt` field. Background channel messages (observed but not
- * directed at the agent) are stored as `system` records so the agent
- * sees them as context, not as messages to respond to.
- */
-export interface SessionRecord {
-  role: 'user' | 'assistant' | 'tool' | 'control' | 'system';
-  content: MessageContent;
-  toolCalls?: ToolCall[];
-  toolCallId?: string;
-  name?: string;
-  /** Message correlation id (e.g. a Slack message timestamp, a Discord message id). */
-  ts: string;
-  /** Thread parent correlation id — undefined for top-level messages. */
-  threadTs?: string;
-  /** ISO timestamp for internal tracking. */
-  recordedAt: string;
-  /**
-   * The system prompt that was active for this turn. Persisted on the
-   * user record (the first record of each turn) so every turn's JSONL
-   * entry shows exactly what instructions the model was operating under.
-   * Absent on assistant, tool, and control records. Lets you audit
-   * "why did the model respond this way?" without replaying config +
-   * extension state.
-   */
-  systemPrompt?: string;
-  /** Token usage from the LLM provider (accumulated across iterations). */
-  usage?: {
-    promptTokens: number;
-    completionTokens: number;
-    iterations: number;
-    /** Prompt tokens served from provider cache (accumulated). */
-    cachedPromptTokens?: number;
-    /** Reasoning/thinking tokens (accumulated). */
-    reasoningTokens?: number;
-  };
-  /**
-   * Generic enrichment bag. Populated opaquely from
-   * `ctx.turn.metadata.sessionMeta` — any extension may write into
-   * that metadata key during `beforeTurn`/`afterLLM` and disk-session
-   * persists it here without inspecting the contents. Keys are owned
-   * by the extension that writes them (e.g. `keywords`, `sentiment`).
-   */
-  meta?: Record<string, unknown>;
-}
-
-/**
- * Identifies which session a turn belongs to.
- *
- * The host (or a resolver) produces this from turn metadata — the
- * disk-session extension never reads host-specific types directly.
- */
 export interface SessionIdentity {
-  /** Stable session key — used as the JSONL filename and in-memory cache key. e.g. 'slack_C1', 'dm_U1', 'issue_42'.
-   * Should be filesystem-safe (alphanumeric, underscore, hyphen). Characters outside [a-zA-Z0-9_-] are replaced with '_' for the filename, so keys with colons or dots won't round-trip identically through a restart. */
   key: string;
-  /** Correlation id for the incoming message (persisted as `record.ts`). */
   messageTs: string;
-  /** Parent correlation id — when set, this message is a reply in a thread/sub-conversation. Persisted as `record.threadTs` and used as the context fork point. */
   threadTs?: string;
-  /** True for 1:1 conversations (DMs) — disables thread forking, uses simple last-N history. */
   isDirect?: boolean;
 }
 
-/**
- * Extracts a {@link SessionIdentity} from turn metadata.
- *
- * The host supplies a resolver so disk-session doesn't need to know
- * about Slack channels, Discord channels, or any other host concept.
- * Return `undefined` to skip session handling for a turn.
- */
 export interface SessionResolver {
   resolve(metadata: Record<string, unknown>): SessionIdentity | undefined;
 }
 
 export interface DiskSessionConfig {
-  /** Directory for session JSONL files. Default: ./sessions */
   sessionDir?: string;
-  /**
-   * Max records to keep in memory per session. Older records are
-   * evicted from the cache but remain in the JSONL file.
-   * Default: 1000.
-   */
-  maxRecords?: number;
-  /**
-   * Max messages to include in the agent's context per turn.
-   * When history reaches this threshold, auto-summarization is triggered.
-   * Default: 50.
-   */
   maxContextMessages?: number;
-  /**
-   * Number of messages to evict or compact at once when exceeding maxContextMessages.
-   * By evicting in discrete chunks rather than 1-by-1 per turn, the prompt prefix
-   * stays stable for consecutive turns, maximizing LLM prompt cache hits.
-   * Default: Math.max(1, Math.floor(maxContextMessages / 2)).
-   */
-  contextEvictionStep?: number;
-  /**
-   * Fallback message limits to back off to if a context length error occurs
-   * (e.g. [100, 50, 25]). If the model provider rejects a request due to
-   * context length, the extension steps down to the next fallback limit.
-   * Default: [maxContextMessages, Math.floor(maxContextMessages / 2), Math.floor(maxContextMessages / 4)].
-   */
-  fallbackThresholds?: number[];
-  /**
-   * Whether to automatically summarize older conversation messages when history
-   * reaches maxContextMessages.
-   * Default: true.
-   */
   autoSummarize?: boolean;
-  /**
-   * Model to use for generating auto-summaries.
-   * Defaults to the agent's configured model if not explicitly provided.
-   */
   model?: Model;
-  /**
-   * Number of top-level (non-thread) messages to include as channel
-   * context when forking a thread. These are messages that came BEFORE
-   * the thread parent — what the channel was discussing when the thread
-   * started. Default: 10.
-   */
   channelContextMessages?: number;
-  /**
-   * Number of recent top-level messages to include after the last thread
-   * reply. This gives the agent awareness of what's happened in the
-   * channel since the thread was last active (e.g. if someone comes back
-   * to a thread a week later, the agent sees recent channel activity).
-   * Default: 5.
-   */
   recentChannelMessages?: number;
-  /** Load existing JSONL files into memory on startup. Default: true. */
+  toolCallRetention?: number;
   loadOnStartup?: boolean;
-  /**
-   * Print a summary line when sessions are loaded from disk.
-   * Default: true.
-   */
   verbose?: boolean;
-  /**
-   * Resolve a {@link SessionIdentity} from turn metadata. Default:
-   * reads `metadata.session` as a `SessionIdentity`, falls back to
-   * `metadata.sessionId` as a plain key, then to `'default'`.
-   */
   resolver?: SessionResolver;
 }
 
-/**
- * Default resolver: reads `metadata.session` as a `SessionIdentity`,
- * falls back to `metadata.sessionId` as a plain key, then to `'default'`.
- */
-const defaultResolver: SessionResolver = {
-  resolve(metadata) {
-    const session = metadata.session as SessionIdentity | undefined;
-    if (session && typeof session.key === 'string') return session;
-    const sessionId = metadata.sessionId as string | undefined;
-    if (sessionId) return { key: sessionId, messageTs: '' };
-    return { key: 'default', messageTs: '' };
-  },
-};
-
-/**
- * Sanitizes a message sequence to strictly conform to LLM tool-call schemas:
- * 1. Every message with role 'tool' MUST directly follow an assistant message
- *    with a matching tool call id (or follow valid sibling tool messages for that same assistant).
- *    Any orphan or duplicate tool messages are dropped.
- * 2. If an assistant message has toolCalls, but some or all tool calls were never
- *    fulfilled (e.g. session interrupted mid-turn or tool execution halted), its
- *    toolCalls array is pruned to only the fulfilled tool calls.
- * 3. If an assistant message has toolCalls but none were fulfilled:
- *    - If the assistant message has non-empty text content, toolCalls is stripped.
- *    - If the assistant message has no text content, it is removed entirely.
- */
-export function sanitizeConversationMessages(messages: Message[]): Message[] {
-  const result: Message[] = [];
-
-  let pendingAssistantIdx = -1;
-  let pendingToolCallIds: Set<string> | null = null;
-  let fulfilledToolCallIds: Set<string> = new Set();
-
-  function finalizePendingAssistant() {
-    if (pendingAssistantIdx === -1 || !pendingToolCallIds) return;
-
-    const assistantMsg = result[pendingAssistantIdx];
-    if (assistantMsg && assistantMsg.toolCalls) {
-      const keptCalls = assistantMsg.toolCalls.filter((tc) => fulfilledToolCallIds.has(tc.id));
-      if (keptCalls.length > 0) {
-        assistantMsg.toolCalls = keptCalls;
-      } else {
-        delete assistantMsg.toolCalls;
-        const text = messageContentToText(assistantMsg.content).trim();
-        if (!text) {
-          result.splice(pendingAssistantIdx, 1);
-        }
-      }
-    }
-
-    pendingAssistantIdx = -1;
-    pendingToolCallIds = null;
-    fulfilledToolCallIds = new Set();
-  }
-
-  for (const msg of messages) {
-    if (msg.role === 'tool') {
-      if (!pendingToolCallIds || !msg.toolCallId || !pendingToolCallIds.has(msg.toolCallId)) {
-        // Orphan tool message with no matching preceding assistant tool call — drop it
-        continue;
-      }
-      if (fulfilledToolCallIds.has(msg.toolCallId)) {
-        // Duplicate tool message for the same tool call id — drop it
-        continue;
-      }
-
-      fulfilledToolCallIds.add(msg.toolCallId);
-      result.push(msg);
-      continue;
-    }
-
-    // Any non-tool message finalizes the preceding assistant's tool-calls
-    finalizePendingAssistant();
-
-    if (msg.role === 'assistant') {
-      if (msg.toolCalls && msg.toolCalls.length > 0) {
-        pendingAssistantIdx = result.length;
-        pendingToolCallIds = new Set(msg.toolCalls.map((tc) => tc.id));
-        fulfilledToolCallIds = new Set();
-        result.push({ ...msg, toolCalls: [...msg.toolCalls] });
-      } else {
-        result.push(msg);
-      }
-    } else {
-      // user or system message
-      result.push(msg);
-    }
-  }
-
-  finalizePendingAssistant();
-  return result;
-}
-
-export function isContextLengthError(err: unknown): boolean {
-  if (!err) return false;
-  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
-  return (
-    msg.includes('context_length') ||
-    msg.includes('context length') ||
-    msg.includes('prompt is too long') ||
-    msg.includes('maximum context length') ||
-    msg.includes('exceeds the context window') ||
-    msg.includes('too many tokens') ||
-    msg.includes('token limit') ||
-    msg.includes('max_tokens') ||
-    msg.includes('string_above_max_length')
-  );
-}
-
-export async function generateSessionSummary(
-  model: Model,
-  records: SessionRecord[],
-): Promise<string> {
-  const summarySystemPrompt =
-    'You are a precise conversation summarizer for an AI agent. ' +
-    'Provide a dense, structured summary of the provided conversation history. ' +
-    'Preserve all essential technical details, user goals, key decisions, file paths, ' +
-    'code changes, commands executed, tool outputs, errors, and pending tasks. ' +
-    'Do not include conversational filler. Output only the summary.';
-
-  const transcript = records
-    .map((r) => {
-      const text = messageContentToText(r.content).trim();
-      const role = r.role.toUpperCase();
-      const tools = r.toolCalls ? ` [called: ${r.toolCalls.map((tc) => tc.name).join(', ')}]` : '';
-      return `[${role}${tools}]: ${text}`;
-    })
-    .filter((line) => line.length > 0)
-    .join('\n\n');
-
-  const response = await model.generate({
-    messages: [
-      {
-        role: 'user',
-        content: `Please summarize this earlier conversation segment to preserve context:\n\n${transcript}`,
-      },
-    ],
-    systemPrompt: summarySystemPrompt,
-  });
-
-  return messageContentToText(response.message.content).trim();
-}
-
-/**
- * Disk-backed session extension.
- *
- * ## Architecture
- *
- * **One JSONL file per session** (`<sessionKey>.jsonl`). Append-only —
- * every message the agent sees (human or bot, top-level or threaded) is
- * appended. This log is the source of truth.
- *
- * **Snapshot at beforeTurn**: when a turn starts, the extension takes a
- * read-only snapshot of the session log at that moment. The turn runs
- * against the snapshot. Concurrent turns each take their own snapshot
- * and don't see each other's in-progress work.
- *
- * **Fork for threads**: when a thread reply comes in (identity has
- * `threadTs`), the snapshot is filtered to include only:
- *   1. Top-level messages before the thread parent (channel context)
- *   2. All messages in that thread (parent + replies)
- *   3. Recent top-level messages after the last thread reply
- *
- * **Append after turn**: when the turn finishes, new messages (user +
- * assistant + tool calls) are appended to the session log. No data is
- * ever rewritten or reordered.
- *
- * **Stable prefix for LLM caching**: the messages array is built as
- *   [system prompt] + [stable session history] + [new user message]
- * The session history grows monotonically (append-only), so earlier
- * tokens stay cached upstream. Per-turn metadata is injected at the end
- * of the context (by a host-side `beforeContext` hook), not the
- * beginning, to preserve the cache prefix.
- *
- * ## Host integration
- *
- * The host supplies a {@link SessionResolver} (or writes
- * `metadata.session`) so the extension knows which session a turn
- * belongs to. The extension itself is host-agnostic — it doesn't know
- * about Slack, Discord, or any other platform.
- */
-export default function createDiskSessionExtension(
-  config?: DiskSessionConfig,
-): Extension & {
+export interface DiskSessionExtension extends Extension {
   getRecords(sessionKey?: string): SessionRecord[];
   getSessions(): string[];
-  clear(sessionKey?: string): void;
-  clearAll(): void;
   appendControl(sessionKey: string, content: string, ts?: string, threadTs?: string): void;
   appendMessage(sessionKey: string, content: string, opts?: {
     ts?: string;
     threadTs?: string;
     meta?: Record<string, unknown>;
   }): void;
-  getEffectiveLimit(sessionKey?: string): number;
-  setEffectiveLimit(sessionKey: string, limit: number): void;
-} {
-  const dir = config?.sessionDir ?? './sessions';
-  const maxRecords = config?.maxRecords ?? 1000;
-  const maxContextMessages = config?.maxContextMessages ?? 50;
-  const contextEvictionStep = config?.contextEvictionStep ?? Math.max(1, Math.floor(maxContextMessages / 2));
-  const autoSummarize = config?.autoSummarize ?? true;
-  const fallbackThresholds = config?.fallbackThresholds ?? [
-    maxContextMessages,
-    Math.max(10, Math.floor(maxContextMessages / 2)),
-    Math.max(5, Math.floor(maxContextMessages / 4)),
-  ];
-  const channelContextMessages = config?.channelContextMessages ?? 10;
-  const recentChannelMessages = config?.recentChannelMessages ?? 5;
-  const loadOnStartup = config?.loadOnStartup ?? true;
-  const resolver = config?.resolver ?? defaultResolver;
+}
 
-  mkdirSync(dir, { recursive: true });
+const defaultResolver: SessionResolver = {
+  resolve(metadata) {
+    const session = metadata.session as SessionIdentity | undefined;
+    if (session && typeof session.key === 'string') return session;
+    const sessionId = metadata.sessionId;
+    if (typeof sessionId === 'string' && sessionId) return { key: sessionId, messageTs: '' };
+    return { key: 'default', messageTs: '' };
+  },
+};
 
-  // In-memory cache: sessionKey → SessionRecord[]
-  // This is the live log. Reads take a snapshot (copy); writes append.
-  const store = new Map<string, SessionRecord[]>();
-  // Effective context limit per session for fallback backoff
-  const sessionLimits = new Map<string, number>();
+export async function generateSessionSummary(
+  model: Model,
+  records: MessageLedgerRecord[],
+): Promise<{ content: string; usage?: LedgerUsage }> {
+  const response = await model.generate({
+    messages: [{
+      role: 'user',
+      content: `Summarize this earlier conversation segment for continued agent work. Preserve user goals, decisions, file paths, code changes, commands, tool outputs, errors, and pending tasks. Omit filler.\n\n${transcriptForSummary(records)}`,
+    }],
+    systemPrompt: 'Produce a dense, precise context checkpoint. Output only the summary.',
+  });
+  const usage = response.usage ? {
+    promptTokens: response.usage.promptTokens,
+    completionTokens: response.usage.completionTokens,
+    ...(response.usage.cachedPromptTokens !== undefined ? { cachedPromptTokens: response.usage.cachedPromptTokens } : {}),
+    ...(response.usage.reasoningTokens !== undefined ? { reasoningTokens: response.usage.reasoningTokens } : {}),
+  } : undefined;
+  return { content: messageContentToText(response.message.content).trim(), ...(usage ? { usage } : {}) };
+}
 
-  // ── Load existing sessions from disk ──────────────────────────
-  if (loadOnStartup) {
-    try {
-      const files = readdirSync(dir).filter((f) => f.endsWith('.jsonl'));
-      let totalRecords = 0;
-      for (const file of files) {
-        try {
-          const raw = readFileSync(join(dir, file), 'utf-8');
-          const lines = raw.split('\n').filter((l) => l.trim());
-          // Parse per-line so a single corrupt record doesn't discard the
-          // entire session file — bad lines are skipped, good ones kept.
-          const records: SessionRecord[] = [];
-          for (const line of lines) {
-            try {
-              records.push(JSON.parse(line) as SessionRecord);
-            } catch {
-              // Skip corrupt line, keep the rest of the session.
-            }
-          }
-          const sessionKey = file.replace(/\.jsonl$/, '');
-          store.set(sessionKey, records.slice(-maxRecords));
-          totalRecords += records.length;
-        } catch {
-          // Skip unreadable files.
-        }
-      }
-      if (store.size > 0 && config?.verbose !== false) {
-        console.log(
-          `[disk-session] loaded ${store.size} session(s), ${totalRecords} record(s) from ${dir}`,
-        );
-      }
-    } catch {
-      // Directory doesn't exist — start empty.
-    }
-  }
-
-  function filePath(sessionKey: string): string {
-    const safe = sessionKey.replace(/[^a-zA-Z0-9_-]/g, '_');
-    return join(dir, `${safe}.jsonl`);
-  }
-
-  function appendToFile(sessionKey: string, records: SessionRecord[]): void {
-    if (records.length === 0) return;
-    const lines = records.map((r) => JSON.stringify(r)).join('\n') + '\n';
-    try {
-      appendFileSync(filePath(sessionKey), lines);
-    } catch (err) {
-      console.error(`[disk-session] failed to append to ${sessionKey}:`, err);
-    }
-  }
-
-  function persistRecords(sessionKey: string, newRecords: SessionRecord[]): void {
-    const records = store.get(sessionKey) ?? [];
-    records.push(...newRecords);
-    if (records.length > maxRecords) {
-      records.splice(0, records.length - maxRecords);
-    }
-    store.set(sessionKey, records);
-    appendToFile(sessionKey, newRecords);
-  }
-
-  function handleCompaction(turn: TurnContext, key: string, messageTs?: string) {
-    const summary = turn.response?.message ?? '';
-    const oldPath = filePath(key);
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const archivedName = `${key.replace(/[^a-zA-Z0-9_-]/g, '_')}_${timestamp}.jsonl`;
-    const archivedPath = join(dir, archivedName);
-
-    if (existsSync(oldPath)) {
-      renameSync(oldPath, archivedPath);
-    }
-
-    const summaryRecord: SessionRecord = {
-      role: 'assistant',
-      content: `[Session summary — prior conversation compacted ${new Date().toISOString()}]\n\n${summary}`,
-      ts: messageTs || String(Date.now() / 1000),
-      recordedAt: new Date().toISOString(),
-    };
-
-    store.set(key, [summaryRecord]);
-    appendToFile(key, [summaryRecord]);
-    turn.metadata['_compactArchivedFile'] = archivedName;
-  }
-
-  // ── Convert between Message and SessionRecord ──────────────────
-  function toMessage(r: SessionRecord): Message {
-    return {
-      // `toMessage` is only called on records that passed
-      // `isConversationMessage`, which excludes 'control' (and 'tool').
-      role: r.role as Role,
-      content: r.content,
-      ...(r.toolCalls ? { toolCalls: r.toolCalls } : {}),
-      ...(r.toolCallId ? { toolCallId: r.toolCallId } : {}),
-      ...(r.name ? { name: r.name } : {}),
-    };
-  }
-
-  function toRecord(msg: Message, ts: string, threadTs?: string): SessionRecord {
-    return {
-      role: msg.role as SessionRecord['role'],
-      content: msg.content,
-      ...(msg.toolCalls ? { toolCalls: msg.toolCalls } : {}),
-      ...(msg.toolCallId ? { toolCallId: msg.toolCallId } : {}),
-      ...(msg.name ? { name: msg.name } : {}),
-      ts,
-      ...(threadTs ? { threadTs } : {}),
-      recordedAt: new Date().toISOString(),
-    };
-  }
-
-  // Filter for context windows: keep user, system, assistant, and tool messages.
-  // We no longer filter out tool calls here. Instead, we rely on turn-boundary
-  // slicing to ensure we don't split a tool sequence.
-  const isConversationMessage = (r: SessionRecord): boolean => {
-    if (r.role === 'control') return false;
-    return true;
+export default function createDiskSessionExtension(config: DiskSessionConfig = {}): DiskSessionExtension {
+  const ledger = new SessionLedger(config.sessionDir ?? './sessions', {
+    loadOnStartup: config.loadOnStartup,
+    verbose: config.verbose,
+  });
+  const resolver = config.resolver ?? defaultResolver;
+  const policy: ProjectionPolicy = {
+    maxMessages: config.maxContextMessages ?? 50,
+    channelContextMessages: config.channelContextMessages ?? 10,
+    recentChannelMessages: config.recentChannelMessages ?? 5,
+    toolCallRetention: Math.max(1, config.toolCallRetention ?? 3),
   };
+  const compactingScopes = new Set<string>();
 
+  const identityFromTurn = (turn: { request: { metadata?: Record<string, unknown> } }) =>
+    resolver.resolve(turn.request.metadata ?? {});
 
-  // Drop trailing user messages that don't have a following assistant
-  // response. This happens when a turn was interrupted (crash, halt,
-  // kill -9). Including an unanswered user request from a prior session
-  // confuses the agent — it sees a request it never responded to.
-  function dropIncompleteTrailingTurn(records: SessionRecord[]): SessionRecord[] {
-    const result = [...records];
-    while (result.length > 0 && result[result.length - 1].role === 'user') {
-      result.pop();
-    }
-    return result;
-  }
-
-  function dropIncompleteTrailingMessages(messages: Message[]): Message[] {
-    const result = [...messages];
-    while (result.length > 0 && result[result.length - 1].role === 'user') {
-      result.pop();
-    }
-    return result;
-  }
-
-  function sliceAtTurnBoundary(records: SessionRecord[], max: number, step?: number): SessionRecord[] {
-    if (records.length <= max) return records;
-    const evictionStep = step && step > 0 ? step : 1;
-    let startIndex: number;
-    if (evictionStep <= 1) {
-      startIndex = records.length - max;
-    } else {
-      const baseline = Math.max(0, max - evictionStep);
-      const excess = records.length - baseline;
-      const chunks = Math.floor(excess / evictionStep);
-      startIndex = chunks * evictionStep;
-    }
-    // Skip forward until we find a turn boundary ('user' or 'system')
-    while (
-      startIndex < records.length &&
-      records[startIndex].role !== 'user' &&
-      records[startIndex].role !== 'system'
-    ) {
-      startIndex++;
-    }
-    return records.slice(startIndex);
-  }
-
-  // ── Build context (the "fork") from a snapshot ────────────────
-  // The snapshot is a read-only copy of the session records at the
-  // moment the turn started. This function builds the messages array
-  // that the agent will see.
-  //
-  // For top-level messages and DMs: last N records (sliced at turn boundary).
-  // For thread replies: channel context before parent + thread history.
-  function buildContext(
-    snapshot: SessionRecord[],
-    threadTs: string | undefined,
-    isDirect: boolean,
-    maxContext: number = maxContextMessages,
-    step: number = contextEvictionStep,
-  ): Message[] {
-    if (snapshot.length === 0) return [];
-
-    let rawRecords: SessionRecord[];
-
-    // DM or top-level message: last N messages, but safe-sliced to not
-    // split tool-call sequences.
-    if (isDirect || !threadTs) {
-      const filtered = snapshot.filter(isConversationMessage);
-      const complete = dropIncompleteTrailingTurn(filtered);
-      rawRecords = sliceAtTurnBoundary(complete, maxContext, step);
-    } else {
-      // Thread: fork from channel context.
-      const parentIdx = snapshot.findIndex((r) => r.ts === threadTs);
-
-      if (parentIdx === -1) {
-        // Parent not in snapshot (evicted from cache or very old).
-        // Fall back to last N messages.
-        const filtered = snapshot.filter(isConversationMessage);
-        const complete = dropIncompleteTrailingTurn(filtered);
-        rawRecords = sliceAtTurnBoundary(
-          complete,
-          maxContext,
-          step,
-        );
-      } else {
-        // Top-level messages before the parent (channel context at fork point).
-        const topLevelBefore = snapshot
-          .slice(0, parentIdx)
-          .filter((r) => !r.threadTs && isConversationMessage(r));
-        const slicedTopLevelBefore = sliceAtTurnBoundary(topLevelBefore, channelContextMessages);
-
-        // All messages in this thread (including the parent).
-        const threadMessages = snapshot
-          .filter(
-            (r) => (r.ts === threadTs || r.threadTs === threadTs) && isConversationMessage(r),
-          );
-
-        // Recent top-level messages after the last thread reply.
-        const lastThreadTs = threadMessages[threadMessages.length - 1]?.ts ?? threadTs;
-        let lastThreadIdx = parentIdx;
-        for (let i = snapshot.length - 1; i >= 0; i--) {
-          if (snapshot[i].ts === lastThreadTs) {
-            lastThreadIdx = i;
-            break;
-          }
-        }
-        const recentTopLevel = snapshot
-          .slice(lastThreadIdx + 1)
-          .filter((r) => !r.threadTs && isConversationMessage(r));
-        
-        const slicedRecentTopLevel = recentChannelMessages > 0
-          ? sliceAtTurnBoundary(recentTopLevel, recentChannelMessages)
-          : [];
-
-        rawRecords = [...slicedTopLevelBefore, ...threadMessages, ...slicedRecentTopLevel];
-      }
-    }
-
-    const messages = rawRecords.map(toMessage);
-    // pruneMessages strips reasoning parts from older assistant messages —
-    // we store reasoning in the JSONL for the record, but the model doesn't
-    // need its own old thinking tokens re-sent to it each turn.
-    const pruned = pruneMessages({ messages: messages as any[], reasoning: 'all' }) as Message[];
-    const sanitized = sanitizeConversationMessages(pruned);
-    return dropIncompleteTrailingMessages(sanitized);
-  }
-
-  // ── Resolve session identity from turn metadata ───────────────
-  function identityFromCtx(ctx: { turn: { request: { metadata?: Record<string, unknown> } } }): SessionIdentity | undefined {
-    return resolver.resolve(ctx.turn.request.metadata ?? {});
-  }
+  const appendMessageRecord = (
+    identity: SessionIdentity,
+    turnId: string | undefined,
+    message: Message,
+    meta?: Record<string, unknown>,
+    usage?: LedgerUsage,
+    systemPrompt?: string,
+  ) => ledger.append({
+    kind: 'message',
+    sessionKey: identity.key,
+    turnId,
+    role: message.role,
+    content: message.content,
+    ...(message.toolCalls?.length ? { toolCalls: message.toolCalls } : {}),
+    ...(message.toolCallId ? { toolCallId: message.toolCallId } : {}),
+    ...(message.name ? { name: message.name } : {}),
+    ts: identity.messageTs,
+    ...(identity.threadTs ? { threadTs: identity.threadTs } : {}),
+    ...(meta ? { meta } : {}),
+    ...(usage ? { usage } : {}),
+    ...(systemPrompt ? { systemPrompt } : {}),
+  });
 
   return {
     name: 'disk-session',
     priority: -100,
     install(agent) {
-      const activeModel: Model | undefined = config?.model ?? (agent as any).model;
+      const summaryModel = config.model ?? (agent as unknown as { model?: Model }).model;
 
-      // ── beforeTurn: take snapshot, build context, prepend ─────
-      // The snapshot is a copy of the session records at this moment.
-      // Concurrent turns each get their own snapshot — they don't
-      // see each other's in-progress work.
       agent.hook('beforeTurn', 'disk-session', async (ctx) => {
-        const identity = identityFromCtx(ctx);
+        const identity = identityFromTurn(ctx.turn);
         if (!identity) return;
-        const { key, messageTs, threadTs, isDirect } = identity;
-        const isDm = isDirect ?? false;
+        const turnId = crypto.randomUUID();
+        ctx.turn.metadata._diskSessionTurnId = turnId;
+        const scope = scopeKey(identity);
+        let snapshot = ledger.snapshot(identity.key);
 
-        const effectiveMax = sessionLimits.get(key) ?? maxContextMessages;
-
-        // ── Auto-summarization ──────────────────────────────────
-        // When conversation history reaches effectiveMax, auto-summarize the
-        // oldest chunk so earlier context is retained without thrashing prompt cache.
-        const liveRecords = store.get(key) ?? [];
-        const convCount = liveRecords.filter(isConversationMessage).length;
-        let autoCompacted = false;
-        let compactedCount = 0;
-
-        if (autoSummarize && activeModel && convCount >= effectiveMax) {
-          const step = config?.contextEvictionStep ?? Math.max(1, Math.floor(effectiveMax / 2));
-          let cutIndex = Math.min(step, liveRecords.length - 1);
-          while (
-            cutIndex < liveRecords.length &&
-            liveRecords[cutIndex].role !== 'user' &&
-            liveRecords[cutIndex].role !== 'system'
-          ) {
-            cutIndex++;
-          }
-
-          if (cutIndex > 0 && cutIndex < liveRecords.length) {
-            const recordsToSummarize = liveRecords.slice(0, cutIndex);
-            const recordsToKeep = liveRecords.slice(cutIndex);
+        if (config.autoSummarize !== false && summaryModel && !compactingScopes.has(`${identity.key}:${scope}`)) {
+          const selected = selectScope(snapshot, identity, policy);
+          const applied = applyCheckpoint(selected, latestCheckpoint(snapshot, scope));
+          const chunk = compactionChunk(applied.messages, policy.maxMessages);
+          if (chunk.length > 0) {
+            const lockKey = `${identity.key}:${scope}`;
+            compactingScopes.add(lockKey);
             try {
-              const summaryText = await generateSessionSummary(activeModel, recordsToSummarize);
-              if (summaryText) {
-                const summaryRecord: SessionRecord = {
-                  role: 'assistant',
-                  content: `[Conversation summary — prior history compacted ${new Date().toISOString()}]\n\n${summaryText}`,
-                  ts: recordsToSummarize[recordsToSummarize.length - 1]?.ts || String(Date.now() / 1000),
-                  recordedAt: new Date().toISOString(),
-                };
-
-                const compactedRecords = [summaryRecord, ...recordsToKeep];
-                store.set(key, compactedRecords);
-
-                const oldPath = filePath(key);
-                const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-                const archivedName = `${key.replace(/[^a-zA-Z0-9_-]/g, '_')}_${timestamp}.jsonl`;
-                const archivedPath = join(dir, archivedName);
-                if (existsSync(oldPath)) {
-                  try {
-                    renameSync(oldPath, archivedPath);
-                  } catch {}
-                }
-                appendToFile(key, compactedRecords);
-
-                autoCompacted = true;
-                compactedCount = recordsToSummarize.length;
+              const summary = await generateSessionSummary(summaryModel, chunk);
+              if (summary.content) {
+                ledger.append({
+                  kind: 'summary',
+                  sessionKey: identity.key,
+                  turnId,
+                  scope,
+                  throughRecordId: chunk[chunk.length - 1].id,
+                  sourceRecordCount: chunk.length,
+                  content: summary.content,
+                  ...(summary.usage ? { usage: summary.usage } : {}),
+                  policyVersion: 1,
+                  ts: identity.messageTs,
+                  ...(identity.threadTs ? { threadTs: identity.threadTs } : {}),
+                });
+                snapshot = ledger.snapshot(identity.key);
+                ctx.turn.metadata._autoCompacted = true;
               }
-            } catch (err) {
-              console.warn('[disk-session] auto-summarization failed, using window slice:', err);
+            } catch (error) {
+              console.warn('[disk-session] summary checkpoint failed; using bounded raw context:', error);
+            } finally {
+              compactingScopes.delete(lockKey);
             }
           }
         }
 
-        // Snapshot: copy the current records (read-only).
-        const currentRecords = store.get(key) ?? [];
-        const snapshot = [...currentRecords];
-
-        // Build the forked context from the snapshot.
-        const history = buildContext(snapshot, threadTs, isDm, effectiveMax, contextEvictionStep);
-
-        // ── Persist the user message immediately ────────────────
-        // Write the incoming user message to disk NOW, before the
-        // agent runs. If the process crashes mid-turn, the user's
-        // message is already saved. The assistant response is
-        // appended later in afterTurn.
-        //
-        // The system prompt is captured at afterTurn (not here) because
-        // beforeContext hooks (which run after beforeTurn) may modify
-        // ctx.turn.systemPrompt. Recording it here would miss those
-        // modifications. See afterTurn for the capture.
-        //
-        // Enrichment bag: any extension that ran before us in
-        // beforeTurn may have written into `sessionMeta`. We persist
-        // it opaquely — disk-session does not inspect the contents.
-        const sessionMeta = ctx.turn.metadata.sessionMeta as
-          | Record<string, unknown>
-          | undefined;
-        const userRecord = {
-          ...toRecord(
-            { role: 'user', content: ctx.turn.request.message },
-            messageTs,
-            threadTs,
-          ),
-          ...(sessionMeta ? { meta: sessionMeta } : {}),
-        };
-        persistRecords(key, [userRecord]);
-
-        // Track how many history messages we prepended so afterTurn
-        // knows where new messages start.
-        ctx.turn.metadata['_diskSessionHistoryLen'] = history.length;
-
-        // Immediately before the model acts: if auto-compaction occurred,
-        // inform the model so it can act accordingly. Never inform the human.
-        const messagesToPrepend: Message[] = [...history];
-        if (autoCompacted) {
-          const modelNotice: Message = {
-            role: 'system',
-            content: `[System Notice: Earlier conversation history (${compactedCount} messages) was automatically compacted into the summary above to preserve context. Refer to the summary for earlier decisions, code changes, and context.]`,
-          };
-          messagesToPrepend.push(modelNotice);
-          ctx.turn.metadata['_autoCompacted'] = true;
-        }
-
-        if (messagesToPrepend.length > 0) {
-          ctx.turn.messages = [...messagesToPrepend, ...ctx.turn.messages];
-        }
-
-        // Track all messages currently in ctx.turn.messages (both history and the
-        // initial user message just written) so beforeLLM only persists new steering messages.
-        const writtenMessages = new Set<Message>(ctx.turn.messages);
-        ctx.turn.metadata['_diskSessionWrittenMessages'] = writtenMessages;
+        const history = await projectContext(snapshot, identity, policy);
+        const meta = ctx.turn.metadata.sessionMeta as Record<string, unknown> | undefined;
+        appendMessageRecord(
+          identity,
+          turnId,
+          { role: 'user', content: ctx.turn.request.message },
+          meta,
+          undefined,
+          ctx.turn.systemPrompt,
+        );
+        ctx.turn.messages = [...history, ...ctx.turn.messages];
+        ctx.turn.metadata._diskSessionWrittenMessages = new Set(ctx.turn.messages);
       });
 
-      // ── beforeLLM: persist any mid-turn steering messages ─────
-      // When turn.steer() is called, agent.ts injects steering messages
-      // into turn.messages with a [steering] prefix. We persist them to disk
-      // right before the LLM runs to respond to them.
       agent.hook('beforeLLM', 'disk-session', async (ctx) => {
-        const identity = identityFromCtx(ctx);
+        const identity = identityFromTurn(ctx.turn);
         if (!identity) return;
-        const { key, messageTs, threadTs } = identity;
-
-        const written = ctx.turn.metadata['_diskSessionWrittenMessages'] as Set<Message> | undefined;
-        const sessionMeta = ctx.turn.metadata.sessionMeta as Record<string, unknown> | undefined;
-
-        const newSteering: SessionRecord[] = [];
-        for (const msg of ctx.turn.messages) {
-          if (msg.role === 'user' && (!written || !written.has(msg))) {
-            newSteering.push({
-              ...toRecord(msg, messageTs, threadTs),
-              ...(sessionMeta ? { meta: sessionMeta } : {}),
-            });
-            written?.add(msg);
+        const written = ctx.turn.metadata._diskSessionWrittenMessages as Set<Message> | undefined;
+        const turnId = ctx.turn.metadata._diskSessionTurnId as string | undefined;
+        const meta = ctx.turn.metadata.sessionMeta as Record<string, unknown> | undefined;
+        for (const message of ctx.turn.messages) {
+          if (message.role === 'user' && !written?.has(message)) {
+            appendMessageRecord(identity, turnId, message, meta);
+            written?.add(message);
           }
-        }
-
-        if (newSteering.length > 0) {
-          const records = store.get(key) ?? [];
-          records.push(...newSteering);
-          if (records.length > maxRecords) {
-            records.splice(0, records.length - maxRecords);
-          }
-          store.set(key, records);
-          appendToFile(key, newSteering);
         }
       });
 
-      // ── afterLLM: accumulate token usage + append assistant msg ──
-      // Each LLM call returns usage (prompt/completion tokens). We
-      // accumulate them across all iterations in the turn so the final
-      // assistant record has the total cost.
-      //
-      // We also append the assistant message (including tool calls) to
-      // the session log immediately, so the JSONL file is updated
-      // iteration by iteration rather than only at afterTurn. Tool
-      // results are appended in the afterTool hook below.
       agent.hook('afterLLM', 'disk-session', async (ctx) => {
-        const identity = identityFromCtx(ctx);
-        if (!identity) return;
-        const { key, messageTs, threadTs } = identity;
-
-        const usage = ctx.modelResponse?.usage;
-        if (usage) {
-          const prev = (ctx.turn.metadata['_diskSessionUsage'] as {
-            promptTokens: number;
-            completionTokens: number;
-            iterations: number;
-            cachedPromptTokens?: number;
-            reasoningTokens?: number;
-          }) ?? { promptTokens: 0, completionTokens: 0, iterations: 0 };
-          ctx.turn.metadata['_diskSessionUsage'] = {
-            promptTokens: prev.promptTokens + usage.promptTokens,
-            completionTokens: prev.completionTokens + usage.completionTokens,
-            iterations: prev.iterations + 1,
-            ...(usage.cachedPromptTokens && {
-              cachedPromptTokens: (prev.cachedPromptTokens ?? 0) + usage.cachedPromptTokens,
-            }),
-            ...(usage.reasoningTokens && {
-              reasoningTokens: (prev.reasoningTokens ?? 0) + usage.reasoningTokens,
-            }),
-          };
-        }
-
-        // ── Incremental append: write the assistant message now ──
-        // The agent core pushes the assistant message to turn.messages
-        // AFTER afterLLM fires, so we can't read it from there yet.
-        // Instead, we build the record from modelResponse.message.
-        const modelResponse = ctx.modelResponse;
-        if (modelResponse?.message) {
-          const sessionMeta = ctx.turn.metadata.sessionMeta as
-            | Record<string, unknown>
-            | undefined;
-          const usage = modelResponse.usage;
-          const record = {
-            ...toRecord(
-              modelResponse.message as Message,
-              messageTs,
-              threadTs,
-            ),
-            ...(usage ? { usage: {
-              promptTokens: usage.promptTokens,
-              completionTokens: usage.completionTokens,
-              iterations: 1,
-              ...(usage.cachedPromptTokens !== undefined && { cachedPromptTokens: usage.cachedPromptTokens }),
-              ...(usage.reasoningTokens !== undefined && { reasoningTokens: usage.reasoningTokens }),
-            } } : {}),
-            ...(sessionMeta ? { meta: sessionMeta } : {}),
-          };
-          persistRecords(key, [record]);
-        }
+        const identity = identityFromTurn(ctx.turn);
+        const response = ctx.modelResponse;
+        if (!identity || !response?.message) return;
+        const usage = response.usage ? {
+          promptTokens: response.usage.promptTokens,
+          completionTokens: response.usage.completionTokens,
+          ...(response.usage.cachedPromptTokens !== undefined ? { cachedPromptTokens: response.usage.cachedPromptTokens } : {}),
+          ...(response.usage.reasoningTokens !== undefined ? { reasoningTokens: response.usage.reasoningTokens } : {}),
+        } : undefined;
+        appendMessageRecord(
+          identity,
+          ctx.turn.metadata._diskSessionTurnId as string | undefined,
+          response.message,
+          ctx.turn.metadata.sessionMeta as Record<string, unknown> | undefined,
+          usage,
+        );
       });
 
-      // ── afterTool: append tool results incrementally ──────────────
-      // Each tool result is written to disk as soon as it completes,
-      // so the JSONL file reflects progress in real time.
       agent.hook('afterTool', 'disk-session', async (ctx) => {
-        const identity = identityFromCtx(ctx);
-        if (!identity) return;
-        const { key, messageTs, threadTs } = identity;
-
-        const toolResult = ctx.toolResult;
-        const toolCall = ctx.toolCall;
-        if (!toolResult || !toolCall) return;
-
-        const sessionMeta = ctx.turn.metadata.sessionMeta as
-          | Record<string, unknown>
-          | undefined;
-        const record: SessionRecord = {
-          role: 'tool',
-          content: toolResult.content,
-          toolCallId: toolResult.toolCallId,
-          name: toolCall.name,
-          ts: messageTs,
-          ...(threadTs ? { threadTs } : {}),
-          recordedAt: new Date().toISOString(),
-          ...(sessionMeta ? { meta: sessionMeta } : {}),
-        };
-        persistRecords(key, [record]);
+        const identity = identityFromTurn(ctx.turn);
+        if (!identity || !ctx.toolCall || !ctx.toolResult) return;
+        appendMessageRecord(
+          identity,
+          ctx.turn.metadata._diskSessionTurnId as string | undefined,
+          {
+            role: 'tool',
+            content: ctx.toolResult.content,
+            toolCallId: ctx.toolCall.id,
+            name: ctx.toolCall.name,
+          },
+          ctx.turn.metadata.sessionMeta as Record<string, unknown> | undefined,
+        );
       });
 
-      // ── afterTurn: finalize session turn ──────────────────────────
       agent.hook('afterTurn', 'disk-session', async (ctx) => {
-        const identity = identityFromCtx(ctx);
+        const identity = identityFromTurn(ctx.turn);
         if (!identity) return;
-        const { key, messageTs, threadTs } = identity;
-
-        delete ctx.turn.metadata['_diskSessionHistoryLen'];
-
-        // ── Compaction: rotate the session file ──────────────────
-        // When metadata.compacting is set, this turn was a compaction
-        // request (triggered by /compact). The agent's response is the
-        // summary. Instead of appending to the old session, we:
-        //   1. Rename the old JSONL file with a timestamp suffix
-        //   2. Seed a new session with the summary as the first record
-        // The compaction request/response are already in the old file
-        // (written by beforeTurn + the normal append below would have
-        // run, but we return early before that).
-        const isCompacting = ctx.turn.request.metadata?.compacting === true;
-
-        if (isCompacting) {
-          handleCompaction(ctx.turn, key, messageTs);
-          return;
-        }
-
-        // ── Persist any trailing unwritten steering messages ─────
-        // (in case a steering message arrived and the turn halted before beforeLLM ran)
-        const written = ctx.turn.metadata['_diskSessionWrittenMessages'] as Set<Message> | undefined;
-        delete ctx.turn.metadata['_diskSessionWrittenMessages'];
-        const sessionMeta = ctx.turn.metadata.sessionMeta as Record<string, unknown> | undefined;
-
-        const unwrittenSteering: SessionRecord[] = [];
-        for (const msg of ctx.turn.messages) {
-          if (msg.role === 'user' && (!written || !written.has(msg))) {
-            unwrittenSteering.push({
-              ...toRecord(msg, messageTs, threadTs),
-              ...(sessionMeta ? { meta: sessionMeta } : {}),
-            });
-            written?.add(msg);
+        const written = ctx.turn.metadata._diskSessionWrittenMessages as Set<Message> | undefined;
+        for (const message of ctx.turn.messages) {
+          if (message.role === 'user' && !written?.has(message)) {
+            appendMessageRecord(
+              identity,
+              ctx.turn.metadata._diskSessionTurnId as string | undefined,
+              message,
+              ctx.turn.metadata.sessionMeta as Record<string, unknown> | undefined,
+            );
+            written?.add(message);
           }
         }
-
-        if (unwrittenSteering.length > 0) {
-          persistRecords(key, unwrittenSteering);
-        }
-
-        // Pull accumulated usage for this turn (set by afterLLM hook).
-        const usage = ctx.turn.metadata['_diskSessionUsage'] as SessionRecord['usage'] | undefined;
-        delete ctx.turn.metadata['_diskSessionUsage'];
-
-        // Attach accumulated usage to the last assistant record in memory.
-        if (usage) {
-          const records = store.get(key) ?? [];
-          for (let i = records.length - 1; i >= 0; i--) {
-            if (records[i].role === 'assistant') {
-              records[i].usage = usage;
-              break;
-            }
-          }
-        }
-
-        // Backfill system prompt on the last user record (in-memory only).
-        // The system prompt wasn't available at beforeTurn (beforeContext
-        // hooks hadn't run yet), so we update it now.
-        const finalSystemPrompt = ctx.turn.systemPrompt;
-        if (finalSystemPrompt) {
-          const records = store.get(key) ?? [];
-          for (let i = records.length - 1; i >= 0; i--) {
-            if (records[i].role === 'user') {
-              records[i].systemPrompt = finalSystemPrompt;
-              break;
-            }
-          }
-        }
-
-        // Trim in-memory cache (file keeps full history).
-        const records = store.get(key) ?? [];
-        if (records.length > maxRecords) {
-          records.splice(0, records.length - maxRecords);
-          store.set(key, records);
-        }
+        ledger.append({
+          kind: 'event',
+          event: 'turn-complete',
+          sessionKey: identity.key,
+          turnId: ctx.turn.metadata._diskSessionTurnId as string | undefined,
+          content: ctx.turn.response?.message ?? '',
+          systemPrompt: ctx.turn.systemPrompt,
+          finishReason: ctx.turn.response?.finishReason,
+          ts: identity.messageTs,
+          ...(identity.threadTs ? { threadTs: identity.threadTs } : {}),
+        });
+        delete ctx.turn.metadata._diskSessionWrittenMessages;
+        delete ctx.turn.metadata._diskSessionTurnId;
       });
 
-      // ── onError: context length backoff fallback ───────────────
-      // If the model provider rejects a request due to context length,
-      // step down to the next fallback limit (e.g. 100 -> 50 -> 25)
-      // and compact the session immediately.
       agent.hook('onError', 'disk-session', async (ctx) => {
-        const identity = identityFromCtx(ctx);
+        const identity = identityFromTurn(ctx.turn);
         if (!identity) return;
-        const { key } = identity;
-
-        if (isContextLengthError(ctx.error)) {
-          const currentLimit = sessionLimits.get(key) ?? maxContextMessages;
-          const nextLimit = fallbackThresholds.find((t) => t < currentLimit);
-          if (nextLimit && nextLimit > 0) {
-            sessionLimits.set(key, nextLimit);
-            const records = store.get(key) ?? [];
-            const convRecords = records.filter(isConversationMessage);
-            if (convRecords.length > nextLimit && activeModel) {
-              try {
-                const toEvict = convRecords.length - nextLimit;
-                let cut = Math.min(toEvict + Math.max(1, Math.floor(nextLimit / 2)), records.length - 1);
-                while (cut < records.length && records[cut].role !== 'user' && records[cut].role !== 'system') {
-                  cut++;
-                }
-                if (cut > 0 && cut < records.length) {
-                  const chunk = records.slice(0, cut);
-                  const keep = records.slice(cut);
-                  const summary = await generateSessionSummary(activeModel, chunk);
-                  const summaryRecord: SessionRecord = {
-                    role: 'assistant',
-                    content: `[Conversation summary — context limit backed off to ${nextLimit} messages ${new Date().toISOString()}]\n\n${summary}`,
-                    ts: chunk[chunk.length - 1]?.ts || String(Date.now() / 1000),
-                    recordedAt: new Date().toISOString(),
-                  };
-                  const compacted = [summaryRecord, ...keep];
-                  store.set(key, compacted);
-                  appendToFile(key, compacted);
-                }
-              } catch {}
-            }
-          }
-        }
+        ledger.append({
+          kind: 'event',
+          event: 'turn-error',
+          sessionKey: identity.key,
+          turnId: ctx.turn.metadata._diskSessionTurnId as string | undefined,
+          content: ctx.error instanceof Error ? `${ctx.error.name}: ${ctx.error.message}` : String(ctx.error),
+          systemPrompt: ctx.turn.systemPrompt,
+          ts: identity.messageTs,
+          ...(identity.threadTs ? { threadTs: identity.threadTs } : {}),
+        });
       });
     },
-
-    /** Get current effective message limit for a session (reflects any fallback backoff). */
-    getEffectiveLimit(sessionKey: string = 'default'): number {
-      return sessionLimits.get(sessionKey) ?? maxContextMessages;
+    getRecords(sessionKey = 'default') {
+      return ledger.snapshot(sessionKey);
     },
-
-    /** Manually set effective message limit for a session. */
-    setEffectiveLimit(sessionKey: string, limit: number): void {
-      sessionLimits.set(sessionKey, limit);
+    getSessions() {
+      return ledger.sessions();
     },
-
-    /** Get all records for a session. */
-    getRecords(sessionKey: string = 'default'): SessionRecord[] {
-      return store.get(sessionKey) ?? [];
-    },
-
-    /**
-     * Append a control record (e.g. /halt) to the session log.
-     * Control records are persisted to disk but never included in the
-     * LLM context — they're for audit/logging only.
-     */
-    appendControl(sessionKey: string, content: string, ts?: string, threadTs?: string): void {
-      const record: SessionRecord = {
-        role: 'control',
+    appendControl(sessionKey, content, ts = String(Date.now() / 1000), threadTs) {
+      ledger.append({
+        kind: 'event',
+        event: 'control',
+        sessionKey,
         content,
-        ts: ts ?? String(Date.now() / 1000),
+        ts,
         ...(threadTs ? { threadTs } : {}),
-        recordedAt: new Date().toISOString(),
-      };
-      persistRecords(sessionKey, [record]);
+      });
     },
-
-    /**
-     * Append a background message to the session log. Stored as a
-     * `system` record so the agent sees it as context ("here's what
-     * the channel discussed") rather than a message to respond to.
-     *
-     * Unlike `appendControl`, system records ARE included in the LLM
-     * context window — they appear in the conversation history when
-     * the agent is triggered, giving it awareness of recent channel
-     * activity without needing to be mentioned on every message.
-     *
-     * The host should include sender info in the content (e.g.
-     * `[U123]: hey anyone seen the invoice?`) so the agent can
-     * distinguish who said what. Additional metadata (files, blocks,
-     * etc.) goes in `opts.meta` and is persisted to the JSONL for
-     * audit/debugging but not shown to the LLM.
-     */
-    appendMessage(
-      sessionKey: string,
-      content: string,
-      opts?: { ts?: string; threadTs?: string; meta?: Record<string, unknown> },
-    ): void {
-      const record: SessionRecord = {
+    appendMessage(sessionKey, content, opts = {}) {
+      ledger.append({
+        kind: 'message',
         role: 'system',
+        sessionKey,
         content,
-        ts: opts?.ts ?? String(Date.now() / 1000),
-        ...(opts?.threadTs ? { threadTs: opts.threadTs } : {}),
-        recordedAt: new Date().toISOString(),
-        ...(opts?.meta ? { meta: opts.meta } : {}),
-      };
-      persistRecords(sessionKey, [record]);
-    },
-
-    /** List all session keys. */
-    getSessions(): string[] {
-      return Array.from(store.keys());
-    },
-
-    /** Clear a single session (memory + disk). */
-    clear(sessionKey: string = 'default') {
-      store.delete(sessionKey);
-      const path = filePath(sessionKey);
-      if (existsSync(path)) {
-        try {
-          writeFileSync(path, '');
-        } catch {
-          // ignore
-        }
-      }
-    },
-
-    /** Clear all sessions. */
-    clearAll() {
-      for (const key of store.keys()) {
-        const path = filePath(key);
-        if (existsSync(path)) {
-          try {
-            writeFileSync(path, '');
-          } catch {
-            // ignore
-          }
-        }
-      }
-      store.clear();
+        ts: opts.ts ?? String(Date.now() / 1000),
+        ...(opts.threadTs ? { threadTs: opts.threadTs } : {}),
+        ...(opts.meta ? { meta: opts.meta } : {}),
+      });
     },
   };
 }
+
+export type { SessionRecord } from './ledger.js';

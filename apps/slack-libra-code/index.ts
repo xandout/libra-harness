@@ -713,16 +713,19 @@ app.command(slashCommand, async ({ command, ack, respond, client }) => {
         try { records.push(JSON.parse(line)); } catch {}
       }
 
-      // Filter conversation messages (exclude control)
-      const convRecords = records.filter((r) => r.role !== 'control');
+      // New ledger schema: records have kind === 'message' | 'summary' | 'event'.
+      // Conversation messages are kind === 'message' (with role user/assistant/tool/system).
+      const convRecords = records.filter((r) => r.kind === 'message' && r.role !== 'system');
       const totalHistoryCount = convRecords.length;
 
       // Active context window: up to maxContextMessages
       const activeWindowRecords = convRecords.slice(-maxContextMessages);
       const activeWindowCount = activeWindowRecords.length;
 
-      let isCompacted = false;
-      let compactedCycles = 0;
+      // Summary checkpoints are kind === 'summary' records (non-destructive compaction).
+      const summaryRecords = records.filter((r) => r.kind === 'summary');
+      const isCompacted = summaryRecords.length > 0;
+      const compactedCycles = summaryRecords.length;
       let lastPromptTokens: number | undefined;
       let lastCachedTokens: number | undefined;
       let lastCompletionTokens: number | undefined;
@@ -735,13 +738,8 @@ app.command(slashCommand, async ({ command, ack, respond, client }) => {
       let turnsCount = 0;
 
       for (const rec of records) {
-        if (rec.role === 'assistant') {
+        if (rec.kind === 'message' && rec.role === 'assistant') {
           turnsCount++;
-          const contentStr = typeof rec.content === 'string' ? rec.content : '';
-          if (contentStr.startsWith('[Session summary') || contentStr.startsWith('[Conversation summary')) {
-            isCompacted = true;
-            compactedCycles++;
-          }
           if (rec.usage) {
             turnsWithUsage++;
             lastPromptTokens = rec.usage.promptTokens;

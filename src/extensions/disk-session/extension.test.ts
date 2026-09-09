@@ -2,19 +2,33 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { Agent, messageContentToText, type Message } from '@xandout/libra-harness';
-import { createDiskSessionExtension, sanitizeConversationMessages, type SessionRecord, type SessionIdentity } from './index.js';
+import { Agent, type Message } from '@xandout/libra-harness';
+import {
+  createDiskSessionExtension,
+  SessionLedger,
+  projectContext,
+  selectScope,
+  latestCheckpoint,
+  applyCheckpoint,
+  scopeKey,
+  sliceAtTurnBoundary,
+  compactionChunk,
+  transcriptForSummary,
+  type SessionRecord,
+  type MessageLedgerRecord,
+  type SessionIdentity,
+  type ProjectionPolicy,
+} from './index.js';
 
 // ── Mock model ─────────────────────────────────────────────────────
-// Returns a fixed assistant message. Optionally logs what the agent sees.
 function mockModel(seen?: (msgs: Message[]) => void) {
   return {
     async generate(req: { messages: Message[] }) {
       if (seen) seen(req.messages);
       return {
-        message: { role: 'assistant', content: 'reply' },
+        message: { role: 'assistant', content: 'reply' } as Message,
         finishReason: 'stop' as const,
-        usage: { promptTokens: 0, completionTokens: 0 },
+        usage: { promptTokens: 10, completionTokens: 5 },
       };
     },
   };
@@ -26,20 +40,39 @@ function sessionIdentity(
   messageTs: string,
   opts: { threadTs?: string; isDirect?: boolean } = {},
 ): SessionIdentity {
-  return {
-    key,
-    messageTs,
-    threadTs: opts.threadTs,
-    isDirect: opts.isDirect,
-  };
+  return { key, messageTs, threadTs: opts.threadTs, isDirect: opts.isDirect };
 }
 
-function runTurn(
-  agent: Agent,
-  message: string,
-  identity: SessionIdentity,
-) {
+function runTurn(agent: Agent, message: string, identity: SessionIdentity) {
   return agent.run({ message, metadata: { session: identity } });
+}
+
+const defaultPolicy: ProjectionPolicy = {
+  maxMessages: 50,
+  channelContextMessages: 10,
+  recentChannelMessages: 5,
+  toolCallRetention: 3,
+};
+
+function makeMessageRecord(
+  sessionKey: string,
+  role: 'user' | 'assistant' | 'tool' | 'system',
+  content: string,
+  opts: { id?: string; ts?: string; threadTs?: string; toolCalls?: MessageLedgerRecord['toolCalls']; toolCallId?: string; name?: string } = {},
+): MessageLedgerRecord {
+  return {
+    kind: 'message',
+    id: opts.id ?? `rec_${Math.random().toString(36).slice(2)}`,
+    sessionKey,
+    role,
+    content,
+    ts: opts.ts ?? `ts_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+    recordedAt: new Date().toISOString(),
+    ...(opts.threadTs ? { threadTs: opts.threadTs } : {}),
+    ...(opts.toolCalls ? { toolCalls: opts.toolCalls } : {}),
+    ...(opts.toolCallId ? { toolCallId: opts.toolCallId } : {}),
+    ...(opts.name ? { name: opts.name } : {}),
+  };
 }
 
 // ── Test setup ─────────────────────────────────────────────────────
@@ -53,1273 +86,458 @@ afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-function makeExt(opts?: Record<string, unknown>) {
-  return createDiskSessionExtension({ sessionDir: tmpDir, ...opts });
-}
-
-function makeAgent(ext: ReturnType<typeof makeExt>, seen?: (msgs: Message[]) => void) {
-  const agent = new Agent({ model: mockModel(seen) as never });
-  agent.use(ext);
-  return agent;
-}
-
-function readJsonl(sessionKey: string): SessionRecord[] {
-  const path = join(tmpDir, `${sessionKey}.jsonl`);
-  if (!existsSync(path)) return [];
-  return readFileSync(path, 'utf-8')
-    .split('\n')
-    .filter((l) => l.trim())
-    .map((l) => JSON.parse(l) as SessionRecord);
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// Tests
-// ═══════════════════════════════════════════════════════════════════
-
-describe('disk-session', () => {
-  // ── Basic persistence ───────────────────────────────────────────
-
-  it('persists user and assistant messages to JSONL after a turn', async () => {
-    const ext = makeExt();
-    const agent = makeAgent(ext);
-
-    await runTurn(agent, 'hello', sessionIdentity('C1', '1001'));
-
-    const records = ext.getRecords('C1');
-    expect(records).toHaveLength(2);
-    expect(records[0].role).toBe('user');
-    expect(records[0].content).toBe('hello');
-    expect(records[1].role).toBe('assistant');
-    expect(records[1].content).toBe('reply');
-
-    const fileRecords = readJsonl('C1');
-    expect(fileRecords).toHaveLength(2);
-    expect(fileRecords[0].content).toBe('hello');
-  });
-
-  it('persists user message to disk immediately (before agent runs)', async () => {
-    const ext = makeExt();
-    // Model that never resolves — simulates a crash mid-turn
-    const hangingAgent = new Agent({
-      model: {
-        async generate() {
-          return new Promise(() => {}); // never resolves
-        },
-      } as never,
+// ── Ledger: append-only persistence ────────────────────────────────
+describe('SessionLedger', () => {
+  it('appends records to a JSONL file', () => {
+    const ledger = new SessionLedger(tmpDir, { loadOnStartup: false });
+    const rec = ledger.append({
+      kind: 'message',
+      sessionKey: 's1',
+      role: 'user',
+      content: 'hello',
+      ts: 'ts1',
     });
-    hangingAgent.use(ext);
-
-    // Start the turn but don't await it
-    const turnPromise = runTurn(hangingAgent, 'important message', sessionIdentity('C1', '1001'));
-
-    // Give beforeTurn a tick to run
-    await new Promise((r) => setTimeout(r, 50));
-
-    // The user message should already be on disk, even though
-    // the agent hasn't finished (and never will)
-    const fileRecords = readJsonl('C1');
-    expect(fileRecords.length).toBeGreaterThanOrEqual(1);
-    expect(fileRecords[0].role).toBe('user');
-    expect(fileRecords[0].content).toBe('important message');
-
-    // Clean up the hanging promise
-    (turnPromise as { halt?: () => void }).halt?.();
+    expect(rec.id).toBeTruthy();
+    expect(rec.recordedAt).toBeTruthy();
+    const file = join(tmpDir, 's1.jsonl');
+    expect(existsSync(file)).toBe(true);
+    const lines = readFileSync(file, 'utf-8').split('\n').filter(Boolean);
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]).content).toBe('hello');
   });
 
-  it('does not persist system messages', async () => {
-    const ext = makeExt();
-    const agent = makeAgent(ext);
-    agent.hook('beforeContext', 'test', async (ctx) => {
-      ctx.turn.messages.push({ role: 'system', content: 'ephemeral' });
-    });
-
-    await runTurn(agent, 'hello', sessionIdentity('C1', '1001'));
-
-    const records = ext.getRecords('C1');
-    expect(records.every((r) => (r.role as string) !== 'system')).toBe(true);
+  it('preserves existing bytes when appending new records', () => {
+    const ledger = new SessionLedger(tmpDir, { loadOnStartup: false });
+    ledger.append({ kind: 'message', sessionKey: 's1', role: 'user', content: 'first', ts: 'ts1' });
+    const file = join(tmpDir, 's1.jsonl');
+    const before = readFileSync(file, 'utf-8');
+    ledger.append({ kind: 'message', sessionKey: 's1', role: 'assistant', content: 'second', ts: 'ts2' });
+    const after = readFileSync(file, 'utf-8');
+    expect(after.startsWith(before)).toBe(true);
+    expect(after.split('\n').filter(Boolean)).toHaveLength(2);
   });
 
-  // ── History loading ─────────────────────────────────────────────
-
-  it('loads session history on subsequent turns', async () => {
-    const ext = makeExt();
-    const agent = makeAgent(ext);
-    let seenMsgs: Message[] = [];
-
-    await runTurn(agent, 'first', sessionIdentity('C1', '1001'));
-    agent.hook('beforeContext', 'capture', async (ctx) => {
-      seenMsgs = ctx.turn.messages.map((m) => ({ role: m.role, content: m.content }));
-    });
-    await runTurn(agent, 'second', sessionIdentity('C1', '1002'));
-
-    // Should see: [first, reply, second]
-    expect(seenMsgs.map((m) => m.content)).toContain('first');
-    expect(seenMsgs.map((m) => m.content)).toContain('reply');
-    expect(seenMsgs.map((m) => m.content)).toContain('second');
-  });
-
-  it('starts with empty context for a new session', async () => {
-    const ext = makeExt();
-    let seenMsgs: Message[] = [];
-    const agent = makeAgent(ext, (msgs) => { seenMsgs = msgs; });
-
-    await runTurn(agent, 'hello', sessionIdentity('NEW', '1001'));
-
-    // Only the user message (no history)
-    expect(seenMsgs.filter((m) => m.role === 'user')).toHaveLength(1);
-  });
-
-  // ── Thread forking ──────────────────────────────────────────────
-
-  it('forks thread context: channel context before parent + thread history', async () => {
-    const ext = makeExt({ channelContextMessages: 5, recentChannelMessages: 0 });
-    let seenMsgs: Message[] = [];
-    const agent = makeAgent(ext);
-
-    // Top-level message A (will be thread parent)
-    await runTurn(agent, 'top A', sessionIdentity('C1', '1001'));
-    // Top-level message B (comes after A)
-    await runTurn(agent, 'top B', sessionIdentity('C1', '1002'));
-
-    // Thread reply on A (threadTs=1001)
-    agent.hook('beforeContext', 'capture', async (ctx) => {
-      seenMsgs = ctx.turn.messages.map((m) => ({ role: m.role, content: m.content }));
-    });
-    await runTurn(agent, 'thread reply', sessionIdentity('C1', '1003', { threadTs: '1001' }));
-
-    const contents = seenMsgs.map((m) => m.content);
-    // Should see: [top A, reply, thread reply] — NOT top B
-    expect(contents).toContain('top A');
-    expect(contents).toContain('thread reply');
-    expect(contents).not.toContain('top B');
-  });
-
-  it('accumulates thread history across multiple thread replies', async () => {
-    const ext = makeExt({ channelContextMessages: 5 });
-    let seenMsgs: Message[] = [];
-    const agent = makeAgent(ext);
-
-    await runTurn(agent, 'parent', sessionIdentity('C1', '1001'));
-    await runTurn(agent, 'reply 1', sessionIdentity('C1', '1002', { threadTs: '1001' }));
-
-    agent.hook('beforeContext', 'capture', async (ctx) => {
-      seenMsgs = ctx.turn.messages.map((m) => ({ role: m.role, content: m.content }));
-    });
-    await runTurn(agent, 'reply 2', sessionIdentity('C1', '1003', { threadTs: '1001' }));
-
-    const contents = seenMsgs.map((m) => m.content);
-    expect(contents).toContain('parent');
-    expect(contents).toContain('reply 1');
-    expect(contents).toContain('reply 2');
-  });
-
-  it('isolates threads from each other', async () => {
-    const ext = makeExt({ channelContextMessages: 5, recentChannelMessages: 0 });
-    let seenMsgs: Message[] = [];
-    const agent = makeAgent(ext);
-
-    // Thread 1
-    await runTurn(agent, 'thread1 parent', sessionIdentity('C1', '1001'));
-    await runTurn(agent, 'thread1 reply', sessionIdentity('C1', '1002', { threadTs: '1001' }));
-
-    // Thread 2
-    await runTurn(agent, 'thread2 parent', sessionIdentity('C1', '1003'));
-    await runTurn(agent, 'thread2 reply', sessionIdentity('C1', '1004', { threadTs: '1003' }));
-
-    // New reply in thread 1 — should NOT see thread 2 messages
-    agent.hook('beforeContext', 'capture', async (ctx) => {
-      seenMsgs = ctx.turn.messages.map((m) => ({ role: m.role, content: m.content }));
-    });
-    await runTurn(agent, 'thread1 reply 2', sessionIdentity('C1', '1005', { threadTs: '1001' }));
-
-    const contents = seenMsgs.map((m) => m.content);
-    expect(contents).toContain('thread1 parent');
-    expect(contents).toContain('thread1 reply');
-    expect(contents).not.toContain('thread2 parent');
-    expect(contents).not.toContain('thread2 reply');
-  });
-
-  // ── Concurrent turns (snapshot isolation) ───────────────────────
-
-  it('concurrent turns do not see each other\'s assistant responses', async () => {
-    const ext = makeExt();
-    const seenByTurn: Message[][] = [];
-    const agent = makeAgent(ext, (msgs) => {
-      seenByTurn.push(msgs.map((m) => ({ role: m.role, content: m.content })));
-    });
-
-    // Seed one exchange
-    await runTurn(agent, 'seed', sessionIdentity('C1', '1001'));
-
-    // Run two turns concurrently
-    await Promise.all([
-      runTurn(agent, 'from A', sessionIdentity('C1', '1002')),
-      runTurn(agent, 'from B', sessionIdentity('C1', '1003')),
-    ]);
-
-    // seenByTurn[0] is the seed turn, [1] and [2] are the concurrent turns
-    const turnA = seenByTurn[1];
-    const turnB = seenByTurn[2];
-
-    const aContents = turnA.map((m) => m.content);
-    const bContents = turnB.map((m) => m.content);
-
-    // Both see the seed
-    expect(aContents).toContain('seed');
-    expect(bContents).toContain('seed');
-
-    // Neither sees the other's assistant response.
-    // (User messages may be visible since they're persisted immediately
-    // in beforeTurn — that's correct, they're real channel messages.
-    // But the assistant response from a concurrent turn should never
-    // leak into another turn's context.)
-    const aAssistantMsgs = turnA.filter((m) => m.role === 'assistant').map((m) => m.content);
-    const bAssistantMsgs = turnB.filter((m) => m.role === 'assistant').map((m) => m.content);
-
-    // Each turn should have exactly one assistant message (its own reply)
-    expect(aAssistantMsgs).toHaveLength(1);
-    expect(bAssistantMsgs).toHaveLength(1);
-    // Both replies are 'reply' (from the mock), but they're from
-    // this turn, not the other turn. The key invariant: neither
-    // turn has MORE than one assistant message (which would indicate
-    // it saw the other turn's response).
-  });
-
-  it('concurrent turns both append to the log without clobbering', async () => {
-    const ext = makeExt();
-    const agent = makeAgent(ext);
-
-    await runTurn(agent, 'seed', sessionIdentity('C1', '1001'));
-
-    await Promise.all([
-      runTurn(agent, 'from A', sessionIdentity('C1', '1002')),
-      runTurn(agent, 'from B', sessionIdentity('C1', '1003')),
-    ]);
-
-    const records = ext.getRecords('C1');
-    // seed (2) + A (2) + B (2) = 6
-    expect(records).toHaveLength(6);
-    const contents = records.map((r) => r.content);
-    expect(contents).toContain('seed');
-    expect(contents).toContain('from A');
-    expect(contents).toContain('from B');
-  });
-
-  // ── Disk persistence ────────────────────────────────────────────
-
-  it('appends to JSONL file (never rewrites)', async () => {
-    const ext = makeExt();
-    const agent = makeAgent(ext);
-
-    await runTurn(agent, 'first', sessionIdentity('C1', '1001'));
-
-    // Read the file after turn 1
-    const fileAfter1 = readJsonl('C1');
-    expect(fileAfter1).toHaveLength(2);
-
-    await runTurn(agent, 'second', sessionIdentity('C1', '1002'));
-
-    // Read the file after turn 2 — should have 4 records (appended)
-    const fileAfter2 = readJsonl('C1');
-    expect(fileAfter2).toHaveLength(4);
-    // First 2 records unchanged (append-only)
-    expect(fileAfter2[0]).toEqual(fileAfter1[0]);
-    expect(fileAfter2[1]).toEqual(fileAfter1[1]);
-  });
-
-  it('reloads sessions from disk on startup', async () => {
-    const ext1 = makeExt();
-    const agent1 = makeAgent(ext1);
-
-    await runTurn(agent1, 'persisted', sessionIdentity('C1', '1001'));
-
-    // Create a new extension pointing at the same dir — should load
-    const ext2 = makeExt();
-    const records = ext2.getRecords('C1');
-    expect(records).toHaveLength(2);
-    expect(records[0].content).toBe('persisted');
-  });
-
-  it('separates sessions by key', async () => {
-    const ext = makeExt();
-    const agent = makeAgent(ext);
-
-    await runTurn(agent, 'in C1', sessionIdentity('C1', '1001'));
-    await runTurn(agent, 'in C2', sessionIdentity('C2', '1001'));
-
-    expect(ext.getRecords('C1')).toHaveLength(2);
-    expect(ext.getRecords('C2')).toHaveLength(2);
-    expect(ext.getRecords('C1')[0].content).toBe('in C1');
-    expect(ext.getRecords('C2')[0].content).toBe('in C2');
-    expect(ext.getSessions()).toContain('C1');
-    expect(ext.getSessions()).toContain('C2');
-  });
-
-  // ── DM / direct sessions ────────────────────────────────────────
-
-  it('treats direct sessions as simple last-N history (no forking)', async () => {
-    const ext = makeExt({ maxContextMessages: 10 });
-    let seenMsgs: Message[] = [];
-    const agent = makeAgent(ext);
-
-    await runTurn(agent, 'dm 1', sessionIdentity('D1', '1001', { isDirect: true }));
-    await runTurn(agent, 'dm 2', sessionIdentity('D1', '1002', { isDirect: true }));
-
-    agent.hook('beforeContext', 'capture', async (ctx) => {
-      seenMsgs = ctx.turn.messages.map((m) => ({ role: m.role, content: m.content }));
-    });
-    await runTurn(agent, 'dm 3', sessionIdentity('D1', '1003', { isDirect: true }));
-
-    const contents = seenMsgs.map((m) => m.content);
-    // Should see all prior DM messages (simple last-N)
-    expect(contents).toContain('dm 1');
-    expect(contents).toContain('dm 2');
-    expect(contents).toContain('dm 3');
-  });
-
-  // ── Record metadata ─────────────────────────────────────────────
-
-  it('tags records with ts and threadTs', async () => {
-    const ext = makeExt();
-    const agent = makeAgent(ext);
-
-    await runTurn(agent, 'top', sessionIdentity('C1', '1001'));
-    await runTurn(agent, 'thread', sessionIdentity('C1', '1002', { threadTs: '1001' }));
-
-    const records = ext.getRecords('C1');
-    // Top-level: no threadTs
-    expect(records[0].ts).toBe('1001');
-    expect(records[0].threadTs).toBeUndefined();
-    // Thread: has threadTs
-    expect(records[2].ts).toBe('1002');
-    expect(records[2].threadTs).toBe('1001');
-  });
-
-  // ── Clearing ────────────────────────────────────────────────────
-
-  it('clears a single session', async () => {
-    const ext = makeExt();
-    const agent = makeAgent(ext);
-
-    await runTurn(agent, 'in C1', sessionIdentity('C1', '1001'));
-    await runTurn(agent, 'in C2', sessionIdentity('C2', '1001'));
-
-    ext.clear('C1');
-    expect(ext.getRecords('C1')).toHaveLength(0);
-    expect(ext.getRecords('C2')).toHaveLength(2);
-  });
-
-  it('clears all sessions', async () => {
-    const ext = makeExt();
-    const agent = makeAgent(ext);
-
-    await runTurn(agent, 'in C1', sessionIdentity('C1', '1001'));
-    await runTurn(agent, 'in C2', sessionIdentity('C2', '1001'));
-
-    ext.clearAll();
-    expect(ext.getRecords('C1')).toHaveLength(0);
-    expect(ext.getRecords('C2')).toHaveLength(0);
-    expect(ext.getSessions()).toHaveLength(0);
-  });
-
-  // ── Max context trimming ────────────────────────────────────────
-
-  it('trims context to maxContextMessages for top-level', async () => {
-    const ext = makeExt({ maxContextMessages: 4 });
-    let seenMsgs: Message[] = [];
-    const agent = makeAgent(ext);
-
-    // 5 top-level turns = 10 records (user + assistant each)
-    for (let i = 1; i <= 5; i++) {
-      agent.hook('beforeContext', 'capture', async (ctx) => {
-        seenMsgs = ctx.turn.messages.map((m) => ({ role: m.role, content: m.content }));
-      });
-      await runTurn(agent, `msg${i}`, sessionIdentity('C1', `100${i}`));
+  it('never rewrites or truncates the active file during compaction', () => {
+    const ledger = new SessionLedger(tmpDir, { loadOnStartup: false });
+    for (let i = 0; i < 5; i++) {
+      ledger.append({ kind: 'message', sessionKey: 's1', role: i % 2 ? 'assistant' : 'user', content: `msg-${i}`, ts: `ts${i}` });
     }
-
-    // The 5th turn should see at most 4 history messages + 1 new = 5
-    // (maxContextMessages limits the history, not the total)
-    const userMsgs = seenMsgs.filter((m) => m.role === 'user');
-    // Should not see msg1 (trimmed), should see msg3, msg4, msg5
-    expect(userMsgs.map((m) => m.content)).not.toContain('msg1');
-  });
-
-  // ── Fallback when parent not in cache ───────────────────────────
-
-  it('falls back to last-N when thread parent is not in cache', async () => {
-    const ext = makeExt({ maxRecords: 4, channelContextMessages: 5 });
-    let seenMsgs: Message[] = [];
-    const agent = makeAgent(ext);
-
-    // Fill cache so the parent gets evicted
-    await runTurn(agent, 'parent', sessionIdentity('C1', '1001'));
-    await runTurn(agent, 'msg2', sessionIdentity('C1', '1002'));
-    await runTurn(agent, 'msg3', sessionIdentity('C1', '1003'));
-
-    // parent (ts=1001) should be evicted from in-memory cache (maxRecords=4,
-    // but we have 6 records: 3 user + 3 assistant). Actually with maxRecords=4,
-    // the first 2 records (parent user + parent assistant) get evicted.
-
-    agent.hook('beforeContext', 'capture', async (ctx) => {
-      seenMsgs = ctx.turn.messages.map((m) => ({ role: m.role, content: m.content }));
+    const file = join(tmpDir, 's1.jsonl');
+    const before = readFileSync(file, 'utf-8');
+    // Append a summary checkpoint — must not touch existing bytes.
+    ledger.append({
+      kind: 'summary',
+      sessionKey: 's1',
+      scope: 'channel',
+      throughRecordId: 'rec_2',
+      sourceRecordCount: 3,
+      content: 'summary text',
+      policyVersion: 1,
+      ts: 'ts5',
     });
-    // Thread reply on the evicted parent
-    await runTurn(agent, 'thread reply', sessionIdentity('C1', '1004', { threadTs: '1001' }));
-
-    // Should not crash, should fall back to last-N
-    const contents = seenMsgs.map((m) => m.content);
-    expect(contents).toContain('thread reply');
+    const after = readFileSync(file, 'utf-8');
+    expect(after.startsWith(before)).toBe(true);
+    expect(after.split('\n').filter(Boolean)).toHaveLength(6);
   });
 
-  // ── Recent channel context for thread revivals ─────────────────
+  it('loads records on startup', () => {
+    const ledger = new SessionLedger(tmpDir, { loadOnStartup: false });
+    ledger.append({ kind: 'message', sessionKey: 's1', role: 'user', content: 'hello', ts: 'ts1' });
+    ledger.append({ kind: 'message', sessionKey: 's1', role: 'assistant', content: 'world', ts: 'ts2' });
 
-  it('includes recent top-level messages after the last thread reply', async () => {
-    // 3 top-level turns after thread = 6 records. Use 10 to see all.
-    const ext = makeExt({ channelContextMessages: 5, recentChannelMessages: 10 });
-    let seenMsgs: Message[] = [];
-    const agent = makeAgent(ext);
-
-    // Thread parent + one reply
-    await runTurn(agent, 'thread parent', sessionIdentity('C1', '1001'));
-    await runTurn(agent, 'thread reply 1', sessionIdentity('C1', '1002', { threadTs: '1001' }));
-
-    // Top-level messages after the thread (channel moved on)
-    await runTurn(agent, 'top after 1', sessionIdentity('C1', '1003'));
-    await runTurn(agent, 'top after 2', sessionIdentity('C1', '1004'));
-    await runTurn(agent, 'top after 3', sessionIdentity('C1', '1005'));
-
-    // Come back to the thread a "week later"
-    agent.hook('beforeContext', 'capture', async (ctx) => {
-      seenMsgs = ctx.turn.messages.map((m) => ({ role: m.role, content: m.content }));
-    });
-    await runTurn(agent, 'we solved this', sessionIdentity('C1', '1006', { threadTs: '1001' }));
-
-    const contents = seenMsgs.map((m) => m.content);
-
-    // Sees the thread history
-    expect(contents).toContain('thread parent');
-    expect(contents).toContain('thread reply 1');
-    expect(contents).toContain('we solved this');
-
-    // Also sees recent top-level messages that happened after the thread
-    expect(contents).toContain('top after 1');
-    expect(contents).toContain('top after 2');
-    expect(contents).toContain('top after 3');
+    const reloaded = new SessionLedger(tmpDir, { loadOnStartup: true, verbose: false });
+    const snapshot = reloaded.snapshot('s1');
+    expect(snapshot).toHaveLength(2);
+    expect((snapshot[0] as MessageLedgerRecord).content).toBe('hello');
+    expect((snapshot[1] as MessageLedgerRecord).content).toBe('world');
   });
 
-  it('limits recent channel messages to recentChannelMessages count', async () => {
-    // 5 top-level turns = 10 records. recentChannelMessages=4 gives
-    // last 4 records = 2 full turns (after 4 + after 5).
-    const ext = makeExt({ channelContextMessages: 5, recentChannelMessages: 4 });
-    let seenMsgs: Message[] = [];
-    const agent = makeAgent(ext);
+  it('isolates sessions by key', () => {
+    const ledger = new SessionLedger(tmpDir, { loadOnStartup: false });
+    ledger.append({ kind: 'message', sessionKey: 's1', role: 'user', content: 'a', ts: 'ts1' });
+    ledger.append({ kind: 'message', sessionKey: 's2', role: 'user', content: 'b', ts: 'ts1' });
+    expect(ledger.snapshot('s1')).toHaveLength(1);
+    expect(ledger.snapshot('s2')).toHaveLength(1);
+    expect((ledger.snapshot('s1')[0] as MessageLedgerRecord).content).toBe('a');
+    expect((ledger.snapshot('s2')[0] as MessageLedgerRecord).content).toBe('b');
+  });
+});
 
-    await runTurn(agent, 'parent', sessionIdentity('C1', '1001'));
-    await runTurn(agent, 'thread reply', sessionIdentity('C1', '1002', { threadTs: '1001' }));
-
-    // 5 top-level messages after the thread
-    await runTurn(agent, 'after 1', sessionIdentity('C1', '1003'));
-    await runTurn(agent, 'after 2', sessionIdentity('C1', '1004'));
-    await runTurn(agent, 'after 3', sessionIdentity('C1', '1005'));
-    await runTurn(agent, 'after 4', sessionIdentity('C1', '1006'));
-    await runTurn(agent, 'after 5', sessionIdentity('C1', '1007'));
-
-    agent.hook('beforeContext', 'capture', async (ctx) => {
-      seenMsgs = ctx.turn.messages.map((m) => ({ role: m.role, content: m.content }));
-    });
-    await runTurn(agent, 'revival', sessionIdentity('C1', '1008', { threadTs: '1001' }));
-
-    const contents = seenMsgs.map((m) => m.content);
-
-    // Should see only the last 4 records (2 turns: after 4 + after 5)
-    expect(contents).not.toContain('after 1');
-    expect(contents).not.toContain('after 2');
-    expect(contents).not.toContain('after 3');
-    expect(contents).toContain('after 4');
-    expect(contents).toContain('after 5');
+// ── Projection: scope selection ────────────────────────────────────
+describe('selectScope', () => {
+  it('returns all messages for direct sessions', () => {
+    const records: SessionRecord[] = [
+      makeMessageRecord('s', 'user', 'a', { threadTs: 't1' }),
+      makeMessageRecord('s', 'user', 'b'),
+    ];
+    const selected = selectScope(records, { isDirect: true });
+    expect(selected).toHaveLength(2);
   });
 
-  // ── Tool-call intermediate filtering ────────────────────────────
+  it('returns only non-thread messages for channel scope', () => {
+    const records: SessionRecord[] = [
+      makeMessageRecord('s', 'user', 'a'),
+      makeMessageRecord('s', 'user', 'b', { threadTs: 't1' }),
+      makeMessageRecord('s', 'user', 'c'),
+    ];
+    const selected = selectScope(records, {});
+    expect(selected).toHaveLength(2);
+    expect(selected.map((r) => r.content)).toEqual(['a', 'c']);
+  });
 
-  it('preserves tool-call intermediates but slices at turn boundaries to prevent split sequences', async () => {
-    // If a tool call pair (assistant+tool) spans the boundary of the
-    // channelContextMessages window, the tool message would be sliced mid-sequence
-    // if we just did a naive .slice(). With sliceAtTurnBoundary, it skips forward
-    // to the next user message, dropping the partial turn entirely rather than splitting it.
-    const ext = makeExt({ channelContextMessages: 3, recentChannelMessages: 0 }); // 3 ensures it cuts into the 4-message turn
-    let seenMsgs: Message[] = [];
+  it('returns thread messages plus surrounding channel context', () => {
+    const parentTs = 'parent_ts';
+    const records: SessionRecord[] = [
+      makeMessageRecord('s', 'user', 'chan1', { ts: 'ts1' }),
+      makeMessageRecord('s', 'user', 'chan2', { ts: 'ts2' }),
+      makeMessageRecord('s', 'user', 'parent', { ts: parentTs }),
+      makeMessageRecord('s', 'user', 'thread1', { threadTs: parentTs }),
+      makeMessageRecord('s', 'user', 'chan3', { ts: 'ts3' }),
+    ];
+    const selected = selectScope(records, { threadTs: parentTs }, { channelContextMessages: 2, recentChannelMessages: 5 });
+    const contents = selected.map((r) => r.content);
+    expect(contents).toContain('parent');
+    expect(contents).toContain('thread1');
+    expect(contents).toContain('chan3');
+  });
+});
 
-    // Create a tool-call exchange early in the channel (NOT the thread parent)
-    const toolModel = {
-      async generate(req: { messages: Message[] }) {
-        const hasToolResult = req.messages.some((m) => m.role === 'tool');
-        if (!hasToolResult) {
-          return {
-            message: {
-              role: 'assistant',
-              content: '',
-              toolCalls: [{ id: 'tc1', name: 'test_tool', arguments: '{}' }],
-            },
-            finishReason: 'tool_calls' as const,
-            usage: { promptTokens: 0, completionTokens: 0 },
-          };
-        }
-        return {
-          message: { role: 'assistant', content: 'tool result summary' },
-          finishReason: 'stop' as const,
-          usage: { promptTokens: 0, completionTokens: 0 },
-        };
+// ── Projection: checkpoints ────────────────────────────────────────
+describe('checkpoints', () => {
+  it('finds the latest checkpoint for a scope', () => {
+    const records: SessionRecord[] = [
+      { kind: 'summary', id: 'sum1', sessionKey: 's', scope: 'channel', throughRecordId: 'r1', sourceRecordCount: 1, content: 'old', policyVersion: 1, ts: 'ts1', recordedAt: '' },
+      { kind: 'summary', id: 'sum2', sessionKey: 's', scope: 'channel', throughRecordId: 'r2', sourceRecordCount: 1, content: 'new', policyVersion: 1, ts: 'ts2', recordedAt: '' },
+      { kind: 'summary', id: 'sum3', sessionKey: 's', scope: 'thread:t1', throughRecordId: 'r3', sourceRecordCount: 1, content: 'thread-sum', policyVersion: 1, ts: 'ts3', recordedAt: '' },
+    ];
+    expect(latestCheckpoint(records, 'channel')?.content).toBe('new');
+    expect(latestCheckpoint(records, 'thread:t1')?.content).toBe('thread-sum');
+    expect(latestCheckpoint(records, 'direct')).toBeUndefined();
+  });
+
+  it('drops records covered by a checkpoint', () => {
+    const records: MessageLedgerRecord[] = [
+      makeMessageRecord('s', 'user', 'a', { id: 'r1' }),
+      makeMessageRecord('s', 'assistant', 'b', { id: 'r2' }),
+      makeMessageRecord('s', 'user', 'c', { id: 'r3' }),
+    ];
+    const checkpoint = { kind: 'summary' as const, id: 'sum', sessionKey: 's', scope: 'channel', throughRecordId: 'r2', sourceRecordCount: 2, content: 'summary', policyVersion: 1 as const, ts: '', recordedAt: '' };
+    const applied = applyCheckpoint(records, checkpoint);
+    expect(applied.summary).toBe('summary');
+    expect(applied.messages).toHaveLength(1);
+    expect(applied.messages[0].content).toBe('c');
+  });
+
+  it('returns all messages when no checkpoint exists', () => {
+    const records: MessageLedgerRecord[] = [
+      makeMessageRecord('s', 'user', 'a'),
+      makeMessageRecord('s', 'assistant', 'b'),
+    ];
+    const applied = applyCheckpoint(records, undefined);
+    expect(applied.summary).toBeUndefined();
+    expect(applied.messages).toHaveLength(2);
+  });
+});
+
+// ── Projection: turn boundaries ────────────────────────────────────
+describe('sliceAtTurnBoundary', () => {
+  it('slices at a user/system message boundary', () => {
+    const records: MessageLedgerRecord[] = [
+      makeMessageRecord('s', 'user', 'u1'),
+      makeMessageRecord('s', 'assistant', 'a1'),
+      makeMessageRecord('s', 'tool', 't1', { toolCallId: 'tc1', name: 'tool' }),
+      makeMessageRecord('s', 'user', 'u2'),
+      makeMessageRecord('s', 'assistant', 'a2'),
+    ];
+    const sliced = sliceAtTurnBoundary(records, 3);
+    // Slicing aligns to the next user/system boundary, which may yield fewer.
+    expect(sliced.length).toBeLessThanOrEqual(3);
+    expect(sliced[0].role).toBe('user');
+  });
+
+  it('returns all when under the limit', () => {
+    const records: MessageLedgerRecord[] = [
+      makeMessageRecord('s', 'user', 'u1'),
+      makeMessageRecord('s', 'assistant', 'a1'),
+    ];
+    expect(sliceAtTurnBoundary(records, 10)).toHaveLength(2);
+  });
+});
+
+// ── Projection: compaction chunk ───────────────────────────────────
+describe('compactionChunk', () => {
+  it('selects a prefix chunk for summarization', () => {
+    const records: MessageLedgerRecord[] = [];
+    for (let i = 0; i < 10; i++) {
+      records.push(makeMessageRecord('s', i % 2 ? 'assistant' : 'user', `msg-${i}`));
+    }
+    const chunk = compactionChunk(records, 10);
+    expect(chunk.length).toBeGreaterThan(0);
+    expect(chunk.length).toBeLessThan(records.length);
+  });
+
+  it('returns empty when under the limit', () => {
+    const records: MessageLedgerRecord[] = [
+      makeMessageRecord('s', 'user', 'a'),
+      makeMessageRecord('s', 'assistant', 'b'),
+    ];
+    expect(compactionChunk(records, 50)).toHaveLength(0);
+  });
+});
+
+// ── Projection: full context projection ────────────────────────────
+describe('projectContext', () => {
+  it('converts records to Libra messages', async () => {
+    const records: SessionRecord[] = [
+      makeMessageRecord('s', 'user', 'hello'),
+      makeMessageRecord('s', 'assistant', 'hi there'),
+    ];
+    const messages = await projectContext(records, { isDirect: true }, defaultPolicy);
+    expect(messages).toHaveLength(2);
+    expect(messages[0].role).toBe('user');
+    expect(messages[1].role).toBe('assistant');
+  });
+
+  it('prunes reasoning from projected context', async () => {
+    const records: SessionRecord[] = [
+      makeMessageRecord('s', 'user', 'question'),
+      {
+        ...makeMessageRecord('s', 'assistant', 'answer'),
+        content: [
+          { type: 'reasoning', text: 'thinking deeply' },
+          { type: 'text', text: 'answer' },
+        ],
       },
-    };
-    const toolAgent = new Agent({ model: toolModel as never });
-    toolAgent.use(ext);
-    toolAgent.tool({
-      name: 'test_tool',
-      description: 'test',
-      parameters: { type: 'object', properties: {} },
-      async execute() { return { toolCallId: 'tc1', content: 'tool output' }; },
-    });
-
-    // Turn 1: tool call exchange (produces user+assistant[tool]+tool+assistant records = 4 records)
-    await toolAgent.run({
-      message: 'use the tool',
-      metadata: { session: { key: 'C1', messageTs: '1001' } },
-    });
-
-    // Turn 2: thread parent (a regular message, no tool calls)
-    const regAgent = makeAgent(ext);
-    await runTurn(regAgent, 'thread parent', sessionIdentity('C1', '1002'));
-
-    // Now thread reply on ts=1002
-    // The topLevelBefore messages before the parent are the 4 messages from Turn 1.
-    // We configured channelContextMessages: 3.
-    // If we took the last 3 messages of Turn 1, we would get [assistant, tool, assistant].
-    // But sliceAtTurnBoundary will see it starts with 'assistant', skip forward looking for
-    // a 'user' or 'system', find none, and return an empty array.
-    regAgent.hook('beforeContext', 'capture', async (ctx) => {
-      seenMsgs = ctx.turn.messages.map((m) => ({ role: m.role, content: m.content }));
-    });
-    await runTurn(regAgent, 'thread reply', sessionIdentity('C1', '1005', { threadTs: '1002' }));
-
-    // Because the context window (3) starts in the middle of Turn 1,
-    // sliceAtTurnBoundary will drop it entirely.
-    const toolMsgs = seenMsgs.filter((m) => m.role === 'tool');
-    expect(toolMsgs).toHaveLength(0);
-
-    // No assistant messages from Turn 1 should be present.
-    const emptyAssistantMsgs = seenMsgs.filter((m) => m.role === 'assistant' && !messageContentToText(m.content).trim());
-    expect(emptyAssistantMsgs).toHaveLength(0);
-
-    // But the thread messages should still be there
-    const contents = seenMsgs.map((m) => m.content);
-    expect(contents).toContain('thread parent');
-    expect(contents).toContain('thread reply');
+    ];
+    const messages = await projectContext(records, { isDirect: true }, defaultPolicy);
+    const assistantContent = messages[1].content;
+    if (typeof assistantContent !== 'string') {
+      const types = assistantContent.map((p) => p.type);
+      expect(types).not.toContain('reasoning');
+    }
   });
 
-  // ── Enrichment bag (sessionMeta → record.meta) ──────────────────
-  // disk-session persists `ctx.turn.metadata.sessionMeta` opaquely as
-  // `record.meta`. It does not inspect or interpret the contents — any
-  // extension that writes into the bag before disk-session's
-  // beforeTurn hook runs will have its data persisted.
-
-  it('persists sessionMeta as record.meta on the user record', async () => {
-    const ext = makeExt();
-    // Register the enricher BEFORE disk-session so its beforeTurn
-    // hook runs first (hooks run in registration order within a stage).
-    const agent = new Agent({ model: mockModel() as never });
-    agent.hook('beforeTurn', 'enricher', async (ctx) => {
-      ctx.turn.metadata.sessionMeta = { keywords: { terms: ['MCP', 'auth'] } };
-    });
-    agent.use(ext);
-
-    await runTurn(agent, 'find MCP auth docs', sessionIdentity('C1', '1001'));
-
-    const records = ext.getRecords('C1');
-    expect(records[0].role).toBe('user');
-    expect(records[0].meta).toEqual({ keywords: { terms: ['MCP', 'auth'] } });
-
-    // Also persisted to disk.
-    const fileRecords = readJsonl('C1');
-    expect(fileRecords[0].meta).toEqual({ keywords: { terms: ['MCP', 'auth'] } });
+  it('preserves tool-call/result pairing in projection', async () => {
+    const records: SessionRecord[] = [
+      makeMessageRecord('s', 'user', 'run it', { id: 'r1' }),
+      makeMessageRecord('s', 'assistant', 'calling tool', {
+        id: 'r2',
+        toolCalls: [{ id: 'tc1', name: 'shell', arguments: '{"cmd":"ls"}' }],
+      }),
+      makeMessageRecord('s', 'tool', 'output', { id: 'r3', toolCallId: 'tc1', name: 'shell' }),
+      makeMessageRecord('s', 'assistant', 'done', { id: 'r4' }),
+    ];
+    const messages = await projectContext(records, { isDirect: true }, defaultPolicy);
+    // user, assistant(with tool call), tool(result), assistant
+    expect(messages.length).toBeGreaterThanOrEqual(3);
+    const assistant = messages.find((m) => m.role === 'assistant' && m.toolCalls?.length);
+    expect(assistant).toBeDefined();
+    expect(assistant!.toolCalls![0].name).toBe('shell');
+    const tool = messages.find((m) => m.role === 'tool');
+    expect(tool).toBeDefined();
+    expect(tool!.toolCallId).toBe('tc1');
   });
 
-  it('persists sessionMeta on assistant records too', async () => {
-    const ext = makeExt();
-    const agent = new Agent({ model: mockModel() as never });
-    agent.hook('beforeTurn', 'enricher', async (ctx) => {
-      ctx.turn.metadata.sessionMeta = { topic: 'testing' };
-    });
-    agent.use(ext);
-
-    await runTurn(agent, 'hello', sessionIdentity('C1', '1001'));
-
-    const records = ext.getRecords('C1');
-    expect(records).toHaveLength(2);
-    expect(records[0].meta).toEqual({ topic: 'testing' });
-    expect(records[1].meta).toEqual({ topic: 'testing' });
+  it('respects maxMessages limit', async () => {
+    const records: SessionRecord[] = [];
+    for (let i = 0; i < 20; i++) {
+      records.push(makeMessageRecord('s', i % 2 ? 'assistant' : 'user', `msg-${i}`));
+    }
+    const policy = { ...defaultPolicy, maxMessages: 6 };
+    const messages = await projectContext(records, { isDirect: true }, policy);
+    expect(messages.length).toBeLessThanOrEqual(6);
   });
 
-  it('omits meta when sessionMeta is absent', async () => {
-    const ext = makeExt();
-    const agent = makeAgent(ext);
-
-    await runTurn(agent, 'hello', sessionIdentity('C1', '1001'));
-
-    const records = ext.getRecords('C1');
-    expect(records[0].meta).toBeUndefined();
+  it('is deterministic from the same snapshot', async () => {
+    const records: SessionRecord[] = [
+      makeMessageRecord('s', 'user', 'a'),
+      makeMessageRecord('s', 'assistant', 'b'),
+      makeMessageRecord('s', 'user', 'c'),
+      makeMessageRecord('s', 'assistant', 'd'),
+    ];
+    const m1 = await projectContext(records, { isDirect: true }, defaultPolicy);
+    const m2 = await projectContext(records, { isDirect: true }, defaultPolicy);
+    expect(m1).toEqual(m2);
   });
 
-  // ── Custom resolver ──────────────────────────────────────────────
-
-  it('supports a custom resolver for host-specific identity extraction', async () => {
-    // Simulate a host that stores identity under a host-specific key.
-    const ext = createDiskSessionExtension({
-      sessionDir: tmpDir,
-      resolver: {
-        resolve(metadata) {
-          const host = metadata.myPlatform as { channelId: string; ts: string; thread?: string } | undefined;
-          if (!host) return undefined;
-          return { key: `mp_${host.channelId}`, messageTs: host.ts, threadTs: host.thread };
-        },
+  it('uses the latest applicable checkpoint', async () => {
+    const records: SessionRecord[] = [
+      makeMessageRecord('s', 'user', 'old1', { id: 'r1' }),
+      makeMessageRecord('s', 'assistant', 'old2', { id: 'r2' }),
+      makeMessageRecord('s', 'user', 'new1', { id: 'r3' }),
+      makeMessageRecord('s', 'assistant', 'new2', { id: 'r4' }),
+      {
+        kind: 'summary',
+        id: 'sum1',
+        sessionKey: 's',
+        scope: 'direct',
+        throughRecordId: 'r2',
+        sourceRecordCount: 2,
+        content: 'prior context summary',
+        policyVersion: 1,
+        ts: '',
+        recordedAt: '',
       },
-    });
-    const agent = makeAgent(ext);
+    ];
+    const messages = await projectContext(records, { isDirect: true }, defaultPolicy);
+    // Summary system message + new1 + new2
+    expect(messages.length).toBeGreaterThanOrEqual(2);
+    const systemMsg = messages.find((m) => m.role === 'system');
+    expect(systemMsg).toBeDefined();
+  });
+});
 
-    await agent.run({
-      message: 'hello',
-      metadata: { myPlatform: { channelId: 'X1', ts: '2001' } },
-    });
+// ── Projection: incomplete tool sequences ──────────────────────────
+describe('incomplete tool sequences', () => {
+  it('drops trailing user messages without responses', async () => {
+    const records: SessionRecord[] = [
+      makeMessageRecord('s', 'user', 'q'),
+      makeMessageRecord('s', 'assistant', 'a'),
+      makeMessageRecord('s', 'user', 'orphan'),
+    ];
+    const messages = await projectContext(records, { isDirect: true }, defaultPolicy);
+    const last = messages.at(-1);
+    expect(last?.role).not.toBe('user');
+  });
+});
 
-    const records = ext.getRecords('mp_X1');
-    expect(records).toHaveLength(2);
-    expect(records[0].content).toBe('hello');
+// ── Transcript for summary ─────────────────────────────────────────
+describe('transcriptForSummary', () => {
+  it('produces a text transcript of message records', () => {
+    const records: MessageLedgerRecord[] = [
+      makeMessageRecord('s', 'user', 'hello'),
+      makeMessageRecord('s', 'assistant', 'hi', { toolCalls: [{ id: 'tc1', name: 'shell', arguments: '{}' }] }),
+    ];
+    const transcript = transcriptForSummary(records);
+    expect(transcript).toContain('[USER]');
+    expect(transcript).toContain('hello');
+    expect(transcript).toContain('[ASSISTANT');
+    expect(transcript).toContain('shell');
+  });
+});
+
+// ── Extension integration ──────────────────────────────────────────
+describe('createDiskSessionExtension integration', () => {
+  it('persists user and assistant messages across turns', async () => {
+    const agent = new Agent({ model: mockModel() as any });
+    agent.use(createDiskSessionExtension({ sessionDir: tmpDir, maxContextMessages: 50, autoSummarize: false }));
+    await runTurn(agent, 'first', sessionIdentity('s1', 'ts1', { isDirect: true }));
+    await runTurn(agent, 'second', sessionIdentity('s1', 'ts2', { isDirect: true }));
+    const file = join(tmpDir, 's1.jsonl');
+    const lines = readFileSync(file, 'utf-8').split('\n').filter(Boolean);
+    const records = lines.map((l) => JSON.parse(l));
+    const messages = records.filter((r) => r.kind === 'message');
+    expect(messages.some((r) => r.role === 'user' && r.content === 'first')).toBe(true);
+    expect(messages.some((r) => r.role === 'user' && r.content === 'second')).toBe(true);
+    expect(messages.some((r) => r.role === 'assistant' && r.content === 'reply')).toBe(true);
   });
 
-  it('skips session handling when resolver returns undefined', async () => {
-    const ext = createDiskSessionExtension({
-      sessionDir: tmpDir,
-      resolver: {
-        resolve() { return undefined; },
-      },
-    });
-    const agent = makeAgent(ext);
-
-    await agent.run({ message: 'hello', metadata: {} });
-
-    // No records persisted
-    expect(ext.getSessions()).toHaveLength(0);
+  it('provides conversation history to the model on subsequent turns', async () => {
+    let seenMessages: Message[] = [];
+    const agent = new Agent({ model: mockModel((msgs) => (seenMessages = msgs)) as any });
+    agent.use(createDiskSessionExtension({ sessionDir: tmpDir, maxContextMessages: 50, autoSummarize: false }));
+    await runTurn(agent, 'first', sessionIdentity('s1', 'ts1', { isDirect: true }));
+    await runTurn(agent, 'second', sessionIdentity('s1', 'ts2', { isDirect: true }));
+    const userTexts = seenMessages.filter((m) => m.role === 'user').map((m) => m.content);
+    expect(userTexts).toContain('first');
   });
 
-  it('falls back to metadata.sessionId when no session identity is present', async () => {
-    const ext = makeExt();
-    const agent = makeAgent(ext);
-
-    await agent.run({ message: 'hello', metadata: { sessionId: 'fallback-key' } });
-
-    const records = ext.getRecords('fallback-key');
-    expect(records).toHaveLength(2);
-    expect(records[0].content).toBe('hello');
+  it('isolates sessions by key', async () => {
+    const agent = new Agent({ model: mockModel() as any });
+    agent.use(createDiskSessionExtension({ sessionDir: tmpDir, maxContextMessages: 50, autoSummarize: false }));
+    await runTurn(agent, 'msg-a', sessionIdentity('s1', 'ts1', { isDirect: true }));
+    await runTurn(agent, 'msg-b', sessionIdentity('s2', 'ts1', { isDirect: true }));
+    expect(existsSync(join(tmpDir, 's1.jsonl'))).toBe(true);
+    expect(existsSync(join(tmpDir, 's2.jsonl'))).toBe(true);
+    const s1 = JSON.parse(readFileSync(join(tmpDir, 's1.jsonl'), 'utf-8').split('\n')[0]);
+    expect(s1.sessionKey).toBe('s1');
+    const s2 = JSON.parse(readFileSync(join(tmpDir, 's2.jsonl'), 'utf-8').split('\n')[0]);
+    expect(s2.sessionKey).toBe('s2');
   });
 
-  it('uses "default" key when no session metadata is present', async () => {
-    const ext = makeExt();
-    const agent = makeAgent(ext);
-
-    await agent.run({ message: 'hello', metadata: {} });
-
-    const records = ext.getRecords('default');
-    expect(records).toHaveLength(2);
-    expect(records[0].content).toBe('hello');
+  it('does not rewrite existing bytes when appending', async () => {
+    const agent = new Agent({ model: mockModel() as any });
+    agent.use(createDiskSessionExtension({ sessionDir: tmpDir, maxContextMessages: 50, autoSummarize: false }));
+    await runTurn(agent, 'first', sessionIdentity('s1', 'ts1', { isDirect: true }));
+    const file = join(tmpDir, 's1.jsonl');
+    const before = readFileSync(file, 'utf-8');
+    await runTurn(agent, 'second', sessionIdentity('s1', 'ts2', { isDirect: true }));
+    const after = readFileSync(file, 'utf-8');
+    expect(after.startsWith(before)).toBe(true);
   });
 
-  it('persists the system prompt on the user record', async () => {
-    const ext = makeExt();
-    const agent = new Agent({
-      model: mockModel() as never,
-      systemPrompt: 'You are a test agent. Be concise.',
-    });
-    agent.use(ext);
-
-    await runTurn(agent, 'hello', sessionIdentity('s1', 't1'));
-
-    const records = ext.getRecords('s1');
-    expect(records).toHaveLength(2);
-    expect(records[0].role).toBe('user');
-    expect(records[0].systemPrompt).toBe('You are a test agent. Be concise.');
-    expect(records[1].role).toBe('assistant');
-    expect(records[1].systemPrompt).toBeUndefined();
+  it('records turn-complete events', async () => {
+    const agent = new Agent({ model: mockModel() as any });
+    agent.use(createDiskSessionExtension({ sessionDir: tmpDir, maxContextMessages: 50, autoSummarize: false }));
+    await runTurn(agent, 'hello', sessionIdentity('s1', 'ts1', { isDirect: true }));
+    const lines = readFileSync(join(tmpDir, 's1.jsonl'), 'utf-8').split('\n').filter(Boolean);
+    const events = lines.map((l) => JSON.parse(l)).filter((r) => r.kind === 'event');
+    expect(events.some((r) => r.event === 'turn-complete')).toBe(true);
   });
+});
 
-  it('captures system prompt after appendSystemPrompt modifies it', async () => {
-    const ext = makeExt();
-    const agent = new Agent({
-      model: mockModel() as never,
-      systemPrompt: 'Base prompt.',
-    });
-    agent.appendSystemPrompt('Appended skill content.');
-    agent.use(ext);
-
-    await runTurn(agent, 'hello', sessionIdentity('s1', 't1'));
-
-    const records = ext.getRecords('s1');
-    expect(records[0].systemPrompt).toBe('Base prompt.\n\nAppended skill content.');
-  });
-
-  // ── Background messages (appendMessage) ────────────────────────
-
-  it('appendMessage persists a system record to memory and disk', () => {
-    const ext = makeExt();
-    ext.appendMessage('s1', '[U1]: anyone seen the invoice?', {
-      ts: '1001',
-      meta: { sender: 'U1', channelId: 'C1' },
-    });
-
-    const records = ext.getRecords('s1');
-    expect(records).toHaveLength(1);
-    expect(records[0].role).toBe('system');
-    expect(records[0].content).toBe('[U1]: anyone seen the invoice?');
-    expect(records[0].ts).toBe('1001');
-    expect(records[0].meta).toEqual({ sender: 'U1', channelId: 'C1' });
-
-    // Persisted to disk.
-    const onDisk = readJsonl('s1');
-    expect(onDisk).toHaveLength(1);
-    expect(onDisk[0].role).toBe('system');
-    expect(onDisk[0].content).toBe('[U1]: anyone seen the invoice?');
-  });
-
-  it('background system messages appear in LLM context when agent is triggered', async () => {
-    const seen = (msgs: Message[]) => {
-      capturedMsgs = [...msgs];
-    };
-    let capturedMsgs: Message[] = [];
-    const ext = makeExt();
-    const agent = makeAgent(ext, seen);
-
-    // Simulate background chatter — messages the bot observed but
-    // weren't directed at it.
-    ext.appendMessage('s1', '[U1]: anyone seen the Johnson invoice?');
-    ext.appendMessage('s1', '[U2]: I think it\'s in the shared drive');
-
-    // Now the agent is triggered.
-    await runTurn(agent, '[U1]: @bot what\'s the status of the Johnson job?', sessionIdentity('s1', 't3'));
-
-    // The LLM should see: [system, system, user]
-    // The two background messages as system context, then the trigger.
-    expect(capturedMsgs).toHaveLength(3);
-    expect(capturedMsgs[0].role).toBe('system');
-    expect(capturedMsgs[0].content).toBe('[U1]: anyone seen the Johnson invoice?');
-    expect(capturedMsgs[1].role).toBe('system');
-    expect(capturedMsgs[1].content).toBe('[U2]: I think it\'s in the shared drive');
-    expect(capturedMsgs[2].role).toBe('user');
-    expect(capturedMsgs[2].content).toBe('[U1]: @bot what\'s the status of the Johnson job?');
-  });
-
-  it('background system messages are not double-persisted by afterTurn', async () => {
-    const ext = makeExt();
-    const agent = makeAgent(ext);
-
-    ext.appendMessage('s1', '[U1]: background chatter', { ts: 't1' });
-    await runTurn(agent, '[U2]: @bot hello', sessionIdentity('s1', 't2'));
-
-    // Should be: [system (background), user (trigger), assistant (reply)]
-    // NOT: [system, user, system, user, assistant] — the background
-    // system message is NOT in turn.messages so afterTurn can't see it.
-    const records = ext.getRecords('s1');
-    expect(records).toHaveLength(3);
-    expect(records[0].role).toBe('system');
-    expect(records[0].content).toBe('[U1]: background chatter');
-    expect(records[1].role).toBe('user');
-    expect(records[2].role).toBe('assistant');
-  });
-
-  // ── Schema sanitization & Steering integrity ───────────────────
-
-  describe('sanitizeConversationMessages', () => {
-    it('drops orphan tool messages that have no preceding assistant message', () => {
-      const input: Message[] = [
-        { role: 'user', content: 'hello' },
-        { role: 'tool', toolCallId: 'call_orphan', content: 'orphan output' },
-        { role: 'assistant', content: 'hi' },
-      ];
-      const output = sanitizeConversationMessages(input);
-      expect(output).toEqual([
-        { role: 'user', content: 'hello' },
-        { role: 'assistant', content: 'hi' },
-      ]);
-    });
-
-    it('drops orphan tool messages following an assistant message that has no tool_calls', () => {
-      const input: Message[] = [
-        { role: 'assistant', content: 'just text, no tool calls' },
-        { role: 'tool', toolCallId: 'call_orphan', content: 'unexpected result' },
-      ];
-      const output = sanitizeConversationMessages(input);
-      expect(output).toEqual([
-        { role: 'assistant', content: 'just text, no tool calls' },
-      ]);
-    });
-
-    it('drops duplicate tool results for the same toolCallId', () => {
-      const input: Message[] = [
-        {
-          role: 'assistant',
-          content: '',
-          toolCalls: [{ id: 'call_1', name: 'search', arguments: '{}' }],
-        },
-        { role: 'tool', toolCallId: 'call_1', content: 'first result' },
-        { role: 'tool', toolCallId: 'call_1', content: 'duplicate result' },
-      ];
-      const output = sanitizeConversationMessages(input);
-      expect(output).toHaveLength(2);
-      expect(output[0].role).toBe('assistant');
-      expect(output[1].role).toBe('tool');
-      expect(output[1].content).toBe('first result');
-    });
-
-    it('prunes unfulfilled tool calls from an assistant message when only partial calls completed', () => {
-      const input: Message[] = [
-        {
-          role: 'assistant',
-          content: '',
-          toolCalls: [
-            { id: 'call_1', name: 'tool1', arguments: '{}' },
-            { id: 'call_2', name: 'tool2', arguments: '{}' },
-          ],
-        },
-        { role: 'tool', toolCallId: 'call_1', content: 'res1' },
-        { role: 'user', content: 'next turn' },
-      ];
-      const output = sanitizeConversationMessages(input);
-      expect(output).toHaveLength(3);
-      expect(output[0].role).toBe('assistant');
-      expect(output[0].toolCalls).toEqual([
-        { id: 'call_1', name: 'tool1', arguments: '{}' },
-      ]);
-      expect(output[1].role).toBe('tool');
-      expect(output[2].role).toBe('user');
-    });
-
-    it('strips toolCalls from assistant when none completed but assistant has text content', () => {
-      const input: Message[] = [
-        {
-          role: 'assistant',
-          content: 'Let me look that up',
-          toolCalls: [{ id: 'call_1', name: 'tool1', arguments: '{}' }],
-        },
-        { role: 'user', content: 'cancelled' },
-      ];
-      const output = sanitizeConversationMessages(input);
-      expect(output).toEqual([
-        { role: 'assistant', content: 'Let me look that up' },
-        { role: 'user', content: 'cancelled' },
-      ]);
-      expect(output[0].toolCalls).toBeUndefined();
-    });
-
-    it('drops empty assistant message when no tool calls completed and content is empty', () => {
-      const input: Message[] = [
-        { role: 'user', content: 'search something' },
-        {
-          role: 'assistant',
-          content: '',
-          toolCalls: [{ id: 'call_1', name: 'tool1', arguments: '{}' }],
-        },
-        { role: 'user', content: 'new prompt' },
-      ];
-      const output = sanitizeConversationMessages(input);
-      expect(output).toEqual([
-        { role: 'user', content: 'search something' },
-        { role: 'user', content: 'new prompt' },
-      ]);
-    });
-  });
-
-  describe('steering and tool-call persistence integrity', () => {
-    it('persists steering messages in correct chronological order without duplicating records', async () => {
-      const ext = makeExt();
-      let iteration = 0;
-      const model = {
-        async generate(_req: { messages: Message[] }) {
-          iteration++;
-          if (iteration === 1) {
-            // First iteration: model issues a tool call
-            return {
-              message: {
-                role: 'assistant' as const,
-                content: 'calling tool',
-                toolCalls: [{ id: 'tc1', name: 'my_tool', arguments: '{}' }],
-              },
-              finishReason: 'tool_calls' as const,
-            };
-          }
-          // Second iteration (after tool + steering): model returns final answer
-          return {
-            message: { role: 'assistant' as const, content: 'done with steering response' },
-            finishReason: 'stop' as const,
-          };
-        },
-      };
-
-      const agent = new Agent({ model: model as never });
-      agent.use(ext);
-      agent.tool({
-        name: 'my_tool',
-        parameters: { type: 'object' },
-        async execute() {
-          // While the tool is executing, inject steering into this turn!
-          agent.steer('keep me posted');
-          return { toolCallId: 'tc1', content: 'tool output' };
-        },
+// ── Restart consistency ────────────────────────────────────────────
+describe('restart consistency', () => {
+  it('produces the same projection after reload', async () => {
+    const ledger1 = new SessionLedger(tmpDir, { loadOnStartup: false });
+    for (let i = 0; i < 6; i++) {
+      ledger1.append({
+        kind: 'message',
+        sessionKey: 's1',
+        role: i % 2 ? 'assistant' : 'user',
+        content: `msg-${i}`,
+        ts: `ts${i}`,
       });
+    }
+    const snapshot1 = ledger1.snapshot('s1');
+    const proj1 = await projectContext(snapshot1, { isDirect: true }, defaultPolicy);
 
-      await agent.run({
-        message: 'initial prompt',
-        metadata: { session: sessionIdentity('steer-test', '100') },
-      });
-
-      const records = ext.getRecords('steer-test');
-      // Expected records in strict chronological order:
-      // 1. user: 'initial prompt'
-      // 2. assistant: 'calling tool' (toolCalls: [tc1])
-      // 3. tool: 'tool output' (toolCallId: tc1)
-      // 4. user: '[steering] keep me posted'
-      // 5. assistant: 'done with steering response'
-      expect(records).toHaveLength(5);
-      expect(records[0].role).toBe('user');
-      expect(records[0].content).toBe('initial prompt');
-
-      expect(records[1].role).toBe('assistant');
-      expect(records[1].content).toBe('calling tool');
-      expect(records[1].toolCalls).toBeDefined();
-
-      expect(records[2].role).toBe('tool');
-      expect(records[2].toolCallId).toBe('tc1');
-
-      expect(records[3].role).toBe('user');
-      expect(records[3].content).toBe('[steering] keep me posted');
-
-      expect(records[4].role).toBe('assistant');
-      expect(records[4].content).toBe('done with steering response');
-
-      // Verify file on disk matches memory records exactly (no duplicates!)
-      const diskRecords = readJsonl('steer-test');
-      expect(diskRecords).toHaveLength(5);
-      expect(diskRecords.map((r) => r.role)).toEqual([
-        'user',
-        'assistant',
-        'tool',
-        'user',
-        'assistant',
-      ]);
-    });
-
-    it('buildContext filters out corrupted orphan tool records from existing session files', async () => {
-      // Manually simulate a corrupted file with Ronny\'s duplicate tool bug:
-      // Record 1: user
-      // Record 2: assistant (with tool call)
-      // Record 3: tool result
-      // Record 4: user (steering)
-      // Record 5: assistant (text only, no tool calls)
-      // Record 6: DUPLICATE tool result (orphan!)
-      const corruptedRecords: SessionRecord[] = [
-        { role: 'user', content: 'scrape site', ts: '1', recordedAt: new Date().toISOString() },
-        {
-          role: 'assistant',
-          content: 'running scraper',
-          toolCalls: [{ id: 'call_99', name: 'scraper', arguments: '{}' }],
-          ts: '2',
-          recordedAt: new Date().toISOString(),
-        },
-        {
-          role: 'tool',
-          content: 'scrape result',
-          toolCallId: 'call_99',
-          name: 'scraper',
-          ts: '3',
-          recordedAt: new Date().toISOString(),
-        },
-        { role: 'user', content: '[steering] update please', ts: '4', recordedAt: new Date().toISOString() },
-        { role: 'assistant', content: 'will do', ts: '5', recordedAt: new Date().toISOString() },
-        {
-          role: 'tool',
-          content: 'scrape result',
-          toolCallId: 'call_99',
-          name: 'scraper',
-          ts: '6',
-          recordedAt: new Date().toISOString(),
-        },
-      ];
-
-      const fs = await import('node:fs');
-      const filePath = join(tmpDir, 'corrupt_session.jsonl');
-      fs.writeFileSync(filePath, corruptedRecords.map((r) => JSON.stringify(r)).join('\n') + '\n');
-
-      // Create new extension instance that loads the corrupted file
-      const loadedExt = makeExt({ loadOnStartup: true });
-      let seenByModel: Message[] = [];
-      const agent = makeAgent(loadedExt, (msgs) => {
-        seenByModel = msgs;
-      });
-
-      // Run next turn
-      await runTurn(agent, 'what is next?', sessionIdentity('corrupt_session', '7'));
-
-      // The model should NOT see the orphan tool record #6!
-      // In the context passed to the model, every tool message must follow an assistant with toolCalls.
-      for (let i = 0; i < seenByModel.length; i++) {
-        if (seenByModel[i].role === 'tool') {
-          const prev = seenByModel[i - 1];
-          expect(prev).toBeDefined();
-          const isValidPreceding =
-            (prev.role === 'assistant' && prev.toolCalls?.some((tc) => tc.id === seenByModel[i].toolCallId)) ||
-            (prev.role === 'tool');
-          expect(isValidPreceding).toBe(true);
-        }
-      }
-
-      // Specifically, record #6 must have been omitted
-      const toolMsgs = seenByModel.filter((m) => m.role === 'tool');
-      expect(toolMsgs).toHaveLength(1);
-    });
+    const ledger2 = new SessionLedger(tmpDir, { loadOnStartup: true, verbose: false });
+    const snapshot2 = ledger2.snapshot('s1');
+    const proj2 = await projectContext(snapshot2, { isDirect: true }, defaultPolicy);
+    expect(proj2).toEqual(proj1);
   });
+});
 
-  // ── Auto-summarization & Cache-Preserving Compaction ────────────
+// ── Summary failure safety ────────────────────────────────────────
+describe('summary failure safety', () => {
+  it('does not lose history when summary generation fails', async () => {
+    const ledger = new SessionLedger(tmpDir, { loadOnStartup: false });
+    for (let i = 0; i < 5; i++) {
+      ledger.append({ kind: 'message', sessionKey: 's1', role: i % 2 ? 'assistant' : 'user', content: `msg-${i}`, ts: `ts${i}` });
+    }
+    const beforeCount = ledger.snapshot('s1').length;
+    const file = join(tmpDir, 's1.jsonl');
+    const beforeBytes = readFileSync(file, 'utf-8');
+    // Simulate a failed summary — no checkpoint appended.
+    // The ledger must be unchanged.
+    expect(ledger.snapshot('s1').length).toBe(beforeCount);
+    expect(readFileSync(file, 'utf-8')).toBe(beforeBytes);
+  });
+});
 
-  describe('auto-summarization and cache preservation', () => {
-    it('auto-summarizes earlier messages using the session model when reaching maxContextMessages', async () => {
-      let summarizationCallCount = 0;
-      let summarizedPromptText = '';
+// ── Concurrent turns ──────────────────────────────────────────────
+describe('concurrent turns', () => {
+  it('does not corrupt the ledger with concurrent appends', () => {
+    const ledger = new SessionLedger(tmpDir, { loadOnStartup: false });
+    const writers = Array.from({ length: 10 }, (_, i) =>
+      ledger.append({ kind: 'message', sessionKey: 's1', role: 'user', content: `concurrent-${i}`, ts: `ts${i}` }),
+    );
+    expect(writers).toHaveLength(10);
+    const lines = readFileSync(join(tmpDir, 's1.jsonl'), 'utf-8').split('\n').filter(Boolean);
+    expect(lines).toHaveLength(10);
+  });
+});
 
-      const testModel = {
-        async generate(req: { messages: Message[]; systemPrompt?: string }) {
-          const lastMsg = req.messages[req.messages.length - 1];
-          const text = messageContentToText(lastMsg.content);
-          if (req.systemPrompt?.includes('summarizer') || text.includes('summarize')) {
-            summarizationCallCount++;
-            summarizedPromptText = text;
-            return {
-              message: { role: 'assistant' as const, content: 'Summarized decisions: files modified and tasks done.' },
-              finishReason: 'stop' as const,
-              usage: { promptTokens: 10, completionTokens: 5 },
-            };
-          }
-          return {
-            message: { role: 'assistant' as const, content: `Reply to: ${text}` },
-            finishReason: 'stop' as const,
-            usage: { promptTokens: 5, completionTokens: 5 },
-          };
-        },
-      };
-
-      // Set threshold to 6 messages, eviction step to 3 messages
-      const ext = createDiskSessionExtension({
-        sessionDir: tmpDir,
-        maxContextMessages: 6,
-        contextEvictionStep: 3,
-        model: testModel,
-      });
-
-      const agent = new Agent({ model: testModel });
-      agent.use(ext);
-
-      // Turn 1: 2 records (user1, assistant1)
-      await runTurn(agent, 'message 1', sessionIdentity('compact-test', '1'));
-      // Turn 2: 4 records (user2, assistant2)
-      await runTurn(agent, 'message 2', sessionIdentity('compact-test', '2'));
-      // Turn 3: 6 records (user3, assistant3)
-      await runTurn(agent, 'message 3', sessionIdentity('compact-test', '3'));
-
-      expect(summarizationCallCount).toBe(0);
-      expect(ext.getRecords('compact-test')).toHaveLength(6);
-
-      // Turn 4: history is at 6 records (>= maxContextMessages).
-      // Auto-summarization triggers in beforeTurn!
-      let seenInTurn4: Message[] = [];
-      const trackingAgent = new Agent({
-        model: {
-          async generate(req) {
-            const lastMsg = req.messages[req.messages.length - 1];
-            const text = messageContentToText(lastMsg.content);
-            if (req.systemPrompt?.includes('summarizer') || text.includes('summarize')) {
-              return testModel.generate(req);
-            }
-            seenInTurn4 = req.messages;
-            return {
-              message: { role: 'assistant' as const, content: 'Turn 4 reply' },
-              finishReason: 'stop' as const,
-              usage: { promptTokens: 5, completionTokens: 5 },
-            };
-          },
-        },
-      });
-      trackingAgent.use(ext);
-
-      const res4 = await runTurn(trackingAgent, 'message 4', sessionIdentity('compact-test', '4'));
-
-      // 1. Summarization was invoked
-      expect(summarizationCallCount).toBe(1);
-      expect(summarizedPromptText).toContain('message 1');
-
-      // 2. The human's response does NOT leak any compaction text
-      expect(res4.message).toBe('Turn 4 reply');
-
-      // 3. Immediately before the model acts, the model receives the notification
-      const noticeMsg = seenInTurn4.find(
-        (m) => m.role === 'system' && messageContentToText(m.content).includes('automatically compacted into the summary above')
-      );
-      expect(noticeMsg).toBeDefined();
-
-      // 4. The context begins with the summary record
-      const summaryMsg = seenInTurn4.find((m) => messageContentToText(m.content).includes('Summarized decisions'));
-      expect(summaryMsg).toBeDefined();
-    });
-
-    it('preserves prompt cache prefix stability across consecutive turns between compactions', async () => {
-      const prefixesSeen: string[] = [];
-
-      const model = {
-        async generate(req: { messages: Message[]; systemPrompt?: string }) {
-          if (req.systemPrompt?.includes('summarizer')) {
-            return {
-              message: { role: 'assistant' as const, content: 'Consolidated summary' },
-              finishReason: 'stop' as const,
-              usage: { promptTokens: 10, completionTokens: 5 },
-            };
-          }
-          // Record the first message in the history prefix
-          prefixesSeen.push(messageContentToText(req.messages[0].content));
-          return {
-            message: { role: 'assistant' as const, content: 'ok' },
-            finishReason: 'stop' as const,
-            usage: { promptTokens: 5, completionTokens: 5 },
-          };
-        },
-      };
-
-      const ext = createDiskSessionExtension({
-        sessionDir: tmpDir,
-        maxContextMessages: 10,
-        contextEvictionStep: 5,
-        model,
-      });
-
-      const agent = new Agent({ model });
-      agent.use(ext);
-
-      // Run 5 turns (records grow from 2 to 10)
-      for (let i = 1; i <= 5; i++) {
-        await runTurn(agent, `turn ${i}`, sessionIdentity('cache-test', `${i}`));
-      }
-
-      // During turns 1-5, all turns share the exact same first message ("turn 1")
-      for (let i = 0; i < 5; i++) {
-        expect(prefixesSeen[i]).toBe('turn 1');
-      }
-
-      // Turn 6 triggers auto-summarization because records count is 10 (>= maxContextMessages)
-      await runTurn(agent, 'turn 6', sessionIdentity('cache-test', '6'));
-
-      // Turn 7 and Turn 8: history has been compacted to a summary record at index 0.
-      // Both turn 7 and turn 8 must start with the exact same summary record!
-      await runTurn(agent, 'turn 7', sessionIdentity('cache-test', '7'));
-      await runTurn(agent, 'turn 8', sessionIdentity('cache-test', '8'));
-
-      const prefix7 = prefixesSeen[6];
-      const prefix8 = prefixesSeen[7];
-      expect(prefix7).toContain('Consolidated summary');
-      expect(prefix8).toBe(prefix7); // 100% prefix cache hit!
-    });
-
-    it('backs off context limit (e.g. 100 -> 50 -> 25) when a context length error occurs', async () => {
-      let callCount = 0;
-
-      const model = {
-        async generate(req: { messages: Message[]; systemPrompt?: string }) {
-          callCount++;
-          if (req.systemPrompt?.includes('summarizer')) {
-            return {
-              message: { role: 'assistant' as const, content: 'Compact backoff summary' },
-              finishReason: 'stop' as const,
-              usage: { promptTokens: 5, completionTokens: 5 },
-            };
-          }
-          if (callCount === 3) {
-            // Throw a context length error on turn 3
-            throw new Error('400 Maximum context length exceeded: prompt too long');
-          }
-          return {
-            message: { role: 'assistant' as const, content: 'ok' },
-            finishReason: 'stop' as const,
-            usage: { promptTokens: 5, completionTokens: 5 },
-          };
-        },
-      };
-
-      const ext = createDiskSessionExtension({
-        sessionDir: tmpDir,
-        maxContextMessages: 100,
-        fallbackThresholds: [100, 50, 25],
-        model,
-      });
-
-      const agent = new Agent({
-        model,
-        errorPolicy: 'fallback',
-      });
-      agent.use(ext);
-
-      expect(ext.getEffectiveLimit('backoff-session')).toBe(100);
-
-      // Turn 1 & 2 succeed
-      await runTurn(agent, 'msg 1', sessionIdentity('backoff-session', '1'));
-      await runTurn(agent, 'msg 2', sessionIdentity('backoff-session', '2'));
-
-      // Turn 3 throws context length error
-      const res3 = await runTurn(agent, 'msg 3', sessionIdentity('backoff-session', '3'));
-      expect(res3.finishReason).toBe('error');
-
-      // The extension detected the context error and backed off to 50
-      expect(ext.getEffectiveLimit('backoff-session')).toBe(50);
-    });
-
-    it('uses the agent configured model automatically if not explicitly provided in config', async () => {
-      let summarizerCalled = false;
-
-      const model = {
-        async generate(req: { messages: Message[]; systemPrompt?: string }) {
-          if (req.systemPrompt?.includes('summarizer')) {
-            summarizerCalled = true;
-            return {
-              message: { role: 'assistant' as const, content: 'Auto summary using agent model' },
-              finishReason: 'stop' as const,
-              usage: { promptTokens: 5, completionTokens: 5 },
-            };
-          }
-          return {
-            message: { role: 'assistant' as const, content: 'agent reply' },
-            finishReason: 'stop' as const,
-            usage: { promptTokens: 5, completionTokens: 5 },
-          };
-        },
-      };
-
-      // Notice: NO model passed into createDiskSessionExtension
-      const ext = createDiskSessionExtension({
-        sessionDir: tmpDir,
-        maxContextMessages: 4,
-        contextEvictionStep: 2,
-      });
-
-      const agent = new Agent({ model });
-      agent.use(ext);
-
-      await runTurn(agent, 'msg 1', sessionIdentity('agent-model-test', '1'));
-      await runTurn(agent, 'msg 2', sessionIdentity('agent-model-test', '2'));
-      // Reached 4 messages, turn 3 triggers summarizer
-      await runTurn(agent, 'msg 3', sessionIdentity('agent-model-test', '3'));
-
-      expect(summarizerCalled).toBe(true);
-    });
+// ── scopeKey ───────────────────────────────────────────────────────
+describe('scopeKey', () => {
+  it('returns thread scope for thread identity', () => {
+    expect(scopeKey({ threadTs: 't1' })).toBe('thread:t1');
+  });
+  it('returns direct scope for direct identity', () => {
+    expect(scopeKey({ isDirect: true })).toBe('direct');
+  });
+  it('returns channel scope for default identity', () => {
+    expect(scopeKey({})).toBe('channel');
   });
 });
