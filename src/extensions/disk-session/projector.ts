@@ -81,6 +81,13 @@ export function sliceAtTurnBoundary(messages: MessageLedgerRecord[], maxMessages
   return messages.slice(start);
 }
 
+export function sliceModelMessagesAtTurnBoundary(messages: ModelMessage[], maxMessages: number): ModelMessage[] {
+  if (messages.length <= maxMessages) return messages;
+  let start = messages.length - maxMessages;
+  while (start < messages.length && messages[start].role !== 'user' && messages[start].role !== 'system') start++;
+  return messages.slice(start);
+}
+
 export function compactionChunk(messages: MessageLedgerRecord[], maxMessages: number): MessageLedgerRecord[] {
   if (messages.length < maxMessages) return [];
   const target = Math.max(1, Math.floor(maxMessages / 2));
@@ -94,19 +101,29 @@ export async function projectContext(
   identity: ProjectionIdentity,
   policy: ProjectionPolicy,
 ): Promise<Message[]> {
-  const selected = selectScope(records, identity);
+  const selected = selectScope(records, identity, policy);
   const checkpoint = latestCheckpoint(records, scopeKey(identity));
   const applied = applyCheckpoint(selected, checkpoint);
   const complete = dropIncompleteTrailingUsers(applied.messages);
-  const window = sliceAtTurnBoundary(complete, policy.maxMessages - (applied.summary ? 1 : 0));
-  const modelMessages = await recordsToModelMessages(window);
+
+  // Wide window: let Vercel prune low-value content (reasoning, old tool-only
+  // messages) before we apply the final count cap.  Tool-only messages that
+  // Vercel drops via emptyMessages:'remove' would otherwise waste slots in a
+  // naive pre-slice to maxMessages.
+  const wideLimit = policy.maxMessages * 2;
+  const wideWindow = sliceAtTurnBoundary(complete, wideLimit - (applied.summary ? 1 : 0));
+  const modelMessages = await recordsToModelMessages(wideWindow);
   const pruned = pruneMessages({
     messages: modelMessages,
     reasoning: 'all',
     toolCalls: `before-last-${policy.toolCallRetention}-messages`,
     emptyMessages: 'remove',
   });
-  const messages = modelMessagesToLibra(pruned);
+
+  // Final cap: trim the pruned (denser) message list to the configured limit,
+  // again aligning to a turn boundary so we don't start mid-turn.
+  const capped = sliceModelMessagesAtTurnBoundary(pruned, policy.maxMessages - (applied.summary ? 1 : 0));
+  const messages = modelMessagesToLibra(capped);
   return applied.summary ? [{ role: 'system', content: `[Conversation summary]\n\n${applied.summary}` }, ...messages] : messages;
 }
 

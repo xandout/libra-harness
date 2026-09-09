@@ -348,6 +348,32 @@ describe('projectContext', () => {
     expect(messages.length).toBeLessThanOrEqual(6);
   });
 
+  it('uses a wide window so pruned tool-only messages can backfill', async () => {
+    // 20 messages: 10 user/assistant pairs where assistant is tool-only.
+    // Without the wide window, slicing to maxMessages first would keep
+    // tool-only messages that Vercel then drops, leaving fewer than maxMessages.
+    const records: SessionRecord[] = [];
+    for (let i = 0; i < 20; i++) {
+      if (i % 2 === 0) {
+        records.push(makeMessageRecord('s', 'user', `q-${i}`, { id: `r${i}` }));
+      } else {
+        records.push(makeMessageRecord('s', 'assistant', '', {
+          id: `r${i}`,
+          toolCalls: [{ id: `tc${i}`, name: 'noop', arguments: '{}' }],
+        }));
+        records.push(makeMessageRecord('s', 'tool', 'result', { id: `r${i + 1}`, toolCallId: `tc${i}`, name: 'noop' }));
+      }
+    }
+    const policy = { ...defaultPolicy, maxMessages: 8, toolCallRetention: 1 };
+    const messages = await projectContext(records, { isDirect: true }, policy);
+    // Vercel should drop old tool-only assistant + tool messages.
+    // The wide window lets content-bearing messages backfill.
+    expect(messages.length).toBeLessThanOrEqual(8);
+    // Should have more than just the last 2 messages (which is what would
+    // happen if we sliced to 8 first and Vercel dropped 6 tool-only ones).
+    expect(messages.length).toBeGreaterThan(2);
+  });
+
   it('is deterministic from the same snapshot', async () => {
     const records: SessionRecord[] = [
       makeMessageRecord('s', 'user', 'a'),
