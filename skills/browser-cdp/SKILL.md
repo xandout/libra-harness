@@ -9,9 +9,8 @@ You have access to dedicated CLI tools installed in `/usr/local/bin` for control
 
 ## Chrome CDP Tools
 
-All browser interactions are driven by `cdp` commands connecting to a headed Chrome instance running on display `:99`:
+All browser interactions are driven by `cdp` commands connecting to the persistent browser service:
 
-- `start-browser`: Ensure headed Chrome is running on display :99 with persistent profile and remote debugging (cleans locks automatically). Run this if the browser is closed or died.
 - `cdp ax [max_depth]`: **ALWAYS RUN THIS FIRST AFTER NAVIGATING!** Dumps the accessibility tree with explicit `[@ref]` tags (e.g. `- button "Search" [@5]`, `- textbox "Zip" [@3]`).
 - `cdp click <target>`: Click an element.
   - **Best target**: `@ref` (e.g. `cdp click @5`). 100% immune to substring collisions or selector ambiguity!
@@ -40,8 +39,8 @@ All browser interactions are driven by `cdp` commands connecting to a headed Chr
 ## Display & Screenshot Tools
 
 - `view_image <file_path> [prompt]`: **Direct visual inspection tool!** Inspect any image or screenshot (PNG, JPG, WEBP) using the configured vision model. Ask specific questions like `view_image file_path="/tmp/screen.png" prompt="Is there a CAPTCHA or error message visible?"`.
-- `screenshot [output.png] [url]`: Capture a screenshot of virtual display `:99` (or render a URL).
-- `slack-screenshot [url] [comment]`: Take a screenshot and upload it directly to the active Slack thread in one step.
+- `cdp screenshot [output.png]`: Capture the active browser page.
+- `slack-screenshot [url] [comment]`: Optionally navigate to a URL, capture the active page, and upload it to the Slack thread.
 
 ## Slack Communication Tools
 
@@ -69,4 +68,4 @@ All browser interactions are driven by `cdp` commands connecting to a headed Chr
    After typing or clicking, run `cdp ax` to verify the state update (e.g. confirming input values or resulting search lists).
 4. **Workspace & Execution Boundary**:
    - Your assigned workspace is `/home/node/workspace`. All file operations and shell commands must remain within `/home/node/workspace`.
-   - Helper tools (`cdp`, `start-browser`, `screenshot`, etc.) are installed system-wide in `/usr/local/bin`.
+   - Helper tools (`cdp`, `slack-screenshot`, and Slack communication commands) are installed system-wide in `/usr/local/bin`.

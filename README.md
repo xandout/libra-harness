@@ -135,67 +135,25 @@ const loggingExtension: Extension = {
 agent.use(loggingExtension)
 ```
 
-### Built-in extensions (`@xandout/libra-harness/extras`)
+### Built-in extensions
 
-Libra ships with a set of optional extensions under `@xandout/libra-harness/extras`. Each is importable via its own subpath — import only what you need:
+Libra ships the extensions used by `libra-code` as explicit subpath exports:
 
 ```typescript
-import { createLoggerExtension } from '@xandout/libra-harness/extensions/logger'
 import { createDiskSessionExtension } from '@xandout/libra-harness/extensions/disk-session'
-
-agent.use(createLoggerExtension())
-agent.use(createDiskSessionExtension({ dir: './sessions' }))
+import { createCodeToolsExtension } from '@xandout/libra-harness/extensions/code-tools'
+import { createStreamingExtension } from '@xandout/libra-harness/extensions/streaming'
+import { createSkillExtension } from '@xandout/libra-harness/extensions/skills'
 ```
 
-| Extension | Import | Description |
-|-----------|--------|-------------|
-| logger | `@xandout/libra-harness/extensions/logger` | Logs each lifecycle stage |
-| streaming | `@xandout/libra-harness/extensions/streaming` | Streams text/reasoning/tool-input deltas |
-| otel | `@xandout/libra-harness/extensions/otel` | OpenTelemetry tracing (JSONL or OTLP export) |
-| weather-tool | `@xandout/libra-harness/extensions/weather-tool` | Registers a `get_weather` tool |
-| structured-output | `@xandout/libra-harness/extensions/structured-output` | Validates LLM output against a JSON schema |
-| mcp | `@xandout/libra-harness/extensions/mcp` | Connects to MCP servers, registers tools |
-| skills | `@xandout/libra-harness/extensions/skills` | Loads Agent Skills from directories |
-| filesystem | `@xandout/libra-harness/extensions/filesystem` | File read/write/list tools |
-| scripts | `@xandout/libra-harness/extensions/scripts` | Runs shell scripts in pipeline stages |
-| keyword-extractor | `@xandout/libra-harness/extensions/keyword-extractor` | Extracts keywords from messages (local NLP) |
-| token-stats | `@xandout/libra-harness/extensions/token-stats` | Tracks token usage per turn |
-| tool-buffer | `@xandout/libra-harness/extensions/tool-buffer` | Buffers and replays tool results |
-| auto-steer | `@xandout/libra-harness/extensions/auto-steer` | Auto-injects steering messages based on conditions |
-| emoji | `@xandout/libra-harness/extensions/emoji` | Decorates responses with an emoji prefix |
-| timestamp | `@xandout/libra-harness/extensions/timestamp` | Records start/finish timestamps in metadata |
-| disk-session | `@xandout/libra-harness/extensions/disk-session` | Disk-backed session history per session ID |
-| mem-session | `@xandout/libra-harness/extensions/mem-session` | In-memory session history per session ID |
-| memory | `@xandout/libra-harness/extensions/memory` | Long-term memory with LLM-based extraction |
+| Extension | Description |
+|-----------|-------------|
+| disk-session | Disk-backed session history per session ID |
+| code-tools | Coding, filesystem, shell, and task tools |
+| streaming | Text, reasoning, and tool-input delta callbacks |
+| skills | Agent Skill discovery and loading |
 
-**Priority** controls hook execution order within each lifecycle stage (higher = runs first, ties keep registration order). Set `priority` on any extension whose hooks must run before or after another extension's hooks.
-
-See [`src/extensions/README.md`](src/extensions/README.md) for full API docs.
-
-### Extension loader
-
-For larger setups, `loadExtensions` accepts a mix of factory functions, `Extension` objects, and directory paths. It passes a shared config object to each factory, sorts by priority, and handles cleanup:
-
-```typescript
-import { loadExtensions, installExtensions, closeExtensions } from '@xandout/libra-harness/extensions'
-import { createLoggerExtension } from '@xandout/libra-harness/extensions/logger'
-import { createMcpExtension } from '@xandout/libra-harness/extensions/mcp'
-
-const loaded = await loadExtensions(
-  [
-    createLoggerExtension,        // factory — config passed automatically
-    createMcpExtension,           // factory — opts out if no mcpConfigPaths
-    './extensions',               // directory — discovers extensions by extension.json
-  ],
-  { mcpConfigPaths: './mcpServers.json' },
-)
-
-installExtensions(loaded, agent)
-
-// ... run turns ...
-
-await closeExtensions(loaded)     // calls close() on extensions that have one (e.g. MCP)
-```
+**Priority** controls hook execution order within each lifecycle stage (higher = runs first, ties keep registration order).
 
 ## Model Providers
 
@@ -267,49 +225,6 @@ class MyModel implements Model {
   }
 }
 ```
-
-## Virtual Models (OpenAI-compatible provider)
-
-Expose Libra agents as OpenAI-compatible models. Any framework that supports a custom OpenAI base URL can use your agents as models — with their own context, tools, extensions, and policy controls.
-
-```typescript
-import { Agent } from '@xandout/libra-harness'
-import { resolveModel } from '@xandout/libra-harness/models'
-import { createOpenAICompatibleServer } from '@xandout/libra-harness/openai-provider'
-
-const model = await resolveModel('deepseek/deepseek-v4-flash')
-
-const server = createOpenAICompatibleServer({
-  agents: {
-    'research-agent': new Agent({ model, systemPrompt: 'You are a research assistant.' }),
-    'coding-agent': new Agent({ model, systemPrompt: 'You are a coding assistant.' }),
-  },
-  apiKeys: ['your-provider-key'],
-})
-
-server.listen(8787, '127.0.0.1')
-```
-
-Now any OpenAI-compatible client can call these agents as models:
-
-```python
-client = OpenAI(base_url="http://127.0.0.1:8787/v1", api_key="your-provider-key")
-response = client.chat.completions.create(
-    model="research-agent",
-    messages=[{"role": "user", "content": "Research quantum computing"}],
-)
-```
-
-Features:
-- `GET /v1/models` and `POST /v1/chat/completions`
-- Bearer and `x-api-key` authentication
-- Text, image, system, developer, assistant, and tool messages
-- JSON and SSE streaming responses
-- Client-defined tools (external tool calling with round-trip)
-- Agent's own tools run internally (invisible to the caller)
-- Per-agent hooks for moderation, context injection, output filtering
-
-See [`docs/virtual-models.md`](docs/virtual-models.md) and [`docs/virtual-models-pii-dlp.md`](docs/virtual-models-pii-dlp.md) for concepts and the PII/DLP pattern.
 
 ## Hook Lifecycle
 
@@ -445,21 +360,6 @@ agent.use(streamingExtension)
 
 When `onDelta` is not set, `AISdkModel` uses `doGenerate` (no streaming overhead). The core never interprets deltas — it simply passes the callback through.
 
-## Examples
-
-The `examples/` directory includes reference implementations:
-
-- **`full-agent/`** — all built-in extensions via the loader, plus a local search-replace extension. Multi-turn session memory, MCP tools, skill loader, weather tool, streaming.
-- **`basic-agent-concurrent/`** — single agent handling many concurrent users with session isolation and per-turn halt.
-- **`subagents/`** — orchestrator agent delegating to specialized subagents via `createAgentTool`, with signal chaining and halt propagation.
-- **`subagents-concurrent/`** — orchestrator fanning out to multiple subagents in parallel via `Promise.all`.
-- **`structured-output/`** — `beforeResponse` hook that validates LLM output against a JSON schema.
-- **`streaming/`** — `beforeLLM` hook that streams text/reasoning/tool-input deltas.
-- **`openai-compatible-provider/`** — exposes multiple independent Libra agents as authenticated OpenAI-compatible models. Supports text, images, SSE streaming, and client-defined external tools.
-- **`pii-dlp-provider/`** — proves the virtual model PII/DLP pattern: the LLM never sees real PII, the consumer never sees placeholders. Uses a CSV datasource with tool calling and full lifecycle logging.
-- **`slack-bot/`** — full Slack bot with Socket Mode, block kit rendering, session persistence, MCP, skills, and OpenTelemetry tracing.
-- **`large-document-mapper/`** — processes large documents in chunks with mapping and reduction.
-
 ## Architecture
 
 - **Library-first** — no server, daemon, database, or queue required
@@ -470,8 +370,7 @@ The `examples/` directory includes reference implementations:
 - **Multimodal** — text, images, documents, audio, and video in message content
 - **Steerable & haltable** — per-turn controls via `RunHandle` or `ctx.turn`
 - **Streamable** — text, reasoning, and tool-input deltas via `onDelta` callback
-- **Virtual models** — expose agents as OpenAI-compatible models with full provider-side control
-- **Testable** — 354 tests with mock model
+- **Testable** — comprehensive tests with mock models
 
 ### What the core owns
 

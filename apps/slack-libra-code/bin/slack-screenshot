@@ -16,7 +16,10 @@ COMMENT="${2:-Screenshot}"
 TMP_FILE="/tmp/screenshot_$(date +%s).png"
 
 # Take screenshot
-screenshot "$TMP_FILE" "$TARGET" >/dev/null
+if [[ "$TARGET" =~ ^https?:// ]]; then
+  cdp goto "$TARGET" >/dev/null
+fi
+cdp screenshot "$TMP_FILE" >/dev/null
 
 # Upload to Slack
 slack-upload "$TMP_FILE" "$COMMENT"

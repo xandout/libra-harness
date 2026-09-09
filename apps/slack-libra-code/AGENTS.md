@@ -6,7 +6,7 @@ This environment provides a persistent headless/virtual desktop workspace equipp
 
 ## Workspace Boundary & Tool Paths
 - **Your Workspace**: `/home/node/workspace` (all files, scripts, searches, and commands must stay here).
-- **System Tools**: Standard tools (`cdp`, `start-browser`, `screenshot`, `slack-upload`, `slack-post`, `lc`) are installed in `/usr/local/bin`. Run them directly by name.
+- **System Tools**: Standard tools (`cdp`, `slack-screenshot`, `slack-upload`, `slack-post`, `slack-read`, `lc`) are installed in `/usr/local/bin`. Run them directly by name.
 
 ---
 
@@ -16,13 +16,8 @@ This environment provides a persistent headless/virtual desktop workspace equipp
 - **Browser**: Google Chrome running on `:99` with remote debugging enabled on port `18800`.
 - **User Profile**: Persistent profile stored at `/home/node/chrome-profile`.
 
-### Golden Rule: Never Run Raw `google-chrome &`
-Always use `start-browser` to ensure Chrome is running with the proper remote debugging port, display settings, and automatic lock cleanup.
-
-```bash
-# Check or start Chrome
-start-browser
-```
+### Browser Process Ownership
+Chrome runs in the separate persistent browser service. Do not launch or kill Chrome from the agent container. Use `cdp` to communicate with the configured `CHROME_CDP_URL`.
 
 ---
 
@@ -147,25 +142,21 @@ slack-read 10
 
 When asked to automate a task on the web (e.g. "Go to site X and check Y"):
 
-1. Ensure the browser is ready:
-   ```bash
-   start-browser
-   ```
-2. Navigate to the target page:
+1. Navigate to the target page:
    ```bash
    cdp goto "https://example.com"
    ```
-3. Read the semantic structure:
+2. Read the semantic structure:
    ```bash
    cdp ax
    ```
-4. Perform actions using clean selectors or text:
+3. Perform actions using clean selectors or text:
    ```bash
    cdp click "text=Sign In"
    cdp type "input#email" "user@example.com"
    cdp press Enter
    ```
-5. Confirm results, take a screenshot, and report to Slack:
+4. Confirm results, take a screenshot, and report to Slack:
    ```bash
    cdp screenshot /tmp/result.png
    slack-upload /tmp/result.png "Here is the completed page"

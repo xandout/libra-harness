@@ -14,29 +14,9 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./extensions": {
-      "types": "./dist/extensions/index.d.ts",
-      "import": "./dist/extensions/index.js"
-    },
-    "./extensions/loader": {
-      "types": "./dist/extensions/loader.d.ts",
-      "import": "./dist/extensions/loader.js"
-    },
     "./models": {
       "types": "./dist/models/index.d.ts",
       "import": "./dist/models/index.js"
-    },
-    "./models/ai-sdk-resolver": {
-      "types": "./dist/models/ai-sdk-resolver.d.ts",
-      "import": "./dist/models/ai-sdk-resolver.js"
-    },
-    "./models/routing-model": {
-      "types": "./dist/models/routing-model.d.ts",
-      "import": "./dist/models/routing-model.js"
-    },
-    "./openai-provider": {
-      "types": "./dist/openai-provider/index.d.ts",
-      "import": "./dist/openai-provider/index.js"
     },
     "./extensions/disk-session": {
       "types": "./dist/extensions/disk-session/index.d.ts",
@@ -53,26 +33,19 @@
     "./extensions/skills": {
       "types": "./dist/extensions/skills/index.d.ts",
       "import": "./dist/extensions/skills/index.js"
-    },
-    "./skills": {
-      "types": "./dist/extensions/skills/index.d.ts",
-      "import": "./dist/extensions/skills/index.js"
-    },
-    "./code-tools": {
-      "types": "./dist/extensions/code-tools/index.d.ts",
-      "import": "./dist/extensions/code-tools/index.js"
-    },
-    "./disk-session": {
-      "types": "./dist/extensions/disk-session/index.d.ts",
-      "import": "./dist/extensions/disk-session/index.js"
-    },
-    "./streaming": {
-      "types": "./dist/extensions/streaming/index.d.ts",
-      "import": "./dist/extensions/streaming/index.js"
     }
   },
   "files": [
-    "dist",
+    "dist/*.js",
+    "dist/*.js.map",
+    "dist/*.d.ts",
+    "dist/*.d.ts.map",
+    "dist/models",
+    "dist/extensions/code-tools",
+    "dist/extensions/disk-session",
+    "dist/extensions/skills",
+    "dist/extensions/streaming",
+    "!dist/**/*.test.*",
     "README.md"
   ],
   "publishConfig": {
@@ -99,37 +72,10 @@
     "node": ">=20"
   },
   "devDependencies": {
-    "@opentelemetry/sdk-trace-base": "^2.10.0",
     "@types/node": "^26.2.0",
     "@vitest/coverage-v8": "^4.1.10",
-    "fallow": "^3.22.0",
-    "quickjs-emscripten": "^0.32.0",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
-  },
-  "peerDependencies": {
-    "@modelcontextprotocol/client": "^2.0.0",
-    "@opentelemetry/api": "^1.9.0",
-    "@opentelemetry/sdk-trace-base": "^2.0.0",
-    "ai": "^7.0.0",
-    "quickjs-emscripten": "^0.32.0"
-  },
-  "peerDependenciesMeta": {
-    "ai": {
-      "optional": true
-    },
-    "@modelcontextprotocol/client": {
-      "optional": true
-    },
-    "@opentelemetry/api": {
-      "optional": true
-    },
-    "@opentelemetry/sdk-trace-base": {
-      "optional": true
-    },
-    "quickjs-emscripten": {
-      "optional": true
-    }
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.36",
@@ -137,8 +83,6 @@
     "@ai-sdk/google": "^4.0.39",
     "@ai-sdk/openai": "^4.0.36",
     "@ai-sdk/provider": "^4.0.7",
-    "ai": "^7.0.84",
-    "wink-eng-lite-web-model": "^1.8.1",
-    "wink-nlp": "^2.4.0"
+    "ai": "^7.0.84"
   }
 }

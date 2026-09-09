@@ -10,7 +10,7 @@ A simple Slack Socket Mode bot that forwards incoming messages to `lc` (the libr
 - **Slack Reactions**: Shows `:thinking_face:` while `lc` is working, `:white_check_mark:` when completed, and `:x:` on error.
 - **Threaded Execution**: Replies directly within threads in channels or DMs.
 - **In-flight Turn Control**: Supports `/oc halt [reason]` to stop and `/oc steer <msg>` to redirect mid-turn.
-- **Built-in Browser & Slack Tools**: Gives `lc` access to `screenshot`, `slack-upload`, `slack-screenshot`, `slack-post`, and `slack-read` directly in PATH.
+- **Built-in Browser & Slack Tools**: Gives `lc` access to `cdp`, `slack-upload`, `slack-screenshot`, `slack-post`, and `slack-read` directly in PATH.
 
 ## Slash Commands
 
@@ -23,7 +23,7 @@ Register `/oc` in your Slack App (Features → Slash Commands):
 ## Built-in Tools Available to `lc`
 
 When `lc` runs in the container, it has access to:
-- `screenshot [output.png] [url]` — Take a full screenshot of the X11 virtual display (`:99`) or render a web URL via Chrome
+- `cdp screenshot [output.png]` — Capture the active page from the persistent browser service
 - `slack-upload <file> [comment]` — Upload any image or file directly into the active Slack thread
 - `slack-screenshot [url] [comment]` — Capture a screenshot and post it to Slack in one step
 - `slack-post <message>` — Post an additional message or Block Kit JSON to the Slack thread

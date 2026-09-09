@@ -5,19 +5,22 @@
   "type": "module",
   "bin": {
     "lc": "dist/index.js",
-    "cdp": "dist/src/cdp-entry.js",
-    "fallow-cdp": "src/cdp-entry.ts",
-    "screenshot": "bin/screenshot",
-    "start-browser": "bin/start-browser"
+    "cdp": "dist/src/cdp-entry.js"
   },
   "files": [
-    "dist",
-    "bin"
+    "dist/index.js",
+    "dist/index.js.map",
+    "dist/index.d.ts",
+    "dist/agent-setup.*",
+    "dist/file-change-tracker.*",
+    "dist/session-socket.*",
+    "dist/session-stats.*",
+    "dist/src/cdp-entry.*",
+    "dist/src/cdp"
   ],
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js",
-    "dev": "tsx index.ts"
+    "start": "node dist/index.js"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.36",
