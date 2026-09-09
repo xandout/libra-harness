@@ -8,7 +8,7 @@ import {
 import {
   SessionSocketServer, SessionSocketClient, isSessionActive, getSocketPath, type SocketEvent,
 } from './session-socket.js';
-import { readdirSync, readFileSync, unlinkSync, existsSync, rmSync } from 'node:fs';
+import { readdirSync, readFileSync, unlinkSync, existsSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -103,17 +103,22 @@ function cleanSession(sessionKey: string) {
     }
   } catch {}
 
-  // Remove the session file so the agent starts fresh.
+  // Rotate the session file aside so the agent starts fresh but
+  // the durable ledger (paid tokens) is preserved.
   const sessionFile = join(SESSIONS_DIR, `${safeKey}.jsonl`);
+  let rotated = false;
   if (existsSync(sessionFile)) {
-    rmSync(sessionFile, { force: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const archivePath = join(SESSIONS_DIR, `${safeKey}.${stamp}.jsonl`);
+    renameSync(sessionFile, archivePath);
+    rotated = true;
   }
 
   // Remove stale socket so a new session can start.
   const socketPath = getSocketPath(SOCKETS_DIR, sessionKey);
   try { unlinkSync(socketPath); } catch {}
 
-  console.log(`Cleaned session ${sessionKey}: ${killed} task(s) killed, session file removed.`);
+  console.log(`Cleaned session ${sessionKey}: ${killed} task(s) killed, session ${rotated ? 'rotated' : 'already empty'}.`);
 }
 
 // ── Plain text mode (no TUI) ─────────────────────────────────────────
