@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { MessageContent, ToolCall } from '../../types.js';
@@ -62,10 +62,16 @@ export class SessionLedger {
 
   constructor(
     private readonly dir: string,
-    options: { loadOnStartup?: boolean; verbose?: boolean } = {},
+    options: { loadOnStartup?: boolean | string; verbose?: boolean } = {},
   ) {
     mkdirSync(dir, { recursive: true });
-    if (options.loadOnStartup !== false) this.load(options.verbose !== false);
+    if (options.loadOnStartup !== false) {
+      if (typeof options.loadOnStartup === 'string') {
+        this.loadSession(options.loadOnStartup, options.verbose !== false);
+      } else {
+        this.load(options.verbose !== false);
+      }
+    }
   }
 
   append(record: NewSessionRecord): SessionRecord {
@@ -82,6 +88,7 @@ export class SessionLedger {
   }
 
   snapshot(sessionKey: string): SessionRecord[] {
+    if (!this.records.has(sessionKey)) this.loadSession(sessionKey, false);
     return [...(this.records.get(sessionKey) ?? [])];
   }
 
@@ -91,6 +98,25 @@ export class SessionLedger {
 
   private filePath(sessionKey: string): string {
     return join(this.dir, `${sessionKey.replace(/[^a-zA-Z0-9_-]/g, '_')}.jsonl`);
+  }
+
+  private loadSession(sessionKey: string, verbose: boolean): void {
+    const file = this.filePath(sessionKey);
+    if (!existsSync(file)) return;
+    const records: SessionRecord[] = [];
+    try {
+      for (const line of readFileSync(file, 'utf-8').split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          const record = JSON.parse(line) as SessionRecord;
+          if (record.sessionKey === sessionKey || this.filePath(record.sessionKey) === file) records.push(record);
+        } catch {}
+      }
+    } catch {}
+    if (records.length > 0) {
+      this.records.set(records[0].sessionKey, records);
+      if (verbose) console.log(`[disk-session] loaded ${records.length} record(s) for session ${sessionKey}`);
+    }
   }
 
   private load(verbose: boolean): void {

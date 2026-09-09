@@ -38,7 +38,6 @@ export interface DiskSessionConfig {
   channelContextMessages?: number;
   recentChannelMessages?: number;
   toolCallRetention?: number;
-  loadOnStartup?: boolean;
   verbose?: boolean;
   resolver?: SessionResolver;
 }
@@ -86,7 +85,7 @@ export async function generateSessionSummary(
 
 export default function createDiskSessionExtension(config: DiskSessionConfig = {}): DiskSessionExtension {
   const ledger = new SessionLedger(config.sessionDir ?? './sessions', {
-    loadOnStartup: config.loadOnStartup,
+    loadOnStartup: false,
     verbose: config.verbose,
   });
   const resolver = config.resolver ?? defaultResolver;
