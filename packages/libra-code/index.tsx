@@ -2,12 +2,19 @@
 
 import { configuredProviders } from '@xandout/libra-harness/models';
 import {
-  SOCKETS_DIR, CONFIG_FILE,
+  SOCKETS_DIR, CONFIG_FILE, SESSIONS_DIR,
   loadConfig, saveConfig, ensureDirs, sessionKeyForCwd, buildAgent,
 } from './agent-setup.js';
 import {
   SessionSocketServer, SessionSocketClient, isSessionActive, getSocketPath, type SocketEvent,
 } from './session-socket.js';
+import { readdirSync, readFileSync, unlinkSync, existsSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+
+const LIBRA_HOME = process.env.LIBRA_HOME || join(homedir(), '.libra');
+const SHELLS_DIR = join(LIBRA_HOME, 'shells');
+
 // ── CLI ──────────────────────────────────────────────────────────────
 async function main() {
   const args = process.argv.slice(2);
@@ -30,6 +37,7 @@ async function main() {
   // ── Parse flags ──
   let watchMode = false;
   let attachMode = false;
+  let cleanMode = false;
   let thinkingLevel: string | undefined;
   let customSessionKey: string | undefined;
 
@@ -40,6 +48,8 @@ async function main() {
       watchMode = true;
     } else if (arg === '--attach' || arg === '-a') {
       attachMode = true;
+    } else if (arg === '--clean') {
+      cleanMode = true;
     } else if (arg === '--session' && args[i + 1]) {
       customSessionKey = args[++i];
     } else if ((arg === '--thinking-level' || arg === '--thinking' || arg === '--reasoning-effort') && args[i + 1]) {
@@ -59,7 +69,51 @@ async function main() {
   const cwd = process.cwd();
   const sessionKey = customSessionKey || sessionKeyForCwd(cwd);
 
+  if (cleanMode) {
+    cleanSession(sessionKey);
+    if (!prompt) {
+      console.log('Session cleaned. Run lc with a prompt to start fresh.');
+      return;
+    }
+  }
+
   await runStdout(prompt, sessionKey, thinkingLevel, { watch: watchMode, attach: attachMode });
+}
+
+// ── Clean: kill tasks and clear session ─────────────────────────────
+function cleanSession(sessionKey: string) {
+  const safeKey = sessionKey.replace(/[^a-zA-Z0-9_-]/g, '_');
+  let killed = 0;
+
+  // Kill any running task processes for this session.
+  try {
+    for (const file of readdirSync(SHELLS_DIR)) {
+      if (!file.endsWith('.json')) continue;
+      try {
+        const meta = JSON.parse(readFileSync(join(SHELLS_DIR, file), 'utf-8'));
+        if (meta.session !== sessionKey && meta.session !== safeKey) continue;
+        if (meta.pid) {
+          try {
+            process.kill(meta.pid, 0);
+            process.kill(meta.pid, 'SIGKILL');
+            killed++;
+          } catch {}
+        }
+      } catch {}
+    }
+  } catch {}
+
+  // Remove the session file so the agent starts fresh.
+  const sessionFile = join(SESSIONS_DIR, `${safeKey}.jsonl`);
+  if (existsSync(sessionFile)) {
+    rmSync(sessionFile, { force: true });
+  }
+
+  // Remove stale socket so a new session can start.
+  const socketPath = getSocketPath(SOCKETS_DIR, sessionKey);
+  try { unlinkSync(socketPath); } catch {}
+
+  console.log(`Cleaned session ${sessionKey}: ${killed} task(s) killed, session file removed.`);
 }
 
 // ── Plain text mode (no TUI) ─────────────────────────────────────────
@@ -111,6 +165,7 @@ function handleHelpCommand() {
   console.log('Usage: lc [prompt]            Run the agent or reattach to active session');
   console.log('       lc --watch             Watch active session (Ctrl+C detaches, agent continues)');
   console.log('       lc --attach [prompt]   Attach to active session (Ctrl+C halts/kills agent)');
+  console.log('       lc --clean [prompt]    Kill tasks and clear session, then optionally run');
   console.log('       lc config set <key> <value>   Set a config option');
   console.log('       lc config get <key>           Get a config option');
   console.log('       lc config path                Show config file path');
